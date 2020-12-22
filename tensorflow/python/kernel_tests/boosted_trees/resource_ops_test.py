@@ -16,6 +16,10 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+__p = print
+def _p(msg):
+  import sys
+  __p(msg, file=sys.stderr)
 
 from google.protobuf import text_format
 
@@ -46,8 +50,11 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
 
   @test_util.run_deprecated_v1
   def testCreateWithProto(self):
+    _p("testCreateWithProto 1")
     with self.cached_session():
+      _p("testCreateWithProto 2")
       ensemble_proto = boosted_trees_pb2.TreeEnsemble()
+      _p("testCreateWithProto 3")
       text_format.Merge(
           """
         trees {
@@ -149,18 +156,27 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           last_layer_node_end: 19
         }
       """, ensemble_proto)
+      _p("testCreateWithProto 4")
       ensemble = boosted_trees_ops.TreeEnsemble(
           'ensemble',
           stamp_token=7,
           serialized_proto=ensemble_proto.SerializeToString())
+      _p("testCreateWithProto 5")
       resources.initialize_resources(resources.shared_resources()).run()
+      _p("testCreateWithProto 6")
       (stamp_token, num_trees, num_finalized_trees, num_attempted_layers,
        nodes_range) = ensemble.get_states()
+      _p("testCreateWithProto 7")
       self.assertEqual(7, self.evaluate(stamp_token))
+      _p("testCreateWithProto 8")
       self.assertEqual(2, self.evaluate(num_trees))
+      _p("testCreateWithProto 9")
       self.assertEqual(1, self.evaluate(num_finalized_trees))
+      _p("testCreateWithProto 10")
       self.assertEqual(6, self.evaluate(num_attempted_layers))
+      _p("testCreateWithProto 11")
       self.assertAllEqual([16, 19], self.evaluate(nodes_range))
+      _p("testCreateWithProto 12")
 
   @test_util.run_deprecated_v1
   def testSerializeDeserialize(self):
