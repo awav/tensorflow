@@ -16,10 +16,8 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-__p = print
-def _p(msg):
-  import sys
-  __p(msg, file=sys.stderr)
+import sys
+_p = print
 
 from google.protobuf import text_format
 
