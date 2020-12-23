@@ -156,6 +156,14 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           last_layer_node_end: 19
         }
       """, ensemble_proto)
+      _p("testCreateWithProto 4", file=sys.stderr)
+      ensemble = boosted_trees_ops.TreeEnsemble(
+          'ensemble',
+          stamp_token=7,
+          serialized_proto=ensemble_proto.SerializeToString())
+      _p("testCreateWithProto 5", file=sys.stderr)
+      resources.initialize_resources(resources.shared_resources()).run()
+      _p("testCreateWithProto 6", file=sys.stderr)
 
 
 if __name__ == '__main__':
