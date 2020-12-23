@@ -50,7 +50,112 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
 
   @test_util.run_deprecated_v1
   def testCreateWithProto(self):
-    pass
+    _p("testCreateWithProto 1", file=sys.stderr)
+    with self.cached_session():
+      _p("testCreateWithProto 2", file=sys.stderr)
+      ensemble_proto = boosted_trees_pb2.TreeEnsemble()
+      _p("testCreateWithProto 3", file=sys.stderr)
+      text_format.Merge(
+          """
+        trees {
+          nodes {
+            bucketized_split {
+              feature_id: 4
+              left_id: 1
+              right_id: 2
+            }
+            metadata {
+              gain: 7.62
+            }
+          }
+          nodes {
+            bucketized_split {
+              threshold: 21
+              left_id: 3
+              right_id: 4
+            }
+            metadata {
+              gain: 1.4
+              original_leaf {
+                scalar: 7.14
+              }
+            }
+          }
+          nodes {
+            bucketized_split {
+              feature_id: 1
+              threshold: 7
+              left_id: 5
+              right_id: 6
+            }
+            metadata {
+              gain: 2.7
+              original_leaf {
+                scalar: -4.375
+              }
+            }
+          }
+          nodes {
+            leaf {
+              scalar: 6.54
+            }
+          }
+          nodes {
+            leaf {
+              scalar: 7.305
+            }
+          }
+          nodes {
+            leaf {
+              scalar: -4.525
+            }
+          }
+          nodes {
+            leaf {
+              scalar: -4.145
+            }
+          }
+        }
+        trees {
+          nodes {
+            bucketized_split {
+              feature_id: 75
+              threshold: 21
+              left_id: 1
+              right_id: 2
+            }
+            metadata {
+              gain: -1.4
+            }
+          }
+          nodes {
+            leaf {
+              scalar: -0.6
+            }
+          }
+          nodes {
+            leaf {
+              scalar: 0.165
+            }
+          }
+        }
+        tree_weights: 0.15
+        tree_weights: 1.0
+        tree_metadata {
+          num_layers_grown: 2
+          is_finalized: true
+        }
+        tree_metadata {
+          num_layers_grown: 1
+          is_finalized: false
+        }
+        growing_metadata {
+          num_trees_attempted: 2
+          num_layers_attempted: 6
+          last_layer_node_start: 16
+          last_layer_node_end: 19
+        }
+      """, ensemble_proto)
 
 
 if __name__ == '__main__':
