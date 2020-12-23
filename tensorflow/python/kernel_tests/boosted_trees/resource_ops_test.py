@@ -45,7 +45,7 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
     _p("testCreateWithProto 1", file=sys.stderr)
     with self.cached_session():
       _p("testCreateWithProto 2", file=sys.stderr)
-      ensemble_proto = boosted_trees_pb2.TreeEnsemble()
+      ensemble_proto = boosted_trees_pb2.TreeEnsemble('x')
       _p("testCreateWithProto 3", file=sys.stderr)
       text_format.Merge(
           """
