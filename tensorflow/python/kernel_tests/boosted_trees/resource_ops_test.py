@@ -38,14 +38,6 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
     with self.cached_session():
       ensemble = boosted_trees_ops.TreeEnsemble('ensemble')
       resources.initialize_resources(resources.shared_resources()).run()
-      stamp_token = ensemble.get_stamp_token()
-      self.assertEqual(0, self.evaluate(stamp_token))
-      (_, num_trees, num_finalized_trees, num_attempted_layers,
-       nodes_range) = ensemble.get_states()
-      self.assertEqual(0, self.evaluate(num_trees))
-      self.assertEqual(0, self.evaluate(num_finalized_trees))
-      self.assertEqual(0, self.evaluate(num_attempted_layers))
-      self.assertAllEqual([0, 1], self.evaluate(nodes_range))
     _p("testCreate 2", file=sys.stderr)
 
   @test_util.run_deprecated_v1
