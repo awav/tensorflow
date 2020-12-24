@@ -153,9 +153,6 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           'ensemble',
           stamp_token=7,
           serialized_proto=ensemble_proto.SerializeToString())
-      _p("testCreateWithProto 5", file=sys.stderr)
-      resources.initialize_resources(resources.shared_resources()).run()
-      _p("testCreateWithProto 6", file=sys.stderr)
 
 
 if __name__ == '__main__':
