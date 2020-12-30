@@ -156,8 +156,8 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
       _p("testCreateWithProto 5", file=sys.stderr)
       r = resources.shared_resources()
       _p("testCreateWithProto 6", file=sys.stderr)
-      #r=resources.initialize_resources(r)
-      #_p("testCreateWithProto 7", file=sys.stderr)
+      r=resources.initialize_resources(r)
+      _p("testCreateWithProto 7", file=sys.stderr)
       #r.run()
       #_p("testCreateWithProto 8", file=sys.stderr)
 
