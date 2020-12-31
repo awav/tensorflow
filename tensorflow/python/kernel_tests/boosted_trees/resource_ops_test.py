@@ -129,6 +129,22 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
             }
           }
         }
+        tree_weights: 0.15
+        tree_weights: 1.0
+        tree_metadata {
+          num_layers_grown: 2
+          is_finalized: true
+        }
+        tree_metadata {
+          num_layers_grown: 1
+          is_finalized: false
+        }
+        growing_metadata {
+          num_trees_attempted: 2
+          num_layers_attempted: 6
+          last_layer_node_start: 16
+          last_layer_node_end: 19
+        }
       """, ensemble_proto)
       ensemble = boosted_trees_ops.TreeEnsemble(
           'ensemble',
