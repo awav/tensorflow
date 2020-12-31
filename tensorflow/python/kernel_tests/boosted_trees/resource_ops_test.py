@@ -106,6 +106,29 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
             }
           }
         }
+        trees {
+          nodes {
+            bucketized_split {
+              feature_id: 75
+              threshold: 21
+              left_id: 1
+              right_id: 2
+            }
+            metadata {
+              gain: -1.4
+            }
+          }
+          nodes {
+            leaf {
+              scalar: -0.6
+            }
+          }
+          nodes {
+            leaf {
+              scalar: 0.165
+            }
+          }
+        }
       """, ensemble_proto)
       ensemble = boosted_trees_ops.TreeEnsemble(
           'ensemble',
