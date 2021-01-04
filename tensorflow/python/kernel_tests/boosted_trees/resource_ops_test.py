@@ -51,7 +51,6 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           nodes {
             bucketized_split {
               feature_id: 4
-              threshold: 21
               left_id: 1
               right_id: 2
             }
@@ -61,7 +60,6 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           }
           nodes {
             bucketized_split {
-              feature_id: 4
               threshold: 21
               left_id: 3
               right_id: 4
@@ -144,8 +142,6 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
         growing_metadata {
           num_trees_attempted: 2
           num_layers_attempted: 6
-          last_layer_node_start: 16
-          last_layer_node_end: 19
         }
       """, ensemble_proto)
       ensemble = boosted_trees_ops.TreeEnsemble(
