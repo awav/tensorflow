@@ -51,6 +51,7 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           nodes {
             bucketized_split {
               feature_id: 4
+              threshold: 21
               left_id: 1
               right_id: 2
             }
@@ -60,6 +61,7 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
           }
           nodes {
             bucketized_split {
+              feature_id: 4
               threshold: 21
               left_id: 3
               right_id: 4
