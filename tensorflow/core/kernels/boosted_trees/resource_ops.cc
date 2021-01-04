@@ -36,9 +36,12 @@ REGISTER_KERNEL_BUILDER(
 class BoostedTreesCreateEnsembleOp : public OpKernel {
  public:
   explicit BoostedTreesCreateEnsembleOp(OpKernelConstruction* context)
-      : OpKernel(context) {}
+      : OpKernel(context) {
+    std::cerr << "BoostedTreesCreateEnsembleOp::<constructor>\n";
+      }
 
   void Compute(OpKernelContext* context) override {
+    std::cerr << "BoostedTreesCreateEnsembleOp::Compute\n";
     // Get the stamp token.
     const Tensor* stamp_token_t;
     OP_REQUIRES_OK(context, context->input("stamp_token", &stamp_token_t));
