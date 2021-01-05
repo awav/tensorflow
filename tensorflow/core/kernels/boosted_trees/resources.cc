@@ -40,7 +40,7 @@ bool BoostedTreesEnsembleResource::InitFromSerialized(const string& serialized,
   std::cerr << "\t serialized=\"" << serialized << "\"\n";
   std::cerr << "\t stamp_token=\"" << stamp_token << "\"\n";
   std::cerr << "\t stamp()=\"" << stamp() << "\"\n";
-  std::cerr << "\t tree_ensemble_=\"" << tree_ensemble_.DebugString() << "\"\n";
+  std::cerr << "\t tree_ensemble_=\"" << tree_ensemble_->DebugString() << "\"\n";
   CHECK_EQ(stamp(), -1) << "Must Reset before Init.";
   std::cerr << "ParseProtoUnlimited...\n";
   if (ParseProtoUnlimited(tree_ensemble_, serialized)) {
