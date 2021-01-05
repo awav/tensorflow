@@ -33,6 +33,14 @@ class ResourceOpsTest(test_util.TensorFlowTestCase):
   """Tests resource_ops."""
 
   @test_util.run_deprecated_v1
+  def testCreate(self):
+    _p("testCreate 1", file=sys.stderr)
+    with self.cached_session():
+      ensemble = boosted_trees_ops.TreeEnsemble('ensemble')
+      resources.initialize_resources(resources.shared_resources()).run()
+    _p("testCreate 2", file=sys.stderr)
+
+  @test_util.run_deprecated_v1
   def testCreateWithProto(self):
     _p("testCreateWithProto 1", file=sys.stderr)
     with self.cached_session():
