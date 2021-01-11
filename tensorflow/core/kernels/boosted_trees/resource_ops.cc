@@ -64,7 +64,8 @@ class BoostedTreesCreateEnsembleOp : public OpKernel {
     std::cerr << "tstring: \"" << tree_ensemble_serialized_t->scalar<tstring>()().size() << "\"\n";
     std::cerr << "BoostedTreesCreateEnsembleOp::Compute 7\n";
     if (!result->InitFromSerialized(
-            tree_ensemble_serialized_t->scalar<tstring>()(), stamp_token)) {
+          std::string(tree_ensemble_serialized_t->scalar<tstring>()().data(),
+                      tree_ensemble_serialized_t->scalar<tstring>()().size()), stamp_token)) {
       std::cerr << "BoostedTreesCreateEnsembleOp::Compute 7\n";
       result->Unref();
       std::cerr << "BoostedTreesCreateEnsembleOp::Compute 8\n";
