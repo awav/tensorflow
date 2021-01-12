@@ -44,50 +44,33 @@ class BoostedTreesCreateEnsembleOp : public OpKernel {
     std::cerr << "BoostedTreesCreateEnsembleOp::Compute\n";
     // Get the stamp token.
     const Tensor* stamp_token_t;
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 1\n";
     OP_REQUIRES_OK(context, context->input("stamp_token", &stamp_token_t));
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 2\n";
     int64 stamp_token = stamp_token_t->scalar<int64>()();
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 3\n";
 
     // Get the tree ensemble proto.
     const Tensor* tree_ensemble_serialized_t;
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 4\n";
     OP_REQUIRES_OK(context, context->input("tree_ensemble_serialized",
                                            &tree_ensemble_serialized_t));
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 5\n";
     std::unique_ptr<BoostedTreesEnsembleResource> result(
         new BoostedTreesEnsembleResource());
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 6\n";
     tstring tst = tree_ensemble_serialized_t->scalar<tstring>()();
-    std::cerr << "tstring: \"" << tst << "\"\n";
-    std::cerr << "tstring: \"" << tst.type() << "\"\n";
-    std::cerr << "tstring: \"" << tst.data() << "\"\n";
-    std::cerr << "tstring: \"" << tst.size() << "\"\n";
-    std::string serialized(tst.data(), tst.size());
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 7\n";
-    if (!result->InitFromSerialized(serialized, stamp_token)) {
-      std::cerr << "BoostedTreesCreateEnsembleOp::Compute 7\n";
+    std::cerr << "BoostedTreesCreateEnsembleOp::Compute V\n";
+    if (!result->InitFromSerialized(tst, stamp_token)) {
+      std::cerr << "BoostedTreesCreateEnsembleOp::Compute ^(1)\n";
       result->Unref();
-      std::cerr << "BoostedTreesCreateEnsembleOp::Compute 8\n";
       OP_REQUIRES(
           context, false,
           errors::InvalidArgument("Unable to parse tree ensemble proto."));
-      std::cerr << "BoostedTreesCreateEnsembleOp::Compute 9\n";
     }
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 10\n";
+    std::cerr << "BoostedTreesCreateEnsembleOp::Compute ^(2)\n";
 
     // Only create one, if one does not exist already. Report status for all
     // other exceptions.
     auto status =
         CreateResource(context, HandleFromInput(context, 0), result.release());
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 11\n";
     if (status.code() != tensorflow::error::ALREADY_EXISTS) {
-      std::cerr << "BoostedTreesCreateEnsembleOp::Compute 12\n";
       OP_REQUIRES_OK(context, status);
-      std::cerr << "BoostedTreesCreateEnsembleOp::Compute 13\n";
     }
-    std::cerr << "BoostedTreesCreateEnsembleOp::Compute 14\n";
   }
 };
 
