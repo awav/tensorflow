@@ -40,11 +40,13 @@ bool BoostedTreesEnsembleResource::InitFromSerialized(const string& serialized,
   std::cerr << "Got a string of " << serialized.size() << " characters\n";
   const char* serialized_data = serialized.data();
   for (int i = 0; i < serialized.size(); i++) {
-    std::cerr << reinterpret_cast<int>(serialized_data[i]) << " ";
-    if (i % 10 == 9)
-      std::cerr << "\n";
+    fprintf(stderr, "%02x ", serialized_data[i]);
+    if (i % 16 == 15)
+      fprintf(stderr, "\n");
+    else if (i % 8 == 7)
+      fprintf(stderr, "  ");
   }
-  std::cerr << "\n";
+  fprintf(stderr, "\n");
   CHECK_EQ(stamp(), -1) << "Must Reset before Init.";
   std::cerr << "ParseProtoUnlimited...\n";
   if (ParseProtoUnlimited(tree_ensemble_, serialized)) {

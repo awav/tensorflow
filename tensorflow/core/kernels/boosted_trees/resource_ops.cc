@@ -54,6 +54,16 @@ class BoostedTreesCreateEnsembleOp : public OpKernel {
     std::unique_ptr<BoostedTreesEnsembleResource> result(
         new BoostedTreesEnsembleResource());
     tstring tst = tree_ensemble_serialized_t->scalar<tstring>()();
+    std::cerr << "Got a string of " << tst.size() << " characters, of type " << tst.type() << "\n";
+    const char* tst_data = tst.data();
+    for (int i = 0; i < tst.size(); i++) {
+      fprintf(stderr, "%02x ", tst_data[i]);
+      if (i % 16 == 15)
+        fprintf(stderr, "\n");
+      else if (i % 8 == 7)
+        fprintf(stderr, "  ");
+    }
+    fprintf(stderr, "\n");
     std::cerr << "BoostedTreesCreateEnsembleOp::Compute V\n";
     if (!result->InitFromSerialized(tst, stamp_token)) {
       std::cerr << "BoostedTreesCreateEnsembleOp::Compute ^(1)\n";
