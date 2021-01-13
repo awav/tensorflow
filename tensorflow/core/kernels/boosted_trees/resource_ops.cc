@@ -57,7 +57,7 @@ class BoostedTreesCreateEnsembleOp : public OpKernel {
     std::cerr << "Got a string of " << tst.size() << " characters, of type " << tst.type() << "\n";
     const char* tst_data = tst.data();
     for (int i = 0; i < tst.size(); i++) {
-      fprintf(stderr, "%02x ", tst_data[i]);
+      fprintf(stderr, "%02u ", tst_data[i]);
       if (i % 16 == 15)
         fprintf(stderr, "\n");
       else if (i % 8 == 7)
