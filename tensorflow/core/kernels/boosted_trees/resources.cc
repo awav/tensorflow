@@ -40,7 +40,7 @@ bool BoostedTreesEnsembleResource::InitFromSerialized(const string& serialized,
   std::cerr << "Got a string of " << serialized.size() << " characters\n";
   const char* serialized_data = serialized.data();
   for (int i = 0; i < serialized.size(); i++) {
-    fprintf(stderr, "%02u ", serialized_data[i]);
+    fprintf(stderr, "%02x ", (int)serialized_data[i]);
     if (i % 16 == 15)
       fprintf(stderr, "\n");
     else if (i % 8 == 7)
