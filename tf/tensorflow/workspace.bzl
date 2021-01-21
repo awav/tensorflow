@@ -700,7 +700,7 @@ def tf_repositories(path_prefix = "", tf_repo_name = ""):
     # exporting code to open source and on every integration.
     LLVM_COMMIT = "0eeb15741bdaa6740c3bfcbed981b9d19d5348fb"
     LLVM_BAZEL_TAG = "llvm-project-{commit}".format(commit = LLVM_COMMIT)
-    LLVM_BAZEL_SHA256 = "9eaf4b63d37e0543c8ab3286d3e6bd5132fa248a5edc1ce9f26681a756569008"
+    LLVM_BAZEL_SHA256 = "82cde055787b834ee371c465fe852f079f2877026a0165465aebc76780f453cd"
     LLVM_PROJECT_SHA256 = "8e73d287327fa5cf6cdc5c6242b8725589024c46ac0d9232aceb7dc41833e7ef"
     LLVM_BAZEL_URLS = [
         "https://storage.googleapis.com/mirror.tensorflow.org/github.com/google/llvm-bazel/archive/{tag}.tar.gz".format(tag = LLVM_BAZEL_TAG),
@@ -713,7 +713,7 @@ def tf_repositories(path_prefix = "", tf_repo_name = ""):
     tf_http_archive(
         name = "llvm-bazel",
         # TODO(mihaimaruseac): Wait until https://github.com/google/llvm-bazel/pull/130 or until Bazel 4.0 before removing the patch
-        patch_file = clean_dep("//third_party:llvm-bazel.patch"),
+        #patch_file = clean_dep("//third_party:llvm-bazel.patch"),
         sha256 = LLVM_BAZEL_SHA256,
         strip_prefix = "llvm-bazel-{tag}/llvm-bazel".format(tag = LLVM_BAZEL_TAG),
         urls = LLVM_BAZEL_URLS,
