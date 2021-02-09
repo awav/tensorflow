@@ -6,6 +6,7 @@ workspace(name = "org_tensorflow")
 # restriction that load() statements need to be at the top of .bzl files.
 # E.g. we can not retrieve a new repository with http_archive and then load()
 # a macro from that repository in the same file.
+# TODO(mihaimaruseac): Rename `tf_workspace*` to signal what they contain
 load("@//tensorflow:workspace3.bzl", "tf_workspace3")
 
 tf_workspace3()
@@ -13,6 +14,10 @@ tf_workspace3()
 load("@//tensorflow:workspace2.bzl", "tf_workspace2")
 
 tf_workspace2()
+
+load("@//tensorflow:setup_llvm.bzl", "setup_llvm")
+
+setup_llvm()
 
 load("@//tensorflow:workspace1.bzl", "tf_workspace1")
 
