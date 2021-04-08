@@ -2061,6 +2061,15 @@ cc_library(
 )
 
 cc_library(
+    name = "do_random_shit",
+    srcs = ["do_random_shit.cc"],
+    hdrs = ["do_random_shit.h"],
+    deps = [
+        ":hlo_pass",
+    ],
+)
+
+cc_library(
     name = "tree_reduction_rewriter",
     srcs = ["tree_reduction_rewriter.cc"],
     hdrs = ["tree_reduction_rewriter.h"],

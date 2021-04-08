@@ -194,6 +194,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:dynamic_index_splitter",
         "//tensorflow/compiler/xla/service:executable",
         "//tensorflow/compiler/xla/service:flatten_call_graph",
+        "//tensorflow/compiler/xla/service:do_random_shit",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_constant_folding",
         "//tensorflow/compiler/xla/service:hlo_cse",

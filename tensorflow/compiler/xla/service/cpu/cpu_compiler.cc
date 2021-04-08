@@ -126,6 +126,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/while_loop_invariant_code_motion.h"
 #include "tensorflow/compiler/xla/service/while_loop_simplifier.h"
 #include "tensorflow/compiler/xla/service/zero_sized_hlo_elimination.h"
+#include "tensorflow/compiler/xla/service/do_random_shit.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
@@ -308,6 +309,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<TriangularSolveExpander>();
   pipeline.AddPass<AllGatherDecomposer>();
   pipeline.AddPass<AllToAllDecomposer>();
+
+  // TODO: Delete this hello world pass
+  pipeline.AddPass<RandomShitPass>();
 
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
