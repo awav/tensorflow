@@ -66,23 +66,32 @@ Status FirstTryVisitor::HandleDot(HloInstruction* dot) {
 
     HloInstruction* inner;
     HloInstruction* outer;
+
     int64 inner_contr_idx;
+    int64 outer_contr_idx;
+    int64 inner_with_outer_contr_idx;
 
     if (lhs_contr_idx < rank_a) {
       // AC
       inner = a;
       outer = b;
       inner_contr_idx = lhs_contr_idx;
-      // proposed_size *= ShapeUtil::ElementsIn(a->shape());
-      // proposed_size /= a->shape().dimensions(a_contr_idx);
+      outer_contr_idx = lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
+
+      inner_with_outer_contr_idx = lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
     } else {
       // BC
       inner = b;
       outer = a;
       inner_contr_idx = lhs_contr_idx - rank_a;
-      // proposed_size *= ShapeUtil::ElementsIn(b->shape());
-      // proposed_size /= b->shape().dimensions(b_contr_idx);
+      outer_contr_idx = lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
+
+      inner_with_outer_contr_idx = lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
     }
+
+    if (inner_contr_idx < inner_with_outer_contr_idx)
+      inner_with_outer_contr_idx --;
+
     proposed_size *= ShapeUtil::ElementsIn(inner->shape());
     proposed_size /= inner->shape().dimensions(inner_contr_idx);
     proposed_size *= ShapeUtil::ElementsIn(rhs->shape());
@@ -96,21 +105,29 @@ Status FirstTryVisitor::HandleDot(HloInstruction* dot) {
       DotDimensionNumbers inner_dnums;
       inner_dnums.add_lhs_contracting_dimensions(inner_contr_idx);
       inner_dnums.add_rhs_contracting_dimensions(rhs_contr_idx);
-      for (
-        int64 batch_dim = 0;
-        batch_dim < dot->dot_dimension_numbers().lhs_batch_dimensions_size();
-        ++batch_dim
-      ) {
-        inner_dnums.add_rhs_batch_dimensions(
-            dot->dot_dimension_numbers().rhs_batch_dimensions(batch_dim));
-        inner_dnums.add_lhs_batch_dimensions(
-            dot->dot_dimension_numbers().lhs_batch_dimensions(batch_dim));
-      }
+      // for (
+      //   int64 batch_dim = 0;
+      //   batch_dim < dot->dot_dimension_numbers().lhs_batch_dimensions_size();
+      //   ++batch_dim
+      // ) {
+      //   inner_dnums.add_rhs_batch_dimensions(
+      //       dot->dot_dimension_numbers().rhs_batch_dimensions(batch_dim));
+      //   inner_dnums.add_lhs_batch_dimensions(
+      //       dot->dot_dimension_numbers().lhs_batch_dimensions(batch_dim));
+      // }
       HloInstruction* inner_dot;
       TF_ASSIGN_OR_RETURN(inner_dot, MakeDotHlo(
         inner, rhs, inner_dnums, dot->precision_config(), /*preferred_element_type=*/dot->shape().element_type()));
       
       // outer (inner C)
+      DotDimensionNumbers outer_dnums;
+      outer_dnums.add_lhs_contracting_dimensions(outer_contr_idx);
+      outer_dnums.add_rhs_contracting_dimensions(inner_with_outer_contr_idx);
+      HloInstruction* outer_dot;
+      TF_ASSIGN_OR_RETURN(outer_dot, MakeDotHlo(
+        outer, inner_dot, outer_dnums, dot->precision_config(), /*preferred_element_type=*/dot->shape().element_type()));
+
+      return ReplaceInstruction(dot, outer_dot);
     }
   }
 }
