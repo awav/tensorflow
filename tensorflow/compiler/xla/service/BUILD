@@ -2066,6 +2066,9 @@ cc_library(
     hdrs = ["do_random_shit.h"],
     deps = [
         ":hlo_pass",
+        ":pattern_matcher",
+        ":hlo_creation_utils",
+        "//tensorflow/compiler/xla:status_macros",
     ],
 )
 

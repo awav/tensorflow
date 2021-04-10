@@ -310,9 +310,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<AllGatherDecomposer>();
   pipeline.AddPass<AllToAllDecomposer>();
 
-  // TODO: Delete this hello world pass
-  pipeline.AddPass<RandomShitPass>();
-
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
   pipeline.AddPass<BatchDotSimplification>();
@@ -389,6 +386,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       },
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
+
+  // TODO: Delete this hello world pass
+  pipeline.AddPass<RandomShitPass>();
 
   // Layout assignment uses alias analysis, which requires the call graph to be
   // flattened.
