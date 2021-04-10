@@ -71,7 +71,7 @@ Status FirstTryVisitor::HandleDot(HloInstruction* dot) {
     int64 outer_contr_idx;
     int64 inner_with_outer_contr_idx;
 
-    if (lhs_contr_idx < rank_a) {
+    if (lhs_contr_idx < rank_a - 1) {
       // AC
       inner = a;
       outer = b;
@@ -83,7 +83,7 @@ Status FirstTryVisitor::HandleDot(HloInstruction* dot) {
       // BC
       inner = b;
       outer = a;
-      inner_contr_idx = lhs_contr_idx - rank_a;
+      inner_contr_idx = lhs_contr_idx - (rank_a - 1);
       outer_contr_idx = lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
 
       inner_with_outer_contr_idx = lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
@@ -98,23 +98,19 @@ Status FirstTryVisitor::HandleDot(HloInstruction* dot) {
     proposed_size /= rhs->shape().dimensions(rhs_contr_idx);
 
     printf("Current intermediate size: %d\n", current_size);
-    printf("Proposed intermediate size: %d\n", proposed_size);
+    printf("Proposed intermediate size: %d\n\n", proposed_size);
+
+    printf("lhs_contr_idx: %d\n", lhs_contr_idx);
+    printf("rhs_contr_idx: %d\n", rhs_contr_idx);
+    printf("inner_contr_idx: %d\n", inner_contr_idx);
+    printf("outer_contr_idx: %d\n", outer_contr_idx);
+    printf("inner_with_outer_contr_idx: %d\n", inner_with_outer_contr_idx);
 
     if (proposed_size < current_size) {
       // inner C
       DotDimensionNumbers inner_dnums;
       inner_dnums.add_lhs_contracting_dimensions(inner_contr_idx);
       inner_dnums.add_rhs_contracting_dimensions(rhs_contr_idx);
-      // for (
-      //   int64 batch_dim = 0;
-      //   batch_dim < dot->dot_dimension_numbers().lhs_batch_dimensions_size();
-      //   ++batch_dim
-      // ) {
-      //   inner_dnums.add_rhs_batch_dimensions(
-      //       dot->dot_dimension_numbers().rhs_batch_dimensions(batch_dim));
-      //   inner_dnums.add_lhs_batch_dimensions(
-      //       dot->dot_dimension_numbers().lhs_batch_dimensions(batch_dim));
-      // }
       HloInstruction* inner_dot;
       TF_ASSIGN_OR_RETURN(inner_dot, MakeDotHlo(
         inner, rhs, inner_dnums, dot->precision_config(), /*preferred_element_type=*/dot->shape().element_type()));
