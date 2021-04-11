@@ -111,6 +111,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/operand_upcaster.h"
 #include "tensorflow/compiler/xla/service/qr_expander.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
+#include "tensorflow/compiler/xla/service/rewriting_optimizer.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/scatter_expander.h"
@@ -385,6 +386,8 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       },
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
+
+  pipeline.AddPass<RewritingOptimizer>();
 
   // Layout assignment uses alias analysis, which requires the call graph to be
   // flattened.

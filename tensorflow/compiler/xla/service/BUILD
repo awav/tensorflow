@@ -2061,6 +2061,18 @@ cc_library(
 )
 
 cc_library(
+    name = "rewriting_optimizer",
+    srcs = ["rewriting_optimizer.cc"],
+    hdrs = ["rewriting_optimizer.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:status_macros",
+    ],
+)
+
+cc_library(
     name = "tree_reduction_rewriter",
     srcs = ["tree_reduction_rewriter.cc"],
     hdrs = ["tree_reduction_rewriter.h"],
