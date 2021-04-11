@@ -2134,6 +2134,20 @@ tf_cc_test(
     ],
 )
 
+tf_cc_test(
+    name = "rewriting_optimizer_test",
+    srcs = ["rewriting_optimizer_test.cc"],
+    deps = [
+        ":rewriting_optimizer",
+        ":hlo",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:test",
+        "//tensorflow/compiler/xla/tests:hlo_test_base",
+        "//tensorflow/compiler/xla/tests:xla_internal_test_main",  # fixdeps: keep
+    ],
+)
+
 cc_library(
     name = "logistic_expander",
     srcs = ["logistic_expander.cc"],
