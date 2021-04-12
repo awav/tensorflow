@@ -11,13 +11,13 @@ namespace xla {
 // A pass which searches equivalent rewrites to reduce memory-consuption of
 // intermediate results and reduce overall computation time.
 class RewritingOptimizer : public HloModulePass {
-  public:
-    absl::string_view name() const override { return "rewriting-optimizer"; }
-  
+ public:
+  absl::string_view name() const override { return "rewriting-optimizer"; }
+
   // Searches and applies equivalent rewrites to the graph
   StatusOr<bool> Run(HloModule* module) override;
 };
 
-} // namespace xla
+}  // namespace xla
 
-#endif // TENSORFLOW_COMPILER_XLA_SERVICE_REWRITING_OPTIMIZER_
+#endif  // TENSORFLOW_COMPILER_XLA_SERVICE_REWRITING_OPTIMIZER_

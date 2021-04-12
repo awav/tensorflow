@@ -1,9 +1,10 @@
 // License TODO ....
 
 #include "tensorflow/compiler/xla/service/rewriting_optimizer.h"
+
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
-#include "tensorflow/compiler/xla/service/pattern_matcher.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
+#include "tensorflow/compiler/xla/service/pattern_matcher.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 
 namespace xla {
@@ -15,13 +16,13 @@ namespace m = match;
 // To do the algorithm proper, we might need to do a custom
 // visitor later ...
 class RewritingOptimizerVisitor : public DfsHloRewriteVisitor {
-  public:
-    explicit RewritingOptimizerVisitor() {}
+ public:
+  explicit RewritingOptimizerVisitor() {}
 
-    Status HandleDot(HloInstruction* dot) override;
+  Status HandleDot(HloInstruction* dot) override;
 };
 
-} // namespace
+}  // namespace
 
 Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
   HloInstruction *lhs, *rhs;
@@ -33,8 +34,12 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
     int64 current_size = ShapeUtil::ElementsIn(lhs->shape());
     int64 rank_a = a->shape().rank();
 
-    int64 lhs_contr_idx = dot->dot_dimension_numbers().lhs_contracting_dimensions(0); // does this need to support multi dim?
-    int64 rhs_contr_idx = dot->dot_dimension_numbers().rhs_contracting_dimensions(0); // does this need to support multi dim?
+    int64 lhs_contr_idx =
+        dot->dot_dimension_numbers().lhs_contracting_dimensions(
+            0);
+    int64 rhs_contr_idx =
+        dot->dot_dimension_numbers().rhs_contracting_dimensions(
+            0);
 
     int64 proposed_size = 1;
 
@@ -47,22 +52,20 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
 
     if (lhs_contr_idx < rank_a - 1) {
       // AC
-      inner = a;
-      outer = b;
-      inner_contr_idx = lhs_contr_idx;
-      outer_contr_idx = lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
-      inner_with_outer_contr_idx = lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
+      return Status::OK(); // dimensions won't match (can't be handled for now)
     } else {
       // BC
       inner = b;
       outer = a;
       inner_contr_idx = lhs_contr_idx - (rank_a - 1);
-      outer_contr_idx = lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
-      inner_with_outer_contr_idx = lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
+      outer_contr_idx =
+          lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
+      inner_with_outer_contr_idx =
+          lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
     }
 
     if (inner_contr_idx < inner_with_outer_contr_idx)
-      inner_with_outer_contr_idx --;
+      inner_with_outer_contr_idx--;
 
     proposed_size *= ShapeUtil::ElementsIn(inner->shape());
     proposed_size /= inner->shape().dimensions(inner_contr_idx);
@@ -75,16 +78,20 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
       inner_dnums.add_lhs_contracting_dimensions(inner_contr_idx);
       inner_dnums.add_rhs_contracting_dimensions(rhs_contr_idx);
       HloInstruction* inner_dot;
-      TF_ASSIGN_OR_RETURN(inner_dot, MakeDotHlo(
-        inner, rhs, inner_dnums, dot->precision_config(), /*preferred_element_type=*/dot->shape().element_type()));
-      
+      TF_ASSIGN_OR_RETURN(
+          inner_dot,
+          MakeDotHlo(inner, rhs, inner_dnums, dot->precision_config(),
+                     /*preferred_element_type=*/dot->shape().element_type()));
+
       // outer (inner C)
       DotDimensionNumbers outer_dnums;
       outer_dnums.add_lhs_contracting_dimensions(outer_contr_idx);
       outer_dnums.add_rhs_contracting_dimensions(inner_with_outer_contr_idx);
       HloInstruction* outer_dot;
-      TF_ASSIGN_OR_RETURN(outer_dot, MakeDotHlo(
-        outer, inner_dot, outer_dnums, dot->precision_config(), /*preferred_element_type=*/dot->shape().element_type()));
+      TF_ASSIGN_OR_RETURN(
+          outer_dot,
+          MakeDotHlo(outer, inner_dot, outer_dnums, dot->precision_config(),
+                     /*preferred_element_type=*/dot->shape().element_type()));
 
       return ReplaceInstruction(dot, outer_dot);
     }
@@ -96,4 +103,4 @@ StatusOr<bool> RewritingOptimizer::Run(HloModule* module) {
   return visitor.RunOnModule(module);
 }
 
-} // namespace xla
+}  // namespace xla
