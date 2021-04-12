@@ -37,12 +37,22 @@ TEST_F(RewritingOptimizerTest, MatrixVectorDot) {
   Shape abc_shape = ShapeUtil::MakeShape(F32, {1000, 2}); 
   builder.AddInstruction(HloInstruction::CreateDot(abc_shape, ab, c, dnums_abc, DefaultPrecisionConfig(2)));
 
-  m->AddEntryComputation(builder.Build());
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Match(
+    computation->root_instruction(),
+    m::Dot(m::Dot(m::Op().Is(a), m::Op().Is(b)), m::Op().Is(c))
+  ));
+
   RewritingOptimizer optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  // TODO: Check result has correct shape
+
+  EXPECT_TRUE(Match(
+    computation->root_instruction(),
+    m::Dot(m::Op().Is(a), m::Dot(m::Op().Is(b), m::Op().Is(c)))
+  ));
 }
 
 } // namespace
