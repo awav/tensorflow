@@ -110,7 +110,37 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     // For the dot we identify the parameter to split and then
     // Generate the final dot operation, as well as the operand
     // vector.
-    CHECK(false);  // TODO
+    auto& dnums = inst->dot_dimension_numbers();
+    int64 dims_lhs = lhs->shape().rank() - dnums->lhs_contracting_dimensions_size();
+
+    HloInstruction *split_op, *join_op;
+    bool split_is_lhs;
+    if (split_dim < dims_lhs) {
+      // We are splitting up the lhs
+      split_is_lhs = true;
+      split_op = lhs;
+      join_op = rhs;
+    } else {
+      // We are splitting up the rhs
+      split_is_lhs = false;
+      split_dim -= dims_lhs;
+      split_op = rhs;
+      join_op = lhs;
+    }
+
+    // adjust split dim up for every contraction dimension to it's left
+    // TODO: Check if this is robust for multiple indices ...
+    for (int64 i = 0; i < dnums->lhs_contracting_dimensions_size(); i ++) {
+      if (split_dim >= dnums->lhs_contracting_dimensions(i))
+        split_dim += 1;
+    }
+
+    // generate parameters for each split
+    int64 dims_done = 0;
+    // each split should have an aeeay allocated already
+    // TODO
+
+    CHECK(false);
   } else if (MatchPointwiseUnary(inst, &operand)) {
     // For a unary operation recursively obtain a new operand and
     // clone the operation.
@@ -150,7 +180,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
         BestSplitDim(lhs, absl::MakeSpan(dnums.lhs_contracting_dimensions()));
 
     HloComputation::Builder builder("intermediate_tensor_computation_builde");
-    std::vector<std::vector<HloInstruction*>> parameters;
+    std::vector<std::vector<HloInstruction*>> parameters; // TODO: allocate a vector for each split
     // TODO: Make the split size configurable (and smarter ...)
     TF_ASSIGN_OR_RETURN(HloInstruction * comp_root,
                         BuildComputationAndParameters(lhs, split_dim, 1000,
