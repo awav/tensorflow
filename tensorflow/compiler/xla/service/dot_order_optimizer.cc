@@ -1,6 +1,6 @@
 // License TODO ....
 
-#include "tensorflow/compiler/xla/service/rewriting_optimizer.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
 
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
@@ -13,18 +13,16 @@ namespace {
 
 namespace m = match;
 
-// To do the algorithm proper, we might need to do a custom
-// visitor later ...
-class RewritingOptimizerVisitor : public DfsHloRewriteVisitor {
+class DotOrderOptimizerVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit RewritingOptimizerVisitor() {}
+  explicit DotOrderOptimizerVisitor() {}
 
   Status HandleDot(HloInstruction* dot) override;
 };
 
 }  // namespace
 
-Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
+Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
 
@@ -52,7 +50,7 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
 
     if (lhs_contr_idx < rank_a - 1) {
       // AC
-      return Status::OK(); // dimensions won't match (can't be handled for now)
+      return Status::OK(); // dimensions won't match (not handled for now; essentially would need to introduce a transpose after)
     } else {
       // BC
       inner = b;
@@ -64,7 +62,7 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
           lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
     }
 
-    if (inner_contr_idx < inner_with_outer_contr_idx)
+    if (inner_contr_idx <= inner_with_outer_contr_idx)
       inner_with_outer_contr_idx--;
 
     proposed_size *= ShapeUtil::ElementsIn(inner->shape());
@@ -96,10 +94,11 @@ Status RewritingOptimizerVisitor::HandleDot(HloInstruction* dot) {
       return ReplaceInstruction(dot, outer_dot);
     }
   }
+  // TODO(dyedgreen): Handle the other case i.e. A(BC) => (AB)C
 }
 
-StatusOr<bool> RewritingOptimizer::Run(HloModule* module) {
-  RewritingOptimizerVisitor visitor;
+StatusOr<bool> DotOrderOptimizer::Run(HloModule* module) {
+  DotOrderOptimizerVisitor visitor;
   return visitor.RunOnModule(module);
 }
 

@@ -1,6 +1,6 @@
 // License TODO ....
 
-#include "tensorflow/compiler/xla/service/rewriting_optimizer.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
 
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
@@ -13,10 +13,10 @@ namespace {
 
 namespace m = match;
 
-class RewritingOptimizerTest : public HloTestBase {};
+class DotOrderOptimizerTest : public HloTestBase {};
 
 // Test (AB)C => A(BC)
-TEST_F(RewritingOptimizerTest, MatrixVectorDotLhs) {
+TEST_F(DotOrderOptimizerTest, MatrixVectorDotLhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -48,7 +48,7 @@ TEST_F(RewritingOptimizerTest, MatrixVectorDotLhs) {
       Match(computation->root_instruction(),
             m::Dot(m::Dot(m::Op().Is(a), m::Op().Is(b)), m::Op().Is(c))));
 
-  RewritingOptimizer optim;
+  DotOrderOptimizer optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 

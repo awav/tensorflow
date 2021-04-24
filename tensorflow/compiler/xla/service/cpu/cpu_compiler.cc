@@ -111,7 +111,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/operand_upcaster.h"
 #include "tensorflow/compiler/xla/service/qr_expander.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
-#include "tensorflow/compiler/xla/service/rewriting_optimizer.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
+#include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/scatter_expander.h"
@@ -310,6 +311,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<AllGatherDecomposer>();
   pipeline.AddPass<AllToAllDecomposer>();
 
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<IntermediateTensorSplitter>();
+
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
   pipeline.AddPass<BatchDotSimplification>();
@@ -387,7 +391,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
 
-  pipeline.AddPass<RewritingOptimizer>();
+  pipeline.AddPass<DotOrderOptimizer>();
 
   // Layout assignment uses alias analysis, which requires the call graph to be
   // flattened.

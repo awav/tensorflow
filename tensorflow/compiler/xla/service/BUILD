@@ -2061,14 +2061,41 @@ cc_library(
 )
 
 cc_library(
-    name = "rewriting_optimizer",
-    srcs = ["rewriting_optimizer.cc"],
-    hdrs = ["rewriting_optimizer.h"],
+    name = "dot_order_optimizer",
+    srcs = ["dot_order_optimizer.cc"],
+    hdrs = ["dot_order_optimizer.h"],
     deps = [
         ":hlo_pass",
         ":hlo_creation_utils",
         ":pattern_matcher",
         "//tensorflow/compiler/xla:status_macros",
+    ],
+)
+
+tf_cc_test(
+    name = "dot_order_optimizer_test",
+    srcs = ["dot_order_optimizer_test.cc"],
+    deps = [
+        ":dot_order_optimizer",
+        ":hlo",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:test",
+        "//tensorflow/compiler/xla/tests:hlo_test_base",
+        "//tensorflow/compiler/xla/tests:xla_internal_test_main",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+    ],
+)
+
+cc_library(
+    name = "intermediate_tensor_splitter",
+    srcs = ["intermediate_tensor_splitter.cc"],
+    hdrs = ["intermediate_tensor_splitter.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
     ],
 )
 
@@ -2131,22 +2158,6 @@ tf_cc_test(
         "//tensorflow/core:test",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
-    ],
-)
-
-tf_cc_test(
-    name = "rewriting_optimizer_test",
-    srcs = ["rewriting_optimizer_test.cc"],
-    deps = [
-        ":rewriting_optimizer",
-        ":hlo",
-        ":hlo_creation_utils",
-        ":pattern_matcher",
-        "//tensorflow/compiler/xla:test",
-        "//tensorflow/compiler/xla/tests:hlo_test_base",
-        "//tensorflow/compiler/xla/tests:xla_internal_test_main",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:test",
     ],
 )
 
