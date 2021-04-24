@@ -30,17 +30,20 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
 
   // Matches any pointwise unary operator which has no side effects.
   bool MatchPointwiseUnary(HloInstruction* inst,
-                           HloInstruction** operand = NULL);
+                           HloInstruction** operand = nullptr);
 
   // Determine the best dimesion to split on, excluding a given one.
-  int BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
+  int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
 
   // Collect computation for the instruction we want to split
   // and split the parameters. The parameters are returned pre-
   // split such that they can be used verbatim inside a call.
-  Status BuildComputationAndParameters(
-      HloInstruction* inst, int split_dim, HloComputation::Builder& builder,
-      std::vector<std::vector<HloInstruction*>>& parameters);
+  // The returned instruction is the root instruction of the
+  // computation.
+  StatusOr<HloInstruction*> BuildComputationAndParameters(
+      HloInstruction* inst, int64 split_dim, int64 split_size,
+      HloComputation::Builder* builder,
+      std::vector<std::vector<HloInstruction*>>* parameters);
 
   Status HandleDot(HloInstruction* dot) override;
 };
@@ -82,9 +85,10 @@ bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
   }
 }
 
-int IntermediateTensorSplitterVisitor::BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded) {
+int64 IntermediateTensorSplitterVisitor::BestSplitDim(
+    HloInstruction* inst, absl::Span<const int64> excluded) {
   const Shape& shape = inst->shape();
-  int best_dim = -1, best_size = 0;
+  int64 best_dim = -1, best_size = 0;
   for (int64 i = 0; i < shape.dimensions_size(); i++) {
     if (absl::c_linear_search(excluded, i)) continue;
     if (shape.dimensions(i) > best_size) {
@@ -95,12 +99,43 @@ int IntermediateTensorSplitterVisitor::BestSplitDim(HloInstruction* inst, absl::
   return best_dim;
 }
 
-Status IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
-      HloInstruction* inst, int split_dim, HloComputation::Builder& builder,
-      std::vector<std::vector<HloInstruction*>>& parameters) {
-  // TODO
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
+    HloInstruction* inst, int64 split_dim, int64 split_size,
+    HloComputation::Builder* builder,
+    std::vector<std::vector<HloInstruction*>>* parameters) {
+  HloInstruction *operand, *lhs, *rhs;
 
-  return Status::OK();
+  if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
+    // For the dot we identify the parameter to split and then
+    // Generate the final dot operation, as well as the operand
+    // vector.
+    CHECK(false);  // TODO
+  } else if (MatchPointwiseUnary(inst, &operand)) {
+    // For a unary operation recursively obtain a new operand and
+    // clone the operation.
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_operand,
+        BuildComputationAndParameters(operand, split_dim, split_size, builder,
+                                      parameters));
+    return builder->AddInstruction(inst->CloneWithNewOperands(
+        new_operand->shape(), absl::MakeSpan(&new_operand, 1)));
+  } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
+    // For a transpose, the transpose might change which dimension is
+    // being split. So we obtain the new split dimension and then
+    // recursively a new operand to make a clone.
+    int64 operand_split_dim = inst->dimensions(split_dim);
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_operand,
+        BuildComputationAndParameters(operand, operand_split_dim, split_size,
+                                      builder, parameters));
+    return builder->AddInstruction(inst->CloneWithNewOperands(
+        new_operand->shape(), absl::MakeSpan(&new_operand, 1)));
+  } else {
+    // Invariant violation
+    // TODO: Is there a more idiomatic way to return a bad status?
+    CHECK(false);
+  }
 }
 
 Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
@@ -111,8 +146,17 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   // Check if this dot is large enough to be split
   if (OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs)) {
     LOG(INFO) << "Will attempt to split lhs";
-    int split_dim = BestSplitDim(lhs, absl::MakeSpan(dnums.lhs_contracting_dimensions()));
+    int64 split_dim =
+        BestSplitDim(lhs, absl::MakeSpan(dnums.lhs_contracting_dimensions()));
 
+    HloComputation::Builder builder("intermediate_tensor_computation_builde");
+    std::vector<std::vector<HloInstruction*>> parameters;
+    // TODO: Make the split size configurable (and smarter ...)
+    TF_ASSIGN_OR_RETURN(HloInstruction * comp_root,
+                        BuildComputationAndParameters(lhs, split_dim, 1000,
+                                                      &builder, &parameters));
+
+    // TODO !
   } else if (OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs)) {
     LOG(INFO) << "Will attempt to split rhs: TODO";
   }
