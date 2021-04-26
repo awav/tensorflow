@@ -227,7 +227,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
     int64 split_dim =
         BestSplitDim(lhs, absl::MakeSpan(dnums.lhs_contracting_dimensions()));
 
-    HloComputation::Builder builder("intermediate_tensor_computation_builde");
+    HloComputation::Builder builder("intermediate_tensor_computation");
     std::vector<std::vector<HloInstruction*>> parameters;
 
     int64 full_size = 0;
