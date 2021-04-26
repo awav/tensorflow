@@ -15,10 +15,11 @@ namespace m = match;
 
 class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   int max_intermediate_size;
+  HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterVisitor(int max_intermediate_size)
-      : max_intermediate_size(max_intermediate_size) {}
+  explicit IntermediateTensorSplitterVisitor(int max_intermediate_size, HloModule* parent_module)
+      : max_intermediate_size(max_intermediate_size), parent_module(parent_module) {}
 
   // Determine if an operand is large enough such that we are
   // interested in splitting it.
@@ -242,21 +243,27 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
     TF_ASSIGN_OR_RETURN(HloInstruction * comp_root,
                         BuildComputationAndParameters(
                             lhs, split_dim, split_size, &builder, &parameters));
-    HloComputation* comp = builder.Build(comp_root).release();
+    HloComputation* comp = parent_module->AddEmbeddedComputation(builder.Build(comp_root));
 
-    // Create vector of calls
+    // Create vector of dots/ parts
     HloComputation* parent = dot->parent();
-    std::vector<HloInstruction*> calls;
+    Shape part_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
+                                             dot->shape().dimensions());
+    part_shape.set_dimensions(split_dim, split_size);
+
+    std::vector<HloInstruction*> parts;
     for (auto operands : parameters) {
       HloInstruction* call = parent->AddInstruction(HloInstruction::CreateCall(
           comp_root->shape(), absl::MakeSpan(operands), comp));
-      calls.push_back(call);
+      std::vector<HloInstruction*> ops = {call, rhs};
+      HloInstruction* part = parent->AddInstruction(dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
+      parts.push_back(part);
     }
 
     // create concat operation
     HloInstruction* concat =
         parent->AddInstruction(HloInstruction::CreateConcatenate(
-            dot->shape(), absl::MakeSpan(calls), split_dim));
+            dot->shape(), absl::MakeSpan(parts), split_dim));
     return ReplaceInstruction(dot, concat);
   } else if (OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs)) {
     LOG(INFO) << "Will attempt to split rhs: TODO";
@@ -266,7 +273,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a good default
-  IntermediateTensorSplitterVisitor visitor(1000 * 1000);
+  IntermediateTensorSplitterVisitor visitor(1000 * 1000, module);
   return visitor.RunOnModule(module);
 }
 
