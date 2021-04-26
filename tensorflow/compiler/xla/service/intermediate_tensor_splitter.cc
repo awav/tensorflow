@@ -148,7 +148,7 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     split_shape.set_dimensions(split_dim, split_size);
 
     std::vector<int64> start, limit, stride;
-    for (int64 dim; dim < split_op->shape().dimensions_size(); dim++) {
+    for (int64 dim = 0; dim < split_op->shape().dimensions_size(); dim++) {
       start.push_back(0);
       limit.push_back(split_op->shape().dimensions(dim));
       stride.push_back(1);
@@ -160,10 +160,10 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
       split_parameter_idx = parameters->at(i).size();
       start[split_dim] = dims_done;
       limit[split_dim] = dims_done + split_size;
-      HloInstruction* slice = HloInstruction::CreateSlice(
-                                  split_shape, split_op, absl::MakeSpan(start),
-                                  absl::MakeSpan(limit), absl::MakeSpan(stride))
-                                  .release();
+      HloInstruction* slice =
+          split_op->parent()->AddInstruction(HloInstruction::CreateSlice(
+              split_shape, split_op, absl::MakeSpan(start),
+              absl::MakeSpan(limit), absl::MakeSpan(stride)));
       parameters->at(i).push_back(slice);
       // attach join parameter
       join_parameter_idx = parameters->at(i).size();
@@ -172,22 +172,20 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
 
     // build the final dot
     HloInstruction* split_param =
-        HloInstruction::CreateParameter(split_parameter_idx, split_shape,
-                                        "dot_split_tensor")
-            .release();
+        builder->AddInstruction(HloInstruction::CreateParameter(
+            split_parameter_idx, split_shape, "dot_split_tensor"));
     HloInstruction* join_param =
-        HloInstruction::CreateParameter(join_parameter_idx, join_op->shape(),
-                                        "dot_join_tensor")
-            .release();
+        builder->AddInstruction(HloInstruction::CreateParameter(
+            join_parameter_idx, join_op->shape(), "dot_join_tensor"));
 
-    std::vector<HloInstruction*> new_operands;
+    std::vector<HloInstruction*> ops;
     if (split_is_lhs) {
-      new_operands = {split_param, join_param};
+      ops = {split_param, join_param};
     } else {
-      new_operands = {join_param, split_param};
+      ops = {join_param, split_param};
     }
     return builder->AddInstruction(
-        inst->CloneWithNewOperands(dot_shape, absl::MakeSpan(new_operands)));
+        inst->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
   } else if (MatchPointwiseUnary(inst, &operand)) {
     // For a unary operation recursively obtain a new operand and
     // clone the operation.
@@ -195,8 +193,9 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
         HloInstruction * new_operand,
         BuildComputationAndParameters(operand, split_dim, split_size, builder,
                                       parameters));
-    return builder->AddInstruction(inst->CloneWithNewOperands(
-        new_operand->shape(), absl::MakeSpan(&new_operand, 1)));
+    std::vector<HloInstruction*> ops = {new_operand};
+    return builder->AddInstruction(
+        inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
   } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
     // For a transpose, the transpose might change which dimension is
     // being split. So we obtain the new split dimension and then
@@ -206,8 +205,9 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
         HloInstruction * new_operand,
         BuildComputationAndParameters(operand, operand_split_dim, split_size,
                                       builder, parameters));
-    return builder->AddInstruction(inst->CloneWithNewOperands(
-        new_operand->shape(), absl::MakeSpan(&new_operand, 1)));
+    std::vector<HloInstruction*> ops = {new_operand};
+    return builder->AddInstruction(
+        inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
   } else {
     // Invariant violation
     // TODO: Is there a more idiomatic way to return a bad status?
@@ -245,14 +245,18 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
     HloComputation* comp = builder.Build(comp_root).release();
 
     // Create vector of calls
+    HloComputation* parent = dot->parent();
     std::vector<HloInstruction*> calls;
     for (auto operands : parameters) {
-      HloInstruction* call = HloInstruction::CreateCall(comp_root->shape(), absl::MakeSpan(operands), comp).release();
+      HloInstruction* call = parent->AddInstruction(HloInstruction::CreateCall(
+          comp_root->shape(), absl::MakeSpan(operands), comp));
       calls.push_back(call);
     }
 
     // create concat operation
-    HloInstruction* concat = HloInstruction::CreateConcatenate(dot->shape(), absl::MakeSpan(calls), split_dim).release();
+    HloInstruction* concat =
+        parent->AddInstruction(HloInstruction::CreateConcatenate(
+            dot->shape(), absl::MakeSpan(calls), split_dim));
     return ReplaceInstruction(dot, concat);
   } else if (OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs)) {
     LOG(INFO) << "Will attempt to split rhs: TODO";
