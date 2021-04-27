@@ -262,8 +262,6 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   bool can_split_lhs = OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs);
   bool can_split_rhs = OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs);
   if (can_split_lhs || can_split_rhs) {
-    LOG(INFO) << "Will attempt to split dot operand"; // FIXME: Remove.
-
     bool split_is_lhs = can_split_lhs;  // TODO: Is there a reason to prefer one or the other given the choice?
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
     int64 split_dim = BestSplitDim(

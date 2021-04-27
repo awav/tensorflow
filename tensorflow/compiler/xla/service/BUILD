@@ -2100,6 +2100,22 @@ cc_library(
     ],
 )
 
+tf_cc_test(
+    name = "intermediate_tensor_splitter_test",
+    srcs = ["intermediate_tensor_splitter_test.cc"],
+    deps = [
+        ":intermediate_tensor_splitter",
+        ":hlo",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:test",
+        "//tensorflow/compiler/xla/tests:hlo_test_base",
+        "//tensorflow/compiler/xla/tests:xla_internal_test_main",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+    ],
+)
+
 cc_library(
     name = "tree_reduction_rewriter",
     srcs = ["tree_reduction_rewriter.cc"],
