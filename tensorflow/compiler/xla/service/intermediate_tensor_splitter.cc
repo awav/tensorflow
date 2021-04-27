@@ -125,13 +125,14 @@ int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
   for (int i = 0; i < 64; i++) {
     factors[i] = 0;
     while (tmp_size % primes[i] == 0) {
-      factors[i] ++;
+      factors[i]++;
       tmp_size /= primes[i];
     }
   }
 
   for (int i = 0; i < 64; i++)
-    while (split_size * rest_size > target_intermediate_size && factors[i]-- > 0)
+    while (split_size * rest_size > target_intermediate_size &&
+           factors[i]-- > 0)
       split_size /= primes[i];
 
   return split_size <= max_intermediate_size ? split_size : -1;
@@ -163,24 +164,23 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
       split_is_lhs = true;
       split_op = lhs;
       join_op = rhs;
+      // TODO: Check if this is robust for multiple indices ...
+      for (int64 i = 0; i < dnums.lhs_contracting_dimensions_size(); i++) {
+        if (split_dim >= dnums.lhs_contracting_dimensions(i)) split_dim += 1;
+      }
     } else {
       // We are splitting up the rhs
       split_is_lhs = false;
       split_dim -= dims_lhs;
       split_op = rhs;
       join_op = lhs;
-    }
-
-    // adjust split dim up for every contraction dimension to it's left
-    // TODO: Check if this is robust for multiple indices ...
-    for (int64 i = 0; i < dnums.lhs_contracting_dimensions_size(); i++) {
-      if (split_dim >= dnums.lhs_contracting_dimensions(i)) split_dim += 1;
+      // TODO: Check if this is robust for multiple indices ...
+      for (int64 i = 0; i < dnums.rhs_contracting_dimensions_size(); i++) {
+        if (split_dim >= dnums.rhs_contracting_dimensions(i)) split_dim += 1;
+      }
     }
 
     // generate parameters for each split
-    int64 dims_done = 0;
-    int64 split_parameter_idx, join_parameter_idx;
-
     Shape split_shape = ShapeUtil::MakeShape(split_op->shape().element_type(),
                                              split_op->shape().dimensions());
     split_shape.set_dimensions(split_dim, split_size);
@@ -192,7 +192,8 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
       stride.push_back(1);
     }
 
-    for (int64 i = 0; dims_done < split_op->shape().dimensions(split_dim);
+    int64 split_parameter_idx, join_parameter_idx;
+    for (int64 i = 0, dims_done = 0; i < parameters->size();
          i++, dims_done += split_size) {
       // build split parameter
       split_parameter_idx = parameters->at(i).size();
@@ -262,7 +263,8 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   bool can_split_lhs = OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs);
   bool can_split_rhs = OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs);
   if (can_split_lhs || can_split_rhs) {
-    bool split_is_lhs = can_split_lhs;  // TODO: Is there a reason to prefer one or the other given the choice?
+    bool split_is_lhs = can_split_lhs;  // TODO: Is there a reason to prefer one
+                                        // or the other given the choice?
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
     int64 split_dim = BestSplitDim(
         split_inst,
@@ -307,7 +309,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
       dot_split_dim +=
           lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
     }
-    part_shape.set_dimensions(split_dim, split_size);
+    part_shape.set_dimensions(dot_split_dim, split_size);
 
     std::vector<HloInstruction*> parts;
     for (auto operands : parameters) {
