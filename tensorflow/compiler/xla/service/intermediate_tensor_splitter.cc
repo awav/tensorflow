@@ -18,8 +18,10 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterVisitor(int max_intermediate_size, HloModule* parent_module)
-      : max_intermediate_size(max_intermediate_size), parent_module(parent_module) {}
+  explicit IntermediateTensorSplitterVisitor(int max_intermediate_size,
+                                             HloModule* parent_module)
+      : max_intermediate_size(max_intermediate_size),
+        parent_module(parent_module) {}
 
   // Determine if an operand is large enough such that we are
   // interested in splitting it.
@@ -35,6 +37,10 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
 
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
+
+  // Given a split dimension, determine the best possible split
+  // size. If no split size is possible, returns -1.
+  int64 BestSplitSize(HloInstruction* inst, int64 split_dim);
 
   // Collect computation for the instruction we want to split
   // and split the parameters. The parameters are returned pre-
@@ -60,7 +66,7 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
     HloInstruction* inst, HloInstruction** operand) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() == 1) {
-    if (operand != NULL) {
+    if (operand != nullptr) {
       *operand = inst->mutable_operand(0);
     }
     return true;
@@ -72,10 +78,9 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
 bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     HloInstruction* inst) {
   HloInstruction* next;
-
   if (Match(inst, m::Dot(m::Op(), m::Op()))) {
     // Base case: A Dot produces this large intermediate tensor
-    // TODO: Support more cases (most importantly broadcast..)
+    // TODO: Support more cases (most importantly broadcasts..)
     return true;
   } else if (MatchPointwiseUnary(inst, &next)) {
     return OperandCanBeSplit(next);
@@ -98,6 +103,12 @@ int64 IntermediateTensorSplitterVisitor::BestSplitDim(
     }
   }
   return best_dim;
+}
+
+int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
+                                                       int64 split_dim) {
+  // TODO
+  return 1000;
 }
 
 StatusOr<HloInstruction*>
@@ -222,52 +233,79 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   auto& dnums = dot->dot_dimension_numbers();
 
   // Check if this dot is large enough to be split
-  if (OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs)) {
-    LOG(INFO) << "Will attempt to split lhs";
-    int64 split_dim =
-        BestSplitDim(lhs, absl::MakeSpan(dnums.lhs_contracting_dimensions()));
+  bool can_split_lhs = OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs);
+  bool can_split_rhs = OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs);
+  if (can_split_lhs || can_split_rhs) {
+    LOG(INFO) << "Will attempt to split dot operand";
+
+    bool split_is_lhs = can_split_lhs;  // TODO: In case there is a reason to
+                                        // prefer one given the choice...
+    HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
+    int64 split_dim = BestSplitDim(
+        split_inst,
+        absl::MakeSpan(split_is_lhs ? dnums.lhs_contracting_dimensions()
+                                    : dnums.rhs_contracting_dimensions()));
 
     HloComputation::Builder builder("intermediate_tensor_computation");
     std::vector<std::vector<HloInstruction*>> parameters;
 
     int64 full_size = 0;
-    int64 split_size = 1000;
-    while (full_size < lhs->shape().dimensions(split_dim)) {
+    int64 split_size = BestSplitSize(split_inst, split_dim);
+    CHECK(split_size != -1);
+
+    while (full_size < split_inst->shape().dimensions(split_dim)) {
       parameters.push_back({});
       full_size += split_size;
     }
-    CHECK(full_size = lhs->shape().dimensions(
-              split_dim));  // TODO: Handle potential odd last split size
+    CHECK(full_size = split_inst->shape().dimensions(split_dim));
 
     // TODO: Make the split size configurable (and smarter ...)
-    TF_ASSIGN_OR_RETURN(HloInstruction * comp_root,
-                        BuildComputationAndParameters(
-                            lhs, split_dim, split_size, &builder, &parameters));
-    HloComputation* comp = parent_module->AddEmbeddedComputation(builder.Build(comp_root));
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * comp_root,
+        BuildComputationAndParameters(split_inst, split_dim, split_size,
+                                      &builder, &parameters));
+    HloComputation* comp =
+        parent_module->AddEmbeddedComputation(builder.Build(comp_root));
 
     // Create vector of dots/ parts
-    HloComputation* parent = dot->parent();
     Shape part_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
-                                             dot->shape().dimensions());
+                                            dot->shape().dimensions());
+    int64 dot_split_dim = split_dim;  // split dimension after dot occured
+    // TODO: Refactor to function
+    if (split_is_lhs) {
+      for (int64 c_dim : dnums.lhs_contracting_dimensions()) {
+        if (c_dim < dot_split_dim) dot_split_dim--;
+      }
+    } else {
+      for (int64 c_dim : dnums.rhs_contracting_dimensions()) {
+        if (c_dim < dot_split_dim) dot_split_dim--;
+      }
+      dot_split_dim +=
+          lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
+    }
     part_shape.set_dimensions(split_dim, split_size);
 
     std::vector<HloInstruction*> parts;
     for (auto operands : parameters) {
-      HloInstruction* call = parent->AddInstruction(HloInstruction::CreateCall(
-          comp_root->shape(), absl::MakeSpan(operands), comp));
-      std::vector<HloInstruction*> ops = {call, rhs};
-      HloInstruction* part = parent->AddInstruction(dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
+      HloInstruction* call =
+          dot->parent()->AddInstruction(HloInstruction::CreateCall(
+              comp_root->shape(), absl::MakeSpan(operands), comp));
+      std::vector<HloInstruction*> ops;
+      if (split_is_lhs) {
+        ops = {call, rhs};
+      } else {
+        ops = {lhs, call};
+      }
+      HloInstruction* part = dot->parent()->AddInstruction(
+          dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
       parts.push_back(part);
     }
 
     // create concat operation
     HloInstruction* concat =
-        parent->AddInstruction(HloInstruction::CreateConcatenate(
-            dot->shape(), absl::MakeSpan(parts), split_dim));
+        dot->parent()->AddInstruction(HloInstruction::CreateConcatenate(
+            dot->shape(), absl::MakeSpan(parts), dot_split_dim));
     return ReplaceInstruction(dot, concat);
-  } else if (OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs)) {
-    LOG(INFO) << "Will attempt to split rhs: TODO";
-    CHECK(false);
   }
 }
 
