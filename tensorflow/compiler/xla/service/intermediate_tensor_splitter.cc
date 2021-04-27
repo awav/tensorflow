@@ -14,13 +14,16 @@ namespace {
 namespace m = match;
 
 class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
-  int max_intermediate_size;
+  int64 max_intermediate_size;
+  int64 target_intermediate_size;
   HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterVisitor(int max_intermediate_size,
+  explicit IntermediateTensorSplitterVisitor(int64 max_intermediate_size,
+                                             int64 target_intermediate_size,
                                              HloModule* parent_module)
       : max_intermediate_size(max_intermediate_size),
+        target_intermediate_size(target_intermediate_size),
         parent_module(parent_module) {}
 
   // Determine if an operand is large enough such that we are
@@ -97,7 +100,7 @@ int64 IntermediateTensorSplitterVisitor::BestSplitDim(
   int64 best_dim = -1, best_size = 0;
   for (int64 i = 0; i < shape.dimensions_size(); i++) {
     if (absl::c_linear_search(excluded, i)) continue;
-    if (shape.dimensions(i) > best_size) {
+    if (shape.dimensions(i) > best_size && BestSplitSize(inst, i) != -1) {
       best_size = shape.dimensions(i);
       best_dim = i;
     }
@@ -105,10 +108,33 @@ int64 IntermediateTensorSplitterVisitor::BestSplitDim(
   return best_dim;
 }
 
+const int64 primes[64] = {2,   3,   5,   7,   11,  13,  17,  19,  23,  29,  31,
+                          37,  41,  43,  47,  53,  59,  61,  67,  71,  73,  79,
+                          83,  89,  97,  101, 103, 107, 109, 113, 127, 131, 137,
+                          139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
+                          197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257,
+                          263, 269, 271, 277, 281, 283, 293, 307, 311};
+
 int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
                                                        int64 split_dim) {
-  // TODO
-  return 1000;
+  int64 split_size = inst->shape().dimensions(split_dim);
+  int64 rest_size = ShapeUtil::ElementsIn(inst->shape()) / split_size;
+  int64 factors[64];
+
+  int64 tmp_size = split_size;
+  for (int i = 0; i < 64; i++) {
+    factors[i] = 0;
+    while (tmp_size % primes[i] == 0) {
+      factors[i] ++;
+      tmp_size /= primes[i];
+    }
+  }
+
+  for (int i = 0; i < 64; i++)
+    while (split_size * rest_size > target_intermediate_size && factors[i]-- > 0)
+      split_size /= primes[i];
+
+  return split_size <= max_intermediate_size ? split_size : -1;
 }
 
 StatusOr<HloInstruction*>
@@ -122,13 +148,13 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     // For the dot we identify the parameter to split and then
     // Generate the final dot operation, as well as the operand
     // vector.
-    auto& dnums = inst->dot_dimension_numbers();
-    int64 dims_lhs =
-        lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
-
     Shape dot_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                            inst->shape().dimensions());
     dot_shape.set_dimensions(split_dim, split_size);
+
+    auto& dnums = inst->dot_dimension_numbers();
+    int64 dims_lhs =
+        lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
 
     HloInstruction *split_op, *join_op;
     bool split_is_lhs;
@@ -236,17 +262,20 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   bool can_split_lhs = OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs);
   bool can_split_rhs = OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs);
   if (can_split_lhs || can_split_rhs) {
-    LOG(INFO) << "Will attempt to split dot operand";
+    LOG(INFO) << "Will attempt to split dot operand"; // FIXME: Remove.
 
-    bool split_is_lhs = can_split_lhs;  // TODO: In case there is a reason to
-                                        // prefer one given the choice...
+    bool split_is_lhs = can_split_lhs;  // TODO: Is there a reason to prefer one or the other given the choice?
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
     int64 split_dim = BestSplitDim(
         split_inst,
         absl::MakeSpan(split_is_lhs ? dnums.lhs_contracting_dimensions()
                                     : dnums.rhs_contracting_dimensions()));
+    if (split_dim == -1) {
+      // Bail, we can't split this tensor into equally sized parts.
+      return Status::OK();
+    }
 
-    HloComputation::Builder builder("intermediate_tensor_computation");
+    HloComputation::Builder builder("intermediate_split_tensor_computation");
     std::vector<std::vector<HloInstruction*>> parameters;
 
     int64 full_size = 0;
@@ -259,7 +288,6 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
     }
     CHECK(full_size = split_inst->shape().dimensions(split_dim));
 
-    // TODO: Make the split size configurable (and smarter ...)
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
         BuildComputationAndParameters(split_inst, split_dim, split_size,
@@ -267,11 +295,9 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
     HloComputation* comp =
         parent_module->AddEmbeddedComputation(builder.Build(comp_root));
 
-    // Create vector of dots/ parts
     Shape part_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
                                             dot->shape().dimensions());
     int64 dot_split_dim = split_dim;  // split dimension after dot occured
-    // TODO: Refactor to function
     if (split_is_lhs) {
       for (int64 c_dim : dnums.lhs_contracting_dimensions()) {
         if (c_dim < dot_split_dim) dot_split_dim--;
@@ -301,7 +327,6 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
       parts.push_back(part);
     }
 
-    // create concat operation
     HloInstruction* concat =
         dot->parent()->AddInstruction(HloInstruction::CreateConcatenate(
             dot->shape(), absl::MakeSpan(parts), dot_split_dim));
@@ -310,8 +335,10 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 }
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
-  // TODO: Make the size limit configurable + find a good default
-  IntermediateTensorSplitterVisitor visitor(1000 * 1000, module);
+  // TODO: Make the size limit configurable + find a better default
+  int64 max_size = 1000 * 1000;
+  int64 target_size = 1000 * 200;
+  IntermediateTensorSplitterVisitor visitor(max_size, target_size, module);
   return visitor.RunOnModule(module);
 }
 
