@@ -38,6 +38,10 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   bool MatchPointwiseUnary(HloInstruction* inst,
                            HloInstruction** operand = nullptr);
 
+  // Matches any pointwise n-ary operator.
+  bool MatchPointwiseNary(HloInstruction* inst,
+                          std::vector<HloInstruction*>* operands = nullptr);
+
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
 
@@ -78,20 +82,40 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
   }
 }
 
+bool IntermediateTensorSplitterVisitor::MatchPointwiseNary(
+    HloInstruction* inst, std::vector<HloInstruction*>* operands) {
+  if (inst->IsElementwise() && !inst->HasSideEffect() &&
+      inst->operand_count() > 0) {
+    if (operands != nullptr) {
+      for (int64 i = 0; i < inst->operand_count(); i++)
+        operands->push_back(inst->mutable_operand(i));
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
 bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     HloInstruction* inst) {
   HloInstruction* next;
+  std::vector<HloInstruction*> next_vec;
   if (Match(inst, m::Dot(m::Op(), m::Op()))) {
     // Base case: A Dot produces this large intermediate tensor
-    // TODO: Support more cases (most importantly broadcasts..)
     return true;
   } else if (Match(inst, m::Broadcast(m::Op()))) {
     // Base case: A broadcast can be split
     return true;
-  } else if (MatchPointwiseUnary(inst, &next)) {
-    return OperandCanBeSplit(next);
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
     return OperandCanBeSplit(next);
+  } else if (MatchPointwiseUnary(inst, &next)) {
+    return OperandCanBeSplit(next);
+  } else if (MatchPointwiseNary(inst, &next_vec)) {
+    for (HloInstruction* next : next_vec) {
+      // this path is not tail recursive :(
+      if (!OperandCanBeSplit(next)) return false;
+    }
+    return true;
   } else {
     return false;
   }
@@ -141,12 +165,14 @@ int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
   return split_size <= max_intermediate_size ? split_size : -1;
 }
 
+// TODO: This function want's to be split up ...
 StatusOr<HloInstruction*>
 IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     HloInstruction* inst, int64 split_dim, int64 split_size,
     HloComputation::Builder* builder,
     std::vector<std::vector<HloInstruction*>>* parameters) {
   HloInstruction *operand, *lhs, *rhs;
+  std::vector<HloInstruction*> operands;
 
   if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
     // For the dot we identify the parameter to split and then
@@ -233,17 +259,18 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     // changeing the broadcast itself, of if we have to
     // create slices of the underlying operand tensor.
 
-    bool split_on_broadcast_dim =
+    bool split_on_original_dim =
         absl::c_linear_search(inst->dimensions(), split_dim);
 
     int64 parameter_idx;
     Shape parameter_shape = ShapeUtil::MakeShape(
         operand->shape().element_type(), operand->shape().dimensions());
-    if (split_on_broadcast_dim) {
-      int64 operand_split_dim = split_dim;
-      for (int64 dim : inst->dimensions()) {
-        if (dim <= split_dim) {
-          operand_split_dim--;
+    if (split_on_original_dim) {
+      int64 operand_split_dim;
+      for (int64 i = 0; i < inst->dimensions().size(); i++) {
+        if (inst->dimensions(i) == split_dim) {
+          operand_split_dim = i;
+          break;
         }
       }
 
@@ -281,18 +308,9 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     Shape broadcast_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                                  inst->shape().dimensions());
     broadcast_shape.set_dimensions(split_dim, split_size);
-    return builder->AddInstruction(inst->CloneWithNewOperands(
-        broadcast_shape, absl::MakeSpan(&parameter, 1)));
-  } else if (MatchPointwiseUnary(inst, &operand)) {
-    // For a unary operation recursively obtain a new operand and
-    // clone the operation.
-    TF_ASSIGN_OR_RETURN(
-        HloInstruction * new_operand,
-        BuildComputationAndParameters(operand, split_dim, split_size, builder,
-                                      parameters));
-    std::vector<HloInstruction*> ops = {new_operand};
+    std::vector<HloInstruction*> params = {parameter};
     return builder->AddInstruction(
-        inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
+        inst->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
   } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
     // For a transpose, the transpose might change which dimension is
     // being split. So we obtain the new split dimension and then
@@ -305,6 +323,19 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     std::vector<HloInstruction*> ops = {new_operand};
     return builder->AddInstruction(
         inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
+  } else if (MatchPointwiseNary(inst, &operands)) {
+    // For a pointwise operation recursively obtain the new operands and
+    // clone the operation.
+    std::vector<HloInstruction*> ops;
+    for (HloInstruction* operand : operands) {
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * new_operand,
+          BuildComputationAndParameters(operand, split_dim, split_size, builder,
+                                        parameters));
+      ops.push_back(new_operand);
+    }
+    return builder->AddInstruction(
+        inst->CloneWithNewOperands(ops[0]->shape(), absl::MakeSpan(ops)));
   } else {
     // Invariant violation
     // TODO: Is there a more idiomatic way to return a bad status?
