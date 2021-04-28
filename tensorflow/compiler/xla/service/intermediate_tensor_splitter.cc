@@ -85,6 +85,9 @@ bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     // Base case: A Dot produces this large intermediate tensor
     // TODO: Support more cases (most importantly broadcasts..)
     return true;
+  } else if (Match(inst, m::Broadcast(m::Op()))) {
+    // Base case: A broadcast can be split
+    return true;
   } else if (MatchPointwiseUnary(inst, &next)) {
     return OperandCanBeSplit(next);
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
@@ -225,6 +228,61 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     }
     return builder->AddInstruction(
         inst->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
+  } else if (Match(inst, m::Broadcast(m::Op(&operand)))) {
+    // For a broadcast, we identify if we can split it by
+    // changeing the broadcast itself, of if we have to
+    // create slices of the underlying operand tensor.
+
+    bool split_on_broadcast_dim =
+        absl::c_linear_search(inst->dimensions(), split_dim);
+
+    int64 parameter_idx;
+    Shape parameter_shape = ShapeUtil::MakeShape(
+        operand->shape().element_type(), operand->shape().dimensions());
+    if (split_on_broadcast_dim) {
+      int64 operand_split_dim = split_dim;
+      for (int64 dim : inst->dimensions()) {
+        if (dim <= split_dim) {
+          operand_split_dim--;
+        }
+      }
+
+      parameter_shape.set_dimensions(operand_split_dim, split_size);
+
+      std::vector<int64> start, limit, stride;
+      for (int64 dim = 0; dim < operand->shape().dimensions_size(); dim++) {
+        start.push_back(0);
+        limit.push_back(operand->shape().dimensions(dim));
+        stride.push_back(1);
+      }
+
+      for (int64 i = 0, dims_done = 0; i < parameters->size();
+           i++, dims_done += split_size) {
+        parameter_idx = parameters->at(i).size();
+        start[split_dim] = dims_done;
+        limit[split_dim] = dims_done + split_size;
+        HloInstruction* slice =
+            operand->parent()->AddInstruction(HloInstruction::CreateSlice(
+                parameter_shape, operand, absl::MakeSpan(start),
+                absl::MakeSpan(limit), absl::MakeSpan(stride)));
+        parameters->at(i).push_back(slice);
+      }
+    } else {
+      for (int64 i = 0; i < parameters->size(); i++) {
+        parameter_idx = parameters->at(i).size();
+        parameters->at(i).push_back(operand);
+      }
+    }
+
+    HloInstruction* parameter =
+        builder->AddInstruction(HloInstruction::CreateParameter(
+            parameter_idx, parameter_shape, "broadcast"));
+
+    Shape broadcast_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                                 inst->shape().dimensions());
+    broadcast_shape.set_dimensions(split_dim, split_size);
+    return builder->AddInstruction(inst->CloneWithNewOperands(
+        broadcast_shape, absl::MakeSpan(&parameter, 1)));
   } else if (MatchPointwiseUnary(inst, &operand)) {
     // For a unary operation recursively obtain a new operand and
     // clone the operation.
@@ -348,8 +406,8 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
-  int64 max_size = 5000 * 1000;
-  int64 target_size = 5000 * 1000;
+  int64 max_size = 1000 * 1000;
+  int64 target_size = 1000 * 100;
   IntermediateTensorSplitterVisitor visitor(max_size, target_size, module);
   return visitor.RunOnModule(module);
 }

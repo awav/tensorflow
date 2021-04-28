@@ -169,44 +169,44 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
               MAX_SIZE);
 }
 
-// // Test broadcast instructions as source
-// TEST_F(IntermediateTensorSplitterTest, Broadcast) {
-//   auto m = CreateNewVerifiedModule();
-//   HloComputation::Builder builder(TestName());
+// Test broadcast instructions as source
+TEST_F(IntermediateTensorSplitterTest, Broadcast) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
 
-//   Shape param_shape = ShapeUtil::MakeShape(F32, {1});
-//   HloInstruction* p = builder.AddInstruction(
-//       HloInstruction::CreateParameter(0, param_shape, "p"));
+  Shape param_shape = ShapeUtil::MakeShape(F32, {});
+  HloInstruction* p = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, param_shape, "p"));
 
-//   Shape broadcast_shape = ShapeUtil::MakeShape(F32, {2000, 2000});
-//   std::vector<int64> dims = {0, 1};
-//   HloInstruction* broadcast =
-//       builder.AddInstruction(HloInstruction::CreateBroadcast(
-//           broadcast_shape, p, absl::MakeSpan(dims)));
+  Shape broadcast_shape = ShapeUtil::MakeShape(F32, {2000, 2000});
+  std::vector<int64> dims = {};
+  HloInstruction* broadcast =
+      builder.AddInstruction(HloInstruction::CreateBroadcast(
+          broadcast_shape, p, absl::MakeSpan(dims)));
 
-//   Shape v_shape = ShapeUtil::MakeShape(F32, {2000});
-//   HloInstruction* v =
-//       builder.AddInstruction(HloInstruction::CreateParameter(1, v_shape, "v"));
+  Shape v_shape = ShapeUtil::MakeShape(F32, {2000});
+  HloInstruction* v =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, v_shape, "v"));
 
-//   DotDimensionNumbers dnums;
-//   dnums.add_lhs_contracting_dimensions(1);
-//   dnums.add_rhs_contracting_dimensions(0);
-//   HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
-//       v_shape, broadcast, v, dnums, DefaultPrecisionConfig(2)));
+  DotDimensionNumbers dnums;
+  dnums.add_lhs_contracting_dimensions(1);
+  dnums.add_rhs_contracting_dimensions(0);
+  HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
+      v_shape, broadcast, v, dnums, DefaultPrecisionConfig(2)));
 
-//   HloComputation* computation = m->AddEntryComputation(builder.Build());
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-//   EXPECT_TRUE(Match(computation->root_instruction(),
-//                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-//   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(Match(computation->root_instruction(),
+                    m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
 
-//   IntermediateTensorSplitter optim;
-//   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
-//   EXPECT_TRUE(result);
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
 
-//   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-//               MAX_SIZE);
-// }
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
+              MAX_SIZE);
+}
 
 }  // namespace
 }  // namespace xla
