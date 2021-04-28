@@ -348,8 +348,8 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
-  int64 max_size = 1000 * 1000;
-  int64 target_size = 1000 * 200;
+  int64 max_size = 5000 * 1000;
+  int64 target_size = 5000 * 1000;
   IntermediateTensorSplitterVisitor visitor(max_size, target_size, module);
   return visitor.RunOnModule(module);
 }

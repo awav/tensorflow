@@ -311,9 +311,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<AllGatherDecomposer>();
   pipeline.AddPass<AllToAllDecomposer>();
 
-  // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<IntermediateTensorSplitter>();
-
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
   pipeline.AddPass<BatchDotSimplification>();
@@ -379,6 +376,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64) {
     return sort->operand(0)->shape().element_type() == F32;
   });
+
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<IntermediateTensorSplitter>();
+
   pipeline.AddPass<IndexedArrayAnalysisPrinterPass>();
   pipeline.AddPass<TransposeFolding>(
       [&](const HloInstruction& dot,
