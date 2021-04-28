@@ -292,8 +292,17 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
         HloInstruction * comp_root,
         BuildComputationAndParameters(split_inst, split_dim, split_size,
                                       &builder, &parameters));
-    HloComputation* comp =
-        parent_module->AddEmbeddedComputation(builder.Build(comp_root));
+
+    // Add final dot inside of the computation
+    int64 reduce_parameter_idx;
+    for (int64 i = 0; i < parameters.size(); i++) {
+      reduce_parameter_idx = parameters.at(i).size();
+      parameters.at(i).push_back(split_is_lhs ? rhs : lhs);
+    }
+    HloInstruction* reduce_param =
+        builder.AddInstruction(HloInstruction::CreateParameter(
+            reduce_parameter_idx, split_is_lhs ? rhs->shape() : lhs->shape(),
+            "reduce_tensor"));
 
     Shape part_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
                                             dot->shape().dimensions());
@@ -310,21 +319,24 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
           lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
     }
     part_shape.set_dimensions(dot_split_dim, split_size);
+    std::vector<HloInstruction*> ops;
+    if (split_is_lhs) {
+      ops = {comp_root, reduce_param};
+    } else {
+      ops = {reduce_param, comp_root};
+    }
+    HloInstruction* comp_dot = builder.AddInstruction(
+        dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
+
+    HloComputation* comp =
+        parent_module->AddEmbeddedComputation(builder.Build(comp_dot));
 
     std::vector<HloInstruction*> parts;
     for (auto operands : parameters) {
       HloInstruction* call =
           dot->parent()->AddInstruction(HloInstruction::CreateCall(
-              comp_root->shape(), absl::MakeSpan(operands), comp));
-      std::vector<HloInstruction*> ops;
-      if (split_is_lhs) {
-        ops = {call, rhs};
-      } else {
-        ops = {lhs, call};
-      }
-      HloInstruction* part = dot->parent()->AddInstruction(
-          dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
-      parts.push_back(part);
+              comp_dot->shape(), absl::MakeSpan(operands), comp));
+      parts.push_back(call);
     }
 
     HloInstruction* concat =
