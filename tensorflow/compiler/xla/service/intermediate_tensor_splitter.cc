@@ -43,6 +43,10 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   bool MatchPointwiseNary(HloInstruction* inst,
                           std::vector<HloInstruction*>* operands = nullptr);
 
+  // Matches a reduce operation where all operands have the same shape
+  // and all initilizers are scalars.
+  bool MatchSupportedReduce(HloInstruction* inst);
+
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
 
@@ -61,6 +65,8 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
       std::vector<std::vector<HloInstruction*>>* parameters);
 
   Status HandleDot(HloInstruction* dot) override;
+
+  Status HandleReduce(HloInstruction* reduce) override;
 };
 
 }  // namespace
@@ -97,6 +103,27 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseNary(
   }
 }
 
+bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
+    HloInstruction* inst) {
+  if (inst->opcode() == HloOpcode::kReduce) {
+    int64 opt_count = inst->operand_count() / 2;
+    if (opt_count < 1) return false;
+
+    for (int64 i = 1; i < opt_count; i++)
+      if (!ShapeUtil::Equal(inst->operand(0)->shape(),
+                            inst->operand(i)->shape()))
+        return false;
+
+    for (int64 i = 0; i < opt_count; i++)
+      if (!ShapeUtil::IsScalar(inst->operand(opt_count + i)->shape()))
+        return false;
+
+    return true;
+  } else {
+    return false;
+  }
+}
+
 bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     HloInstruction* inst) {
   HloInstruction* next;
@@ -106,6 +133,10 @@ bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     return true;
   } else if (Match(inst, m::Broadcast(m::Op()))) {
     // Base case: A broadcast can be split
+    return true;
+  } else if (Match(inst, m::Iota())) {
+    // Base case: An Iota can be sliced; it doesn't
+    // consume a lot of memory by itself!
     return true;
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
     return OperandCanBeSplit(next);
@@ -312,6 +343,63 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     std::vector<HloInstruction*> params = {parameter};
     return builder->AddInstruction(
         inst->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
+  } else if (Match(inst, m::Iota())) {
+    // For an iota, we simply produce smaller iota and add a
+    // constant offset to each parameter
+
+    auto* iota_inst = DynCast<HloIotaInstruction>(inst);
+    CHECK(iota_inst != nullptr);
+
+    int64 parameter_idx = 0;
+    Shape iota_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                            inst->shape().dimensions());
+    iota_shape.set_dimensions(split_dim, split_size);
+
+    if (split_dim == iota_inst->iota_dimension()) {
+      // The split is along the iota dimension, create offsets and add
+      // to a single internal iota
+      HloInstruction* offset;
+      for (int64 i = 0; i < parameters->size(); i++) {
+        parameter_idx = parameters->at(i).size();
+        offset = inst->parent()->AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int64>(i * split_size)));
+        parameters->at(i).push_back(offset);
+      }
+
+      HloInstruction* iota = builder->AddInstruction(
+          HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
+
+      HloInstruction* param =
+          builder->AddInstruction(HloInstruction::CreateParameter(
+              parameter_idx, offset->shape(), "iota_offset"));
+
+      if (!ShapeUtil::SameElementType(param->shape(), iota->shape())) {
+        Shape convert_shape = ShapeUtil::MakeShape(
+            iota->shape().element_type(), offset->shape().dimensions());
+        param = builder->AddInstruction(
+            HloInstruction::CreateConvert(convert_shape, param));
+      }
+
+      std::vector<int64> broadcast_dims = {};
+      HloInstruction* broadcast =
+          builder->AddInstruction(HloInstruction::CreateBroadcast(
+              iota_shape, param, absl::MakeSpan(broadcast_dims)));
+
+      return builder->AddInstruction(HloInstruction::CreateBinary(
+          iota_shape, HloOpcode::kAdd, iota, broadcast));
+    } else {
+      // The split is not along an iota dimension, simply
+      // create a smaller iota and add that as parameters.
+      HloInstruction* iota = inst->parent()->AddInstruction(
+          HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
+      for (std::vector<HloInstruction*>& params : *parameters) {
+        parameter_idx = params.size();
+        params.push_back(iota);
+      }
+
+      return builder->AddInstruction(
+          HloInstruction::CreateParameter(parameter_idx, iota_shape, "iota"));
+    }
   } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
     // For a transpose, the transpose might change which dimension is
     // being split. So we obtain the new split dimension and then
@@ -434,6 +522,19 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
             dot->shape(), absl::MakeSpan(parts), dot_split_dim));
     return ReplaceInstruction(dot, concat);
   }
+}
+
+Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
+  if (!MatchSupportedReduce(reduce)) return Status::OK();
+
+  // Check if we want to split
+  // Check if all inputs can be split (iota can be split!)
+  // Build splits for all inputs
+  // Add params for all inits
+  // Profit!
+
+  // TODO
+  return Status::OK();
 }
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {

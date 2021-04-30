@@ -20,9 +20,7 @@ class IntermediateTensorSplitterTest : public HloTestBase {
     return GetDebugOptionsFromFlags().xla_try_split_tensor_size();
   }
 
-  const int64 large_dim() {
-    return 2 * max_size() / 10000;
-  }
+  const int64 large_dim() { return 2 * max_size() / 10000; }
 
   const int64 max_op_size_in_graph(HloInstruction* inst) {
     int64 max_size = 0;
@@ -71,7 +69,8 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
@@ -118,7 +117,8 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
@@ -166,7 +166,8 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
@@ -205,7 +206,8 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
@@ -245,7 +247,76 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
+
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
+              max_size());
+}
+
+// Test iota with iota dimension along split
+TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongIotaDim) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+
+  Shape iota_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  Shape param_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+
+  HloInstruction* iota =
+      builder.AddInstruction(HloInstruction::CreateIota(iota_shape, 0));
+  HloInstruction* param = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, param_shape, "p"));
+
+  DotDimensionNumbers dnums;
+  dnums.add_lhs_contracting_dimensions(1);
+  dnums.add_rhs_contracting_dimensions(0);
+  HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
+      param_shape, iota, param, dnums, DefaultPrecisionConfig(2)));
+
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Match(computation->root_instruction(),
+                    m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
+
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
+              max_size());
+}
+
+// Test iota with non-iota dimension along split
+TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+
+  Shape iota_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  Shape param_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+
+  HloInstruction* iota =
+      builder.AddInstruction(HloInstruction::CreateIota(iota_shape, 1));
+  HloInstruction* param = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, param_shape, "p"));
+
+  DotDimensionNumbers dnums;
+  dnums.add_lhs_contracting_dimensions(1);
+  dnums.add_rhs_contracting_dimensions(0);
+  HloInstruction* dot = builder.AddInstruction(HloInstruction::CreateDot(
+      param_shape, iota, param, dnums, DefaultPrecisionConfig(2)));
+
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Match(computation->root_instruction(),
+                    m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
