@@ -314,7 +314,11 @@ message DebugOptions {
   // Compilation errors out if these ops are encountered.
   bool xla_gpu_deterministic_ops = 148;
 
-  // Next id: 150
+  // Try to split intermediate tensors which are larger than the
+  // provided size.
+  int32 xla_try_split_tensor_size = 150;
+
+  // Next id: 151
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

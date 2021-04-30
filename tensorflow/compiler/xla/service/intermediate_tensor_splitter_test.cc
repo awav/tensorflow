@@ -2,6 +2,7 @@
 
 #include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
 
+#include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
@@ -15,7 +16,13 @@ namespace m = match;
 
 class IntermediateTensorSplitterTest : public HloTestBase {
  protected:
-  const int64 MAX_SIZE = 1000 * 1000;  // TODO: This might change ...
+  const int64 max_size() {
+    return GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  }
+
+  const int64 large_dim() {
+    return 2 * max_size() / 10000;
+  }
 
   const int64 max_op_size_in_graph(HloInstruction* inst) {
     int64 max_size = 0;
@@ -32,9 +39,9 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
-  Shape a_shape = ShapeUtil::MakeShape(F32, {2000, 2});
-  Shape b_shape = ShapeUtil::MakeShape(F32, {1000, 2});
-  Shape v_shape = ShapeUtil::MakeShape(F32, {1000});
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* a =
       builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
   HloInstruction* b =
@@ -45,7 +52,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   DotDimensionNumbers dnums_ab;
   dnums_ab.add_lhs_contracting_dimensions(1);
   dnums_ab.add_rhs_contracting_dimensions(1);
-  Shape ab_shape = ShapeUtil::MakeShape(F32, {2000, 1000});
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
   HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
       ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
 
@@ -55,7 +62,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   DotDimensionNumbers dnums_final;
   dnums_final.add_lhs_contracting_dimensions(1);
   dnums_final.add_rhs_contracting_dimensions(0);
-  Shape final_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape final_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   builder.AddInstruction(HloInstruction::CreateDot(
       final_shape, exp_ab, v, dnums_final, DefaultPrecisionConfig(2)));
 
@@ -64,14 +71,14 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              MAX_SIZE);
+              max_size());
 }
 
 // Test the most basic rhs case: exp(AB^T)v
@@ -79,9 +86,9 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
-  Shape a_shape = ShapeUtil::MakeShape(F32, {2000, 2});
-  Shape b_shape = ShapeUtil::MakeShape(F32, {1000, 2});
-  Shape v_shape = ShapeUtil::MakeShape(F32, {1000});
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* a =
       builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
   HloInstruction* b =
@@ -92,7 +99,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   DotDimensionNumbers dnums_ab;
   dnums_ab.add_lhs_contracting_dimensions(1);
   dnums_ab.add_rhs_contracting_dimensions(1);
-  Shape ab_shape = ShapeUtil::MakeShape(F32, {2000, 1000});
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
   HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
       ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
 
@@ -102,7 +109,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   DotDimensionNumbers dnums_final;
   dnums_final.add_lhs_contracting_dimensions(0);
   dnums_final.add_rhs_contracting_dimensions(1);
-  Shape final_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape final_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   builder.AddInstruction(HloInstruction::CreateDot(
       final_shape, v, exp_ab, dnums_final, DefaultPrecisionConfig(2)));
 
@@ -111,14 +118,14 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              MAX_SIZE);
+              max_size());
 }
 
 // Test the case where the to split dimension lies on the
@@ -127,9 +134,9 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
-  Shape a_shape = ShapeUtil::MakeShape(F32, {2000, 2});
-  Shape b_shape = ShapeUtil::MakeShape(F32, {1000, 2});
-  Shape v_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* a =
       builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
   HloInstruction* b =
@@ -140,7 +147,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   DotDimensionNumbers dnums_ab;
   dnums_ab.add_lhs_contracting_dimensions(1);
   dnums_ab.add_rhs_contracting_dimensions(1);
-  Shape ab_shape = ShapeUtil::MakeShape(F32, {2000, 1000});
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
   HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
       ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
 
@@ -150,7 +157,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   DotDimensionNumbers dnums_final;
   dnums_final.add_lhs_contracting_dimensions(0);
   dnums_final.add_rhs_contracting_dimensions(0);
-  Shape final_shape = ShapeUtil::MakeShape(F32, {1000});
+  Shape final_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   builder.AddInstruction(HloInstruction::CreateDot(
       final_shape, exp_ab, v, dnums_final, DefaultPrecisionConfig(2)));
 
@@ -159,14 +166,14 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              MAX_SIZE);
+              max_size());
 }
 
 // Test broadcast instructions as source
@@ -178,13 +185,13 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
   HloInstruction* p = builder.AddInstruction(
       HloInstruction::CreateParameter(0, param_shape, "p"));
 
-  Shape broadcast_shape = ShapeUtil::MakeShape(F32, {2000, 2000});
+  Shape broadcast_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
   std::vector<int64> dims = {};
   HloInstruction* broadcast =
       builder.AddInstruction(HloInstruction::CreateBroadcast(
           broadcast_shape, p, absl::MakeSpan(dims)));
 
-  Shape v_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* v =
       builder.AddInstruction(HloInstruction::CreateParameter(1, v_shape, "v"));
 
@@ -198,14 +205,14 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              MAX_SIZE);
+              max_size());
 }
 
 // Test broadcast instructions as source when split dim
@@ -214,17 +221,17 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
-  Shape param_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape param_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* p = builder.AddInstruction(
       HloInstruction::CreateParameter(0, param_shape, "p"));
 
-  Shape broadcast_shape = ShapeUtil::MakeShape(F32, {2000, 2000});
+  Shape broadcast_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
   std::vector<int64> dims = {0};
   HloInstruction* broadcast =
       builder.AddInstruction(HloInstruction::CreateBroadcast(
           broadcast_shape, p, absl::MakeSpan(dims)));
 
-  Shape v_shape = ShapeUtil::MakeShape(F32, {2000});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
   HloInstruction* v =
       builder.AddInstruction(HloInstruction::CreateParameter(1, v_shape, "v"));
 
@@ -238,14 +245,14 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > MAX_SIZE);
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) > max_size());
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
   EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              MAX_SIZE);
+              max_size());
 }
 
 }  // namespace

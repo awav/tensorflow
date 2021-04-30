@@ -2,6 +2,7 @@
 #include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
 
 #include "absl/algorithm/container.h"
+#include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
@@ -437,9 +438,8 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
-  int64 max_size = 10000 * 10000;
-  int64 target_size = 10000 * 10000;
-  IntermediateTensorSplitterVisitor visitor(max_size, target_size, module);
+  int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  IntermediateTensorSplitterVisitor visitor(split_size, split_size, module);
   return visitor.RunOnModule(module);
 }
 

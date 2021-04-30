@@ -76,6 +76,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_cpu_enable_xprof_traceme(false);
   opts.set_xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found(false);
   opts.set_xla_multiheap_size_constraint_per_heap(-1);
+  opts.set_xla_try_split_tensor_size(
+      100000000);  // TODO: Find out a good default
   opts.set_xla_detailed_logging(true);
   return opts;
 }
@@ -615,6 +617,11 @@ static void AllocateFlags() {
       bool_setter_for(&DebugOptions::set_xla_gpu_deterministic_ops),
       flag_values->xla_gpu_deterministic_ops(),
       "Guarantees run-to-run determinism on GPU."));
+  flag_objects->push_back(tensorflow::Flag(
+      "xla_try_split_tensor_size",
+      int32_setter_for(&DebugOptions::set_xla_try_split_tensor_size),
+      flag_values->xla_try_split_tensor_size(),
+      "Try to split intermediate tensors which are larger than the set size."));
 
   ParseFlagsFromEnvAndDieIfUnknown("XLA_FLAGS", *flag_objects);
 }
