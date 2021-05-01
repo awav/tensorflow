@@ -561,10 +561,19 @@ Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
     operands.push_back(split_op);
   }
 
+  int64 parameter_start_idx;
+  for (std::vector<HloInstruction*>& params : parameters) {
+    for (int64 i = 0; i < op_count; i++) {
+      if (i == 0) parameter_start_idx = params.size();
+      params.push_back(reduce->mutable_operand(i + op_count));
+    }
+  }
+
   for (int64 i = 0; i < op_count; i++) {
-    // TODO: Should this use a parameter?
+    const Shape& param_shape = reduce->operand(i + op_count)->shape();
     HloInstruction* init_op =
-        builder.AddInstruction(reduce->operand(i + op_count)->Clone());
+        builder.AddInstruction(HloInstruction::CreateParameter(
+            parameter_start_idx + i, param_shape, "init_op_param"));
     operands.push_back(init_op);
   }
 

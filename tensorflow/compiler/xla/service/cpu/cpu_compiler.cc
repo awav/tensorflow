@@ -301,6 +301,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   pipeline.AddPass<DynamicIndexSplitter>();
 
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<IntermediateTensorSplitter>();
+
   pipeline.AddPass<ConditionalToSelect>();
   pipeline.AddPass<MapInliner>();
 
@@ -376,9 +379,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64) {
     return sort->operand(0)->shape().element_type() == F32;
   });
-
-  // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<IntermediateTensorSplitter>();
 
   pipeline.AddPass<IndexedArrayAnalysisPrinterPass>();
   pipeline.AddPass<TransposeFolding>(
