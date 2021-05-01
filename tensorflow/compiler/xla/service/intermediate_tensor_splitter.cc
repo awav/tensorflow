@@ -453,7 +453,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
       return Status::OK();
     }
 
-    HloComputation::Builder builder("intermediate_split_tensor_computation");
+    HloComputation::Builder builder("intermediate_tensor_splitter_dot ");
     std::vector<std::vector<HloInstruction*>> parameters;
 
     int64 full_size = 0;
@@ -527,14 +527,104 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
 Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
   if (!MatchSupportedReduce(reduce)) return Status::OK();
 
-  // Check if we want to split
-  // Check if all inputs can be split (iota can be split!)
-  // Build splits for all inputs
-  // Add params for all inits
-  // Profit!
+  // MatchSupportedReduce enforces that all inputs are of the
+  // same shape, and that there is at least one operand!
+  if (!OperandShouldBeSplit(reduce->mutable_operand(0))) return Status::OK();
 
-  // TODO
-  return Status::OK();
+  // MatchSupportedReduce enforces that all initializers are
+  // scalars, so we only need to split the operands to the
+  // reduce itself.
+  int64 op_count = reduce->operand_count() / 2;
+  for (int64 i = 0; i < op_count; i++)
+    if (!OperandCanBeSplit(reduce->mutable_operand(i))) return Status::OK();
+
+  int64 split_dim = BestSplitDim(reduce->mutable_operand(0),
+                                 absl::MakeSpan(reduce->dimensions()));
+  int64 split_size = BestSplitSize(reduce->mutable_operand(0), split_dim);
+
+  HloComputation::Builder builder("intermediate_tensor_splitter_reduce");
+  std::vector<std::vector<HloInstruction*>> parameters;
+  for (int64 i = 0;
+       i <
+       reduce->mutable_operand(0)->shape().dimensions(split_dim) / split_size;
+       i++) {
+    parameters.push_back({});
+  }
+
+  std::vector<HloInstruction*> operands;
+
+  for (int64 i = 0; i < op_count; i++) {
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * split_op,
+        BuildComputationAndParameters(reduce->mutable_operand(i), split_dim,
+                                      split_size, &builder, &parameters));
+    operands.push_back(split_op);
+  }
+
+  for (int64 i = 0; i < op_count; i++) {
+    // TODO: Should this use a parameter?
+    HloInstruction* init_op =
+        builder.AddInstruction(reduce->operand(i + op_count)->Clone());
+    operands.push_back(init_op);
+  }
+
+  // Since initializers are scalars and operands are
+  // not, this means the computation already supports
+  // broadcasting (i.e. has only pointwise operands with
+  // no set shape). We can just copy it directly!
+
+  // TODO: I believe that this is true, but should double
+  //       check...
+
+  if (op_count == 1) {
+    // No tuple needed, we have only one output.
+    Shape new_reduce_shape = ShapeUtil::MakeShape(
+        reduce->shape().element_type(), reduce->shape().dimensions());
+    new_reduce_shape.set_dimensions(split_dim, split_size);
+    HloInstruction* new_reduce = builder.AddInstruction(
+        reduce->CloneWithNewOperands(new_reduce_shape, operands));
+    HloComputation* comp =
+        parent_module->AddEmbeddedComputation(builder.Build(new_reduce));
+
+    std::vector<HloInstruction*> parts;
+    for (auto operands : parameters) {
+      HloInstruction* call =
+          reduce->parent()->AddInstruction(HloInstruction::CreateCall(
+              new_reduce_shape, absl::MakeSpan(operands), comp));
+      parts.push_back(call);
+    }
+
+    int64 reduce_split_dim = split_dim;  // split dim after reduce
+    for (int64 r_dim : reduce->dimensions())
+      if (r_dim < split_dim) reduce_split_dim--;
+
+    HloInstruction* concat =
+        reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
+            reduce->shape(), absl::MakeSpan(parts), reduce_split_dim));
+    return ReplaceInstruction(reduce, concat);
+  } else {
+    // The output will be a tuple, we need to generate
+    // concaenates for each output and update the
+    // reduce shape for each output.
+
+    // TODO
+    CHECK(false);
+  }
+
+  // Copy the reduce into the computation
+
+  // Generate the calls
+
+  // If op_count > 1
+  // Concatenate along all generated tuples
+  // Generate a single result tuple
+
+  // Else if op_count = 1
+  // Concatenate
+
+  // Check if all inputs can be split (iota can be split!)
+  // Check if the call needs to have it's sizes adjusted! -> can adjust? =>
+  // adjust! Build splits for all inputs Add params for all inits Profit!
 }
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {

@@ -326,5 +326,46 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
               max_size());
 }
 
+// Test single argument reduce (e.g. max)
+TEST_F(IntermediateTensorSplitterTest, SingleOperandReduce) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+  HloComputation::Builder max_builder(TestName() + ".max");
+
+  Shape empty_shape = ShapeUtil::MakeShape(F32, {});
+  HloInstruction* x = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, empty_shape, "x"));
+  HloInstruction* y = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(1, empty_shape, "y"));
+  max_builder.AddInstruction(
+      HloInstruction::CreateBinary(empty_shape, HloOpcode::kMaximum, x, y));
+  HloComputation* max = m->AddEmbeddedComputation(max_builder.Build());
+
+  Shape big_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  HloInstruction* a =
+      builder.AddInstruction(HloInstruction::CreateIota(big_shape, 0));
+
+  HloInstruction* init = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0.0)));
+
+  Shape small_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+  builder.AddInstruction(
+      HloInstruction::CreateReduce(small_shape, a, init, {1}, max));
+
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Match(computation->root_instruction(),
+                    m::Reduce(m::Op().Is(a), m::Op().Is(init))));
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
+              max_size());
+
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
+              max_size());
+}
+
 }  // namespace
 }  // namespace xla
