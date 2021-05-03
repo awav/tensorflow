@@ -111,7 +111,7 @@ bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
 
     for (int64 i = 1; i < opt_count; i++)
       if (!ShapeUtil::EqualIgnoringElementType(inst->operand(0)->shape(),
-                            inst->operand(i)->shape()))
+                                               inst->operand(i)->shape()))
         return false;
 
     for (int64 i = 0; i < opt_count; i++)
