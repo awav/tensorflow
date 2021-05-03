@@ -174,6 +174,9 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
+    // TODO(dyedgreen): Figure out what the best place for this pass is ...
+    pipeline.AddPass<IntermediateTensorSplitter>();
+
     pipeline.AddPass<GpuScatterExpander>();
     // TODO(phawkins): replace QR decompositions with calls to cuSOLVER.
     pipeline.AddPass<QrExpander>();
@@ -257,9 +260,6 @@ Status GpuCompiler::OptimizeHloModule(
       pass.AddPass<HloConstantFolding>();
       pass.AddPass<ConditionalSimplifier>();
     }
-
-    // TODO(dyedgreen): Figure out what the best place for this pass is ...
-    pipeline.AddPass<IntermediateTensorSplitter>();
 
     pipeline.AddPass<TransposeFolding>(
         [](const HloInstruction& dot,

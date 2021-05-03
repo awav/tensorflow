@@ -110,7 +110,7 @@ bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
     if (opt_count < 1) return false;
 
     for (int64 i = 1; i < opt_count; i++)
-      if (!ShapeUtil::Equal(inst->operand(0)->shape(),
+      if (!ShapeUtil::EqualIgnoringElementType(inst->operand(0)->shape(),
                             inst->operand(i)->shape()))
         return false;
 
@@ -585,55 +585,69 @@ Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
   // TODO: I believe that this is true, but should double
   //       check...
 
-  if (op_count == 1) {
-    // No tuple needed, we have only one output.
-    Shape new_reduce_shape = ShapeUtil::MakeShape(
-        reduce->shape().element_type(), reduce->shape().dimensions());
-    new_reduce_shape.set_dimensions(split_dim, split_size);
-    HloInstruction* new_reduce = builder.AddInstruction(
-        reduce->CloneWithNewOperands(new_reduce_shape, operands));
-    HloComputation* comp =
-        parent_module->AddEmbeddedComputation(builder.Build(new_reduce));
+  int64 reduce_split_dim = split_dim;  // split dim after reduce
+  for (int64 r_dim : reduce->dimensions())
+    if (r_dim < split_dim) reduce_split_dim--;
 
-    std::vector<HloInstruction*> parts;
-    for (auto operands : parameters) {
-      HloInstruction* call =
-          reduce->parent()->AddInstruction(HloInstruction::CreateCall(
-              new_reduce_shape, absl::MakeSpan(operands), comp));
-      parts.push_back(call);
+  Shape new_reduce_shape;
+  if (reduce->shape().IsTuple()) {
+    new_reduce_shape = ShapeUtil::MakeTupleShape({});
+    for (int64 i = 0; i < ShapeUtil::TupleElementCount(reduce->shape()); i++) {
+      const Shape& old_shape =
+          ShapeUtil::GetTupleElementShape(reduce->shape(), i);
+      Shape new_shape = ShapeUtil::MakeShape(old_shape.element_type(),
+                                             old_shape.dimensions());
+      new_shape.set_dimensions(reduce_split_dim, split_size);
+      ShapeUtil::AppendShapeToTuple(new_shape, &new_reduce_shape);
     }
-
-    int64 reduce_split_dim = split_dim;  // split dim after reduce
-    for (int64 r_dim : reduce->dimensions())
-      if (r_dim < split_dim) reduce_split_dim--;
-
-    HloInstruction* concat =
-        reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
-            reduce->shape(), absl::MakeSpan(parts), reduce_split_dim));
-    return ReplaceInstruction(reduce, concat);
   } else {
-    // The output will be a tuple, we need to generate
-    // concaenates for each output and update the
-    // reduce shape for each output.
-
-    // TODO
-    CHECK(false);
+    new_reduce_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
+                                            reduce->shape().dimensions());
+    new_reduce_shape.set_dimensions(reduce_split_dim, split_size);
   }
 
-  // Copy the reduce into the computation
+  HloInstruction* new_reduce = builder.AddInstruction(
+      reduce->CloneWithNewOperands(new_reduce_shape, operands));
+  HloComputation* comp =
+      parent_module->AddEmbeddedComputation(builder.Build(new_reduce));
 
-  // Generate the calls
+  std::vector<HloInstruction*> calls;
+  for (auto operands : parameters) {
+    HloInstruction* call =
+        reduce->parent()->AddInstruction(HloInstruction::CreateCall(
+            new_reduce_shape, absl::MakeSpan(operands), comp));
+    calls.push_back(call);
+  }
 
-  // If op_count > 1
-  // Concatenate along all generated tuples
-  // Generate a single result tuple
+  if (new_reduce_shape.IsTuple()) {
+    // The output will be a tuple, we need to generate
+    // concats for each output and update the
+    // reduce shape for each output.
+    std::vector<HloInstruction*> concats;
+    for (int64 i = 0; i < ShapeUtil::TupleElementCount(new_reduce_shape); i++) {
+      std::vector<HloInstruction*> items;
+      for (HloInstruction* call : calls) {
+        items.push_back(reduce->parent()->AddInstruction(
+            HloInstruction::CreateGetTupleElement(
+                ShapeUtil::GetTupleElementShape(new_reduce_shape, i), call,
+                i)));
+      }
+      concats.push_back(
+          reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
+              ShapeUtil::GetTupleElementShape(reduce->shape(), i),
+              absl::MakeSpan(items), reduce_split_dim)));
+    }
 
-  // Else if op_count = 1
-  // Concatenate
-
-  // Check if all inputs can be split (iota can be split!)
-  // Check if the call needs to have it's sizes adjusted! -> can adjust? =>
-  // adjust! Build splits for all inputs Add params for all inits Profit!
+    HloInstruction* tuple = reduce->parent()->AddInstruction(
+        HloInstruction::CreateTuple(absl::MakeSpan(concats)));
+    return ReplaceInstruction(reduce, tuple);
+  } else {
+    // Only have a single output, no tuple access is needed
+    HloInstruction* concat =
+        reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
+            reduce->shape(), absl::MakeSpan(calls), reduce_split_dim));
+    return ReplaceInstruction(reduce, concat);
+  }
 }
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
