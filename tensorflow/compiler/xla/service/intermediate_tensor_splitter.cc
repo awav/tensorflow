@@ -423,8 +423,10 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
                                         parameters));
       ops.push_back(new_operand);
     }
+    Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(), inst->shape().dimensions());
+    new_shape.set_dimensions(split_dim, split_size);
     return builder->AddInstruction(
-        inst->CloneWithNewOperands(ops[0]->shape(), absl::MakeSpan(ops)));
+        inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
   } else {
     // Invariant violation
     // TODO: Is there a more idiomatic way to return a bad status?
