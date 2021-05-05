@@ -60,6 +60,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 #include "tensorflow/compiler/xla/service/batch_dot_simplification.h"
 #include "tensorflow/compiler/xla/service/batchnorm_expander.h"
+#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/call_inliner.h"
 #include "tensorflow/compiler/xla/service/cholesky_expander.h"
@@ -302,6 +303,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<DynamicIndexSplitter>();
 
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<IntermediateTensorSplitter>();
 
   pipeline.AddPass<ConditionalToSelect>();

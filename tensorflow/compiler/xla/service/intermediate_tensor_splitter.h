@@ -13,7 +13,6 @@ class IntermediateTensorSplitter : public HloModulePass {
  public:
   absl::string_view name() const override { return "split-intermediate-tensors"; }
 
-  // Searches for newsted dots and reorders them
   StatusOr<bool> Run(HloModule* module) override;
 };
 
