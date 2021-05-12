@@ -50,7 +50,6 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
     c = rhs;
 
     int64 rank_a = a->shape().rank();
-
     int64 contr_ab_c =
         dot->dot_dimension_numbers().lhs_contracting_dimensions(0);
 
@@ -68,24 +67,33 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
           (rank_a - 1);
       if (contr_b_c >= contr_b_a) contr_b_c += 1;
 
-      DotDimensionNumbers inner_dnums;
-      inner_dnums.add_lhs_contracting_dimensions(contr_b_c);
-      inner_dnums.add_rhs_contracting_dimensions(contr_c_b);
-      TF_ASSIGN_OR_RETURN(
-          HloInstruction * inner,
-          MakeDotHlo(b, c, inner_dnums, dot->precision_config(), dot->shape().element_type()));
+      int64 current_size = ShapeUtil::ElementsIn(lhs->shape());
+      int64 proposed_size =
+          ShapeUtil::ElementsIn(b->shape()) / b->shape().dimensions(contr_b_c) *
+          ShapeUtil::ElementsIn(c->shape()) / c->shape().dimensions(contr_c_b);
 
-      int64 contr_bc_a = contr_b_a < contr_b_c ? contr_b_a : contr_b_a - 1;
-      int64 contr_a_bc = contr_a_b;
+      if (current_size > proposed_size) {
+        DotDimensionNumbers inner_dnums;
+        inner_dnums.add_lhs_contracting_dimensions(contr_b_c);
+        inner_dnums.add_rhs_contracting_dimensions(contr_c_b);
+        TF_ASSIGN_OR_RETURN(
+            HloInstruction * inner,
+            MakeDotHlo(b, c, inner_dnums, dot->precision_config(),
+                       dot->shape().element_type()));
 
-      DotDimensionNumbers outer_dnums;
-      outer_dnums.add_lhs_contracting_dimensions(contr_a_bc);
-      outer_dnums.add_rhs_contracting_dimensions(contr_bc_a);
-      TF_ASSIGN_OR_RETURN(
-          HloInstruction * outer,
-          MakeDotHlo(a, inner, outer_dnums, dot->precision_config(), dot->shape().element_type()));
+        int64 contr_bc_a = contr_b_a < contr_b_c ? contr_b_a : contr_b_a - 1;
+        int64 contr_a_bc = contr_a_b;
 
-      return ReplaceInstruction(dot, outer);
+        DotDimensionNumbers outer_dnums;
+        outer_dnums.add_lhs_contracting_dimensions(contr_a_bc);
+        outer_dnums.add_rhs_contracting_dimensions(contr_bc_a);
+        TF_ASSIGN_OR_RETURN(
+            HloInstruction * outer,
+            MakeDotHlo(a, inner, outer_dnums, dot->precision_config(),
+                       dot->shape().element_type()));
+
+        return ReplaceInstruction(dot, outer);
+      }
     }
   }
   // TODO(dyedgreen): Handle the other case i.e. A(BC) => (AB)C
