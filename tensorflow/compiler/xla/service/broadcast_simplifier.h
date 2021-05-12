@@ -8,8 +8,9 @@
 
 namespace xla {
 
-// A pass which removes unnecessary broadcasts. Mainly meant to
-// aide passes like intermediate_tensor_splitter.
+// A pass which removes unnecessary broadcasts, transposes, and
+// reshapes. Mainly used to simplify matching in passes
+// like intermediate_tensor_splitter.
 class BroadcastSimplifier : public HloModulePass {
  public:
   absl::string_view name() const override { return "split-intermediate-tensors"; }
