@@ -42,6 +42,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/all_reduce_combiner.h"
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 #include "tensorflow/compiler/xla/service/batchnorm_expander.h"
+#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/call_inliner.h"
 #include "tensorflow/compiler/xla/service/comparison_expander.h"
@@ -49,6 +50,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/conditional_simplifier.h"
 #include "tensorflow/compiler/xla/service/convolution_4d_expander.h"
 #include "tensorflow/compiler/xla/service/dot_decomposer.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
 #include "tensorflow/compiler/xla/service/dump.h"
 #include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
 #include "tensorflow/compiler/xla/service/dynamic_padder.h"
@@ -174,8 +176,11 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
-    // TODO(dyedgreen): Figure out what the best place for this pass is ...
+    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<IntermediateTensorSplitter>();
+    // splitter can cut out large chunks of the graph
+    pipeline.AddPass<HloDCE>();
 
     pipeline.AddPass<GpuScatterExpander>();
     // TODO(phawkins): replace QR decompositions with calls to cuSOLVER.

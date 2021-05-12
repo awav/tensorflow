@@ -304,7 +304,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<IntermediateTensorSplitter>();
+  pipeline.AddPass<HloDCE>(); // splitter can cut out large chunks of the graph
 
   pipeline.AddPass<ConditionalToSelect>();
   pipeline.AddPass<MapInliner>();
@@ -393,8 +395,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       },
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
-
-  pipeline.AddPass<DotOrderOptimizer>();
 
   // Layout assignment uses alias analysis, which requires the call graph to be
   // flattened.
