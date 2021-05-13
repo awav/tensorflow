@@ -36,6 +36,7 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
     /*
       We want to rewrite (AB)C -> A(BC)
 
+      [ LHS                   ][ RHS  ]
          A         | B         | C
       -------------+-----------+-------
       1) 0 ab    n | 0 ba bc m | 0 cb l
@@ -43,7 +44,7 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
       3) 0 ab ac n | 0 ba    m | 0 ca l
       4) 0 ac ab n | 0 ba    m | 0 ca l
 
-      ==> can distinquish cases 1/2 vs 3/4 as abc < rank(a) - 1 VS >= rank(a)-1
+      ==> can distinquish cases 1/2 vs 3/4 as ab_c < rank(a) - 1 VS >= rank(a)-1
       ==> case 3, 4 will change overall index order if flipped, so would
           require an additional transpose; skip them for now
     */
@@ -96,7 +97,75 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
       }
     }
   }
-  // TODO(dyedgreen): Handle the other case i.e. A(BC) => (AB)C
+
+  // A (B C) => (A B) C if intermediate result is smaller
+  if (Match(rhs, m::Dot(m::Op(&b), m::Op(&c)))) {
+    /*
+      We want to rewrite A(BC) -> (AB)C
+
+      [ LHS    ][ RHS                 ]
+         A      | B         | C
+      ----------+-----------+----------
+      1) 0 ab n | 0 ba bc m | 0 cb    l
+      2) 0 ab n | 0 bc ba m | 0 cb    l
+      3) 0 ac n | 0 bc    m | 0 ca cb l
+      4) 0 ac n | 0 bc    m | 0 cb ca l
+
+      1) bc_a = ba < rank(b) - 1
+      2) bc_a = ba - 1 < rank(b) - 1
+
+      ==> can distinquish cases 1/2 vs 3/4 as bc_a < rank(b) - 1 VS >= rank(b)-1
+      ==> case 3, 4 will change overall index order if flipped, so would
+          require an additional transpose; skip them for now
+    */
+    a = lhs;
+
+    int64 rank_b = b->shape().rank();
+    int64 contr_bc_a =
+        dot->dot_dimension_numbers().rhs_contracting_dimensions(0);
+
+    if (contr_bc_a < rank_b - 1) {
+      // Case 1 or 2, three indices are stright forward
+      int64 contr_b_c =
+          rhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
+      int64 contr_c_b =
+          rhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
+      int64 contr_a_b =
+          dot->dot_dimension_numbers().lhs_contracting_dimensions(0);
+      // If the ba index falls onto or grater than bc, increase it
+      int64 contr_b_a =
+          dot->dot_dimension_numbers().rhs_contracting_dimensions(0);
+      if (contr_b_a >= contr_b_c) contr_b_a += 1;
+
+      int64 current_size = ShapeUtil::ElementsIn(rhs->shape());
+      int64 proposed_size =
+          ShapeUtil::ElementsIn(a->shape()) / a->shape().dimensions(contr_a_b) *
+          ShapeUtil::ElementsIn(b->shape()) / b->shape().dimensions(contr_b_a);
+
+      if (current_size > proposed_size) {
+        DotDimensionNumbers inner_dnums;
+        inner_dnums.add_lhs_contracting_dimensions(contr_a_b);
+        inner_dnums.add_rhs_contracting_dimensions(contr_b_a);
+        TF_ASSIGN_OR_RETURN(
+            HloInstruction * inner,
+            MakeDotHlo(a, b, inner_dnums, dot->precision_config(),
+                       dot->shape().element_type()));
+
+        int64 contr_ab_c = contr_b_c < contr_b_a ? contr_b_c : contr_b_c - 1;
+        int64 contr_c_ab = contr_c_b;
+
+        DotDimensionNumbers outer_dnums;
+        outer_dnums.add_lhs_contracting_dimensions(contr_ab_c);
+        outer_dnums.add_rhs_contracting_dimensions(contr_c_ab);
+        TF_ASSIGN_OR_RETURN(
+            HloInstruction * outer,
+            MakeDotHlo(inner, c, outer_dnums, dot->precision_config(),
+                       dot->shape().element_type()));
+
+        return ReplaceInstruction(dot, outer);
+      }
+    }
+  }
 }
 
 StatusOr<bool> DotOrderOptimizer::Run(HloModule* module) {
