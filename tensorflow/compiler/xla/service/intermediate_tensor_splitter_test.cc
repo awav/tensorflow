@@ -424,8 +424,8 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 }
 )";
 
-  string module_with_big_dims =
-      replace_all_in_string(module_str, "2000", std::to_string(large_dim() / 3));
+  string module_with_big_dims = replace_all_in_string(
+      module_str, "2000", std::to_string(large_dim() / 3));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));

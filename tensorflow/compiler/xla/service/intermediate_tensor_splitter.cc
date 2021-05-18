@@ -33,19 +33,20 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
 
   // Determine if an operand can be split by traversing it's
   // inputs until a splittable node is found.
-  bool OperandCanBeSplit(HloInstruction* inst);
+  bool OperandCanBeSplit(HloInstruction* inst,
+                         std::vector<HloInstruction*>* split_leafs = nullptr);
 
   // Matches any pointwise unary operator which has no side effects.
-  bool MatchPointwiseUnary(HloInstruction* inst,
-                           HloInstruction** operand = nullptr);
+  static bool MatchPointwiseUnary(HloInstruction* inst,
+                                  HloInstruction** operand = nullptr);
 
   // Matches any pointwise n-ary operator.
-  bool MatchPointwiseNary(HloInstruction* inst,
-                          std::vector<HloInstruction*>* operands = nullptr);
+  static bool MatchPointwiseNary(
+      HloInstruction* inst, std::vector<HloInstruction*>* operands = nullptr);
 
   // Matches a reduce operation where all operands have the same shape
   // and all initilizers are scalars.
-  bool MatchSupportedReduce(HloInstruction* inst);
+  static bool MatchSupportedReduce(HloInstruction* inst);
 
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
@@ -54,19 +55,46 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   // size. If no split size is possible, returns -1.
   int64 BestSplitSize(HloInstruction* inst, int64 split_dim);
 
+  Status HandleDot(HloInstruction* dot) override;
+
+  Status HandleReduce(HloInstruction* reduce) override;
+
   // Collect computation for the instruction we want to split
   // and split the parameters. The parameters are returned pre-
   // split such that they can be used verbatim inside a call.
   // The returned instruction is the root instruction of the
   // computation.
-  StatusOr<HloInstruction*> BuildComputationAndParameters(
-      HloInstruction* inst, int64 split_dim, int64 split_size,
-      HloComputation::Builder* builder,
-      std::vector<std::vector<HloInstruction*>>* parameters);
+  class Splitter {
+    std::vector<std::vector<HloInstruction*>> parameters_;
+    HloComputation::Builder& builder_;
+    absl::Span<HloInstruction*> leafs_;
 
-  Status HandleDot(HloInstruction* dot) override;
+   public:
+    explicit Splitter(HloComputation::Builder& builder,
+                      absl::Span<HloInstruction*> leafs, int64 split_count)
+        : builder_(builder), leafs_(leafs) {
+      for (int64 i = 0; i < split_count; i++) {
+        parameters_.push_back({});
+      }
+    }
 
-  Status HandleReduce(HloInstruction* reduce) override;
+    StatusOr<HloInstruction*> SplitInstruction(HloInstruction* inst,
+                                               int64 split_dim,
+                                               int64 split_size);
+
+    StatusOr<HloInstruction*> SplitLeaf(HloInstruction* leaf, int64 split_dim,
+                                        int64 split_size);
+
+    int64 parameters_size() { return parameters_.size(); }
+
+    std::vector<HloInstruction*>& parameters(int64 idx) {
+      return parameters_.at(idx);
+    }
+
+    std::vector<std::vector<HloInstruction*>>& parameters() {
+      return parameters_;
+    }
+  };
 };
 
 }  // namespace
@@ -125,27 +153,31 @@ bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
 }
 
 bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
-    HloInstruction* inst) {
+    HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
   HloInstruction* next;
   std::vector<HloInstruction*> next_vec;
   if (Match(inst, m::Dot(m::Op(), m::Op()))) {
     // Base case: A Dot produces this large intermediate tensor
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
     return true;
   } else if (Match(inst, m::Broadcast(m::Op()))) {
     // Base case: A broadcast can be split
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
     return true;
   } else if (Match(inst, m::Iota())) {
-    // Base case: An Iota can be sliced; it doesn't
-    // consume a lot of memory by itself!
+    // Base case: An Iota can be split!
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
     return true;
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
-    return OperandCanBeSplit(next);
+    return OperandCanBeSplit(next, split_leafs);
   } else if (MatchPointwiseUnary(inst, &next)) {
-    return OperandCanBeSplit(next);
+    // This is a special case seperate from nary,
+    // since we can make it tail recursive :)
+    return OperandCanBeSplit(next, split_leafs);
   } else if (MatchPointwiseNary(inst, &next_vec)) {
     for (HloInstruction* next : next_vec) {
       // this path is not tail recursive :(
-      if (!OperandCanBeSplit(next)) return false;
+      if (!OperandCanBeSplit(next, split_leafs)) return false;
     }
     return true;
   } else {
@@ -199,10 +231,8 @@ int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
 
 // TODO: This function want's to be split up ...
 StatusOr<HloInstruction*>
-IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
-    HloInstruction* inst, int64 split_dim, int64 split_size,
-    HloComputation::Builder* builder,
-    std::vector<std::vector<HloInstruction*>>* parameters) {
+IntermediateTensorSplitterVisitor::Splitter::SplitInstruction(
+    HloInstruction* inst, int64 split_dim, int64 split_size) {
   HloInstruction *operand, *lhs, *rhs;
   std::vector<HloInstruction*> operands;
 
@@ -254,28 +284,28 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     }
 
     int64 split_parameter_idx, join_parameter_idx;
-    for (int64 i = 0, dims_done = 0; i < parameters->size();
+    for (int64 i = 0, dims_done = 0; i < parameters_.size();
          i++, dims_done += split_size) {
       // build split parameter
-      split_parameter_idx = parameters->at(i).size();
+      split_parameter_idx = parameters_.at(i).size();
       start[split_dim] = dims_done;
       limit[split_dim] = dims_done + split_size;
       HloInstruction* slice =
           split_op->parent()->AddInstruction(HloInstruction::CreateSlice(
               split_shape, split_op, absl::MakeSpan(start),
               absl::MakeSpan(limit), absl::MakeSpan(stride)));
-      parameters->at(i).push_back(slice);
+      parameters_.at(i).push_back(slice);
       // attach join parameter
-      join_parameter_idx = parameters->at(i).size();
-      parameters->at(i).push_back(join_op);
+      join_parameter_idx = parameters_.at(i).size();
+      parameters_.at(i).push_back(join_op);
     }
 
     // build the final dot
     HloInstruction* split_param =
-        builder->AddInstruction(HloInstruction::CreateParameter(
+        builder_.AddInstruction(HloInstruction::CreateParameter(
             split_parameter_idx, split_shape, "dot_split_tensor"));
     HloInstruction* join_param =
-        builder->AddInstruction(HloInstruction::CreateParameter(
+        builder_.AddInstruction(HloInstruction::CreateParameter(
             join_parameter_idx, join_op->shape(), "dot_join_tensor"));
 
     std::vector<HloInstruction*> ops;
@@ -284,7 +314,7 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     } else {
       ops = {join_param, split_param};
     }
-    return builder->AddInstruction(
+    return builder_.AddInstruction(
         inst->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
   } else if (Match(inst, m::Broadcast(m::Op(&operand)))) {
     // For a broadcast, we identify if we can split it by
@@ -315,33 +345,33 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
         stride.push_back(1);
       }
 
-      for (int64 i = 0, dims_done = 0; i < parameters->size();
+      for (int64 i = 0, dims_done = 0; i < parameters_.size();
            i++, dims_done += split_size) {
-        parameter_idx = parameters->at(i).size();
+        parameter_idx = parameters_.at(i).size();
         start[split_dim] = dims_done;
         limit[split_dim] = dims_done + split_size;
         HloInstruction* slice =
             operand->parent()->AddInstruction(HloInstruction::CreateSlice(
                 parameter_shape, operand, absl::MakeSpan(start),
                 absl::MakeSpan(limit), absl::MakeSpan(stride)));
-        parameters->at(i).push_back(slice);
+        parameters_.at(i).push_back(slice);
       }
     } else {
-      for (int64 i = 0; i < parameters->size(); i++) {
-        parameter_idx = parameters->at(i).size();
-        parameters->at(i).push_back(operand);
+      for (int64 i = 0; i < parameters_.size(); i++) {
+        parameter_idx = parameters_.at(i).size();
+        parameters_.at(i).push_back(operand);
       }
     }
 
     HloInstruction* parameter =
-        builder->AddInstruction(HloInstruction::CreateParameter(
+        builder_.AddInstruction(HloInstruction::CreateParameter(
             parameter_idx, parameter_shape, "broadcast"));
 
     Shape broadcast_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                                  inst->shape().dimensions());
     broadcast_shape.set_dimensions(split_dim, split_size);
     std::vector<HloInstruction*> params = {parameter};
-    return builder->AddInstruction(
+    return builder_.AddInstruction(
         inst->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
   } else if (Match(inst, m::Iota())) {
     // For an iota, we simply produce smaller iota and add a
@@ -359,45 +389,45 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
       // The split is along the iota dimension, create offsets and add
       // to a single internal iota
       HloInstruction* offset;
-      for (int64 i = 0; i < parameters->size(); i++) {
-        parameter_idx = parameters->at(i).size();
+      for (int64 i = 0; i < parameters_.size(); i++) {
+        parameter_idx = parameters_.at(i).size();
         offset = inst->parent()->AddInstruction(HloInstruction::CreateConstant(
             LiteralUtil::CreateR0<int64>(i * split_size)));
-        parameters->at(i).push_back(offset);
+        parameters_.at(i).push_back(offset);
       }
 
-      HloInstruction* iota = builder->AddInstruction(
+      HloInstruction* iota = builder_.AddInstruction(
           HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
 
       HloInstruction* param =
-          builder->AddInstruction(HloInstruction::CreateParameter(
+          builder_.AddInstruction(HloInstruction::CreateParameter(
               parameter_idx, offset->shape(), "iota_offset"));
 
       if (!ShapeUtil::SameElementType(param->shape(), iota->shape())) {
         Shape convert_shape = ShapeUtil::MakeShape(
             iota->shape().element_type(), offset->shape().dimensions());
-        param = builder->AddInstruction(
+        param = builder_.AddInstruction(
             HloInstruction::CreateConvert(convert_shape, param));
       }
 
       std::vector<int64> broadcast_dims = {};
       HloInstruction* broadcast =
-          builder->AddInstruction(HloInstruction::CreateBroadcast(
+          builder_.AddInstruction(HloInstruction::CreateBroadcast(
               iota_shape, param, absl::MakeSpan(broadcast_dims)));
 
-      return builder->AddInstruction(HloInstruction::CreateBinary(
+      return builder_.AddInstruction(HloInstruction::CreateBinary(
           iota_shape, HloOpcode::kAdd, iota, broadcast));
     } else {
       // The split is not along an iota dimension, simply
       // create a smaller iota and add that as parameters.
       HloInstruction* iota = inst->parent()->AddInstruction(
           HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
-      for (std::vector<HloInstruction*>& params : *parameters) {
+      for (std::vector<HloInstruction*>& params : parameters()) {
         parameter_idx = params.size();
         params.push_back(iota);
       }
 
-      return builder->AddInstruction(
+      return builder_.AddInstruction(
           HloInstruction::CreateParameter(parameter_idx, iota_shape, "iota"));
     }
   } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
@@ -407,25 +437,23 @@ IntermediateTensorSplitterVisitor::BuildComputationAndParameters(
     int64 operand_split_dim = inst->dimensions(split_dim);
     TF_ASSIGN_OR_RETURN(
         HloInstruction * new_operand,
-        BuildComputationAndParameters(operand, operand_split_dim, split_size,
-                                      builder, parameters));
+        SplitInstruction(operand, operand_split_dim, split_size));
     std::vector<HloInstruction*> ops = {new_operand};
-    return builder->AddInstruction(
+    return builder_.AddInstruction(
         inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
   } else if (MatchPointwiseNary(inst, &operands)) {
     // For a pointwise operation recursively obtain the new operands and
     // clone the operation.
     std::vector<HloInstruction*> ops;
     for (HloInstruction* operand : operands) {
-      TF_ASSIGN_OR_RETURN(
-          HloInstruction * new_operand,
-          BuildComputationAndParameters(operand, split_dim, split_size, builder,
-                                        parameters));
+      TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
+                          SplitInstruction(operand, split_dim, split_size));
       ops.push_back(new_operand);
     }
-    Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(), inst->shape().dimensions());
+    Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                           inst->shape().dimensions());
     new_shape.set_dimensions(split_dim, split_size);
-    return builder->AddInstruction(
+    return builder_.AddInstruction(
         inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
   } else {
     // Invariant violation
@@ -439,12 +467,23 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
   auto& dnums = dot->dot_dimension_numbers();
 
-  // Check if this dot is large enough to be split
-  bool can_split_lhs = OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs);
-  bool can_split_rhs = OperandShouldBeSplit(rhs) && OperandCanBeSplit(rhs);
-  if (can_split_lhs || can_split_rhs) {
-    bool split_is_lhs = can_split_lhs;  // TODO: Is there a reason to prefer one
-                                        // or the other given the choice?
+  // TODO: Handle the case where both operands can be
+  //       split in a good way.
+
+  bool can_split = false;
+  bool split_is_lhs;
+  std::vector<HloInstruction*> split_leafs;
+
+  if (OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs, &split_leafs)) {
+    can_split = true;
+    split_is_lhs = true;
+  } else if (OperandShouldBeSplit(rhs) &&
+             OperandCanBeSplit(rhs, &split_leafs)) {
+    can_split = true;
+    split_is_lhs = false;
+  }
+
+  if (can_split) {
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
     int64 split_dim = BestSplitDim(
         split_inst,
@@ -455,29 +494,24 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
       return Status::OK();
     }
 
-    HloComputation::Builder builder("intermediate_tensor_splitter_dot ");
-    std::vector<std::vector<HloInstruction*>> parameters;
-
-    int64 full_size = 0;
     int64 split_size = BestSplitSize(split_inst, split_dim);
+    int64 split_count = split_inst->shape().dimensions(split_dim) / split_size;
     CHECK(split_size != -1);
+    CHECK(split_count * split_size ==
+          split_inst->shape().dimensions(split_dim));
 
-    while (full_size < split_inst->shape().dimensions(split_dim)) {
-      parameters.push_back({});
-      full_size += split_size;
-    }
-    CHECK(full_size = split_inst->shape().dimensions(split_dim));
+    HloComputation::Builder builder("intermediate_tensor_splitter_dot");
+    Splitter splitter(builder, absl::MakeSpan(split_leafs), split_count);
 
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
-        BuildComputationAndParameters(split_inst, split_dim, split_size,
-                                      &builder, &parameters));
+        splitter.SplitInstruction(split_inst, split_dim, split_size));
 
     // Add final dot inside of the computation
     int64 reduce_parameter_idx;
-    for (int64 i = 0; i < parameters.size(); i++) {
-      reduce_parameter_idx = parameters.at(i).size();
-      parameters.at(i).push_back(split_is_lhs ? rhs : lhs);
+    for (int64 i = 0; i < splitter.parameters_size(); i++) {
+      reduce_parameter_idx = splitter.parameters(i).size();
+      splitter.parameters(i).push_back(split_is_lhs ? rhs : lhs);
     }
     HloInstruction* reduce_param =
         builder.AddInstruction(HloInstruction::CreateParameter(
@@ -512,7 +546,7 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
         parent_module->AddEmbeddedComputation(builder.Build(comp_dot));
 
     std::vector<HloInstruction*> parts;
-    for (auto operands : parameters) {
+    for (auto operands : splitter.parameters()) {
       HloInstruction* call =
           dot->parent()->AddInstruction(HloInstruction::CreateCall(
               comp_dot->shape(), absl::MakeSpan(operands), comp));
@@ -537,40 +571,44 @@ Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
   // scalars, so we only need to split the operands to the
   // reduce itself.
   int64 op_count = reduce->operand_count() / 2;
+  std::vector<HloInstruction*> split_leafs;
   for (int64 i = 0; i < op_count; i++)
-    if (!OperandCanBeSplit(reduce->mutable_operand(i))) return Status::OK();
+    if (!OperandCanBeSplit(reduce->mutable_operand(i), &split_leafs))
+      return Status::OK();
 
   int64 split_dim = BestSplitDim(reduce->mutable_operand(0),
                                  absl::MakeSpan(reduce->dimensions()));
-  int64 split_size = BestSplitSize(reduce->mutable_operand(0), split_dim);
-
-  HloComputation::Builder builder("intermediate_tensor_splitter_reduce");
-  std::vector<std::vector<HloInstruction*>> parameters;
-  for (int64 i = 0;
-       i <
-       reduce->mutable_operand(0)->shape().dimensions(split_dim) / split_size;
-       i++) {
-    parameters.push_back({});
+  if (split_dim == -1) {
+    // Bail, we can't split this tensor into equally sized parts.
+    return Status::OK();
   }
 
-  std::vector<HloInstruction*> operands;
+  int64 split_size = BestSplitSize(reduce->mutable_operand(0), split_dim);
+  int64 split_count =
+      reduce->mutable_operand(0)->shape().dimensions(split_dim) / split_size;
+  CHECK(split_size != -1);
+  CHECK(split_count * split_size ==
+        reduce->mutable_operand(0)->shape().dimensions(split_dim));
 
+  HloComputation::Builder builder("intermediate_tensor_splitter_reduce");
+  Splitter splitter(builder, absl::MakeSpan(split_leafs), split_count);
+
+  std::vector<HloInstruction*> operands;
   for (int64 i = 0; i < op_count; i++) {
-    TF_ASSIGN_OR_RETURN(
-        HloInstruction * split_op,
-        BuildComputationAndParameters(reduce->mutable_operand(i), split_dim,
-                                      split_size, &builder, &parameters));
+    TF_ASSIGN_OR_RETURN(HloInstruction * split_op,
+                        splitter.SplitInstruction(reduce->mutable_operand(i),
+                                                  split_dim, split_size));
     operands.push_back(split_op);
   }
 
+  // Add init parameters to computation
   int64 parameter_start_idx;
-  for (std::vector<HloInstruction*>& params : parameters) {
+  for (std::vector<HloInstruction*>& params : splitter.parameters()) {
     for (int64 i = 0; i < op_count; i++) {
       if (i == 0) parameter_start_idx = params.size();
       params.push_back(reduce->mutable_operand(i + op_count));
     }
   }
-
   for (int64 i = 0; i < op_count; i++) {
     const Shape& param_shape = reduce->operand(i + op_count)->shape();
     HloInstruction* init_op =
@@ -614,7 +652,7 @@ Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
       parent_module->AddEmbeddedComputation(builder.Build(new_reduce));
 
   std::vector<HloInstruction*> calls;
-  for (auto operands : parameters) {
+  for (auto operands : splitter.parameters()) {
     HloInstruction* call =
         reduce->parent()->AddInstruction(HloInstruction::CreateCall(
             new_reduce_shape, absl::MakeSpan(operands), comp));
