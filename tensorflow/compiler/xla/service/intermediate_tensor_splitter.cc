@@ -82,8 +82,15 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
                                                int64 split_dim,
                                                int64 split_size);
 
-    StatusOr<HloInstruction*> SplitLeaf(HloInstruction* leaf, int64 split_dim,
-                                        int64 split_size);
+    StatusOr<HloInstruction*> SplitLeafDot(HloInstruction* dot, int64 split_dim,
+                                           int64 split_size);
+
+    StatusOr<HloInstruction*> SplitLeafBroadcast(HloInstruction* broadcast,
+                                                 int64 split_dim,
+                                                 int64 split_size);
+
+    StatusOr<HloInstruction*> SplitLeafIota(HloInstruction* iota,
+                                            int64 split_dim, int64 split_size);
 
     int64 parameters_size() { return parameters_.size(); }
 
@@ -102,6 +109,39 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
 bool IntermediateTensorSplitterVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
   return ShapeUtil::ElementsIn(inst->shape()) > max_intermediate_size;
+}
+
+bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
+    HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
+  HloInstruction* next;
+  std::vector<HloInstruction*> next_vec;
+  if (Match(inst, m::Dot(m::Op(), m::Op()))) {
+    // Base case: A Dot produces this large intermediate tensor
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
+    return true;
+  } else if (Match(inst, m::Broadcast(m::Op()))) {
+    // Base case: A broadcast can be split
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
+    return true;
+  } else if (Match(inst, m::Iota())) {
+    // Base case: An Iota can be split!
+    if (split_leafs != nullptr) split_leafs->push_back(inst);
+    return true;
+  } else if (Match(inst, m::Transpose(m::Op(&next)))) {
+    return OperandCanBeSplit(next, split_leafs);
+  } else if (MatchPointwiseUnary(inst, &next)) {
+    // This is a special case seperate from nary,
+    // since we can make it tail recursive :)
+    return OperandCanBeSplit(next, split_leafs);
+  } else if (MatchPointwiseNary(inst, &next_vec)) {
+    for (HloInstruction* next : next_vec) {
+      // this path is not tail recursive :(
+      if (!OperandCanBeSplit(next, split_leafs)) return false;
+    }
+    return true;
+  } else {
+    return false;
+  }
 }
 
 bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
@@ -152,39 +192,6 @@ bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
   }
 }
 
-bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
-    HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
-  HloInstruction* next;
-  std::vector<HloInstruction*> next_vec;
-  if (Match(inst, m::Dot(m::Op(), m::Op()))) {
-    // Base case: A Dot produces this large intermediate tensor
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
-    return true;
-  } else if (Match(inst, m::Broadcast(m::Op()))) {
-    // Base case: A broadcast can be split
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
-    return true;
-  } else if (Match(inst, m::Iota())) {
-    // Base case: An Iota can be split!
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
-    return true;
-  } else if (Match(inst, m::Transpose(m::Op(&next)))) {
-    return OperandCanBeSplit(next, split_leafs);
-  } else if (MatchPointwiseUnary(inst, &next)) {
-    // This is a special case seperate from nary,
-    // since we can make it tail recursive :)
-    return OperandCanBeSplit(next, split_leafs);
-  } else if (MatchPointwiseNary(inst, &next_vec)) {
-    for (HloInstruction* next : next_vec) {
-      // this path is not tail recursive :(
-      if (!OperandCanBeSplit(next, split_leafs)) return false;
-    }
-    return true;
-  } else {
-    return false;
-  }
-}
-
 int64 IntermediateTensorSplitterVisitor::BestSplitDim(
     HloInstruction* inst, absl::Span<const int64> excluded) {
   const Shape& shape = inst->shape();
@@ -229,236 +236,268 @@ int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
   return split_size <= max_intermediate_size ? split_size : -1;
 }
 
-// TODO: This function want's to be split up ...
 StatusOr<HloInstruction*>
 IntermediateTensorSplitterVisitor::Splitter::SplitInstruction(
     HloInstruction* inst, int64 split_dim, int64 split_size) {
-  HloInstruction *operand, *lhs, *rhs;
-  std::vector<HloInstruction*> operands;
+  if (absl::c_linear_search(leafs_, inst)) {
+    if (Match(inst, m::Dot())) {
+      return SplitLeafDot(inst, split_dim, split_size);
+    } else if (Match(inst, m::Broadcast())) {
+      return SplitLeafBroadcast(inst, split_dim, split_size);
+    } else if (Match(inst, m::Iota())) {
+      return SplitLeafIota(inst, split_dim, split_size);
+    }
+  } else {
+    HloInstruction* operand;
+    std::vector<HloInstruction*> operands;
 
-  if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
-    // For the dot we identify the parameter to split and then
-    // Generate the final dot operation, as well as the operand
-    // vector.
-    Shape dot_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
-                                           inst->shape().dimensions());
-    dot_shape.set_dimensions(split_dim, split_size);
-
-    auto& dnums = inst->dot_dimension_numbers();
-    int64 dims_lhs =
-        lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
-
-    HloInstruction *split_op, *join_op;
-    bool split_is_lhs;
-    if (split_dim < dims_lhs) {
-      // We are splitting up the lhs
-      split_is_lhs = true;
-      split_op = lhs;
-      join_op = rhs;
-      // TODO: Check if this is robust for multiple indices ...
-      for (int64 i = 0; i < dnums.lhs_contracting_dimensions_size(); i++) {
-        if (split_dim >= dnums.lhs_contracting_dimensions(i)) split_dim += 1;
+    if (Match(inst, m::Transpose(m::Op(&operand)))) {
+      // For a transpose, the transpose might change which dimension is
+      // being split. So we obtain the new split dimension and then
+      // recursively a new operand to make a clone.
+      int64 operand_split_dim = inst->dimensions(split_dim);
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * new_operand,
+          SplitInstruction(operand, operand_split_dim, split_size));
+      std::vector<HloInstruction*> ops = {new_operand};
+      return builder_.AddInstruction(inst->CloneWithNewOperands(
+          new_operand->shape(), absl::MakeSpan(ops)));
+    } else if (MatchPointwiseNary(inst, &operands)) {
+      // For a pointwise operation recursively obtain the new operands and
+      // clone the operation.
+      std::vector<HloInstruction*> ops;
+      for (HloInstruction* operand : operands) {
+        TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
+                            SplitInstruction(operand, split_dim, split_size));
+        ops.push_back(new_operand);
       }
+      Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                             inst->shape().dimensions());
+      new_shape.set_dimensions(split_dim, split_size);
+      return builder_.AddInstruction(
+          inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
     } else {
-      // We are splitting up the rhs
-      split_is_lhs = false;
-      split_dim -= dims_lhs;
-      split_op = rhs;
-      join_op = lhs;
-      // TODO: Check if this is robust for multiple indices ...
-      for (int64 i = 0; i < dnums.rhs_contracting_dimensions_size(); i++) {
-        if (split_dim >= dnums.rhs_contracting_dimensions(i)) split_dim += 1;
+      // Invariant violation
+      // TODO: Is there a more idiomatic way to return a bad status?
+      CHECK(false);
+    }
+  }
+}
+
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterVisitor::Splitter::SplitLeafDot(HloInstruction* dot,
+                                                          int64 split_dim,
+                                                          int64 split_size) {
+  HloInstruction *lhs, *rhs;
+  CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
+
+  // For the dot we identify the parameter to split and then
+  // Generate the final dot operation, as well as the operand
+  // vector.
+
+  Shape dot_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
+                                         dot->shape().dimensions());
+  dot_shape.set_dimensions(split_dim, split_size);
+
+  auto& dnums = dot->dot_dimension_numbers();
+  int64 dims_lhs =
+      lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
+
+  HloInstruction *split_op, *join_op;
+  bool split_is_lhs;
+  if (split_dim < dims_lhs) {
+    // We are splitting up the lhs
+    split_is_lhs = true;
+    split_op = lhs;
+    join_op = rhs;
+    // TODO: Check if this is robust for multiple indices ...
+    for (int64 i = 0; i < dnums.lhs_contracting_dimensions_size(); i++) {
+      if (split_dim >= dnums.lhs_contracting_dimensions(i)) split_dim += 1;
+    }
+  } else {
+    // We are splitting up the rhs
+    split_is_lhs = false;
+    split_dim -= dims_lhs;
+    split_op = rhs;
+    join_op = lhs;
+    // TODO: Check if this is robust for multiple indices ...
+    for (int64 i = 0; i < dnums.rhs_contracting_dimensions_size(); i++) {
+      if (split_dim >= dnums.rhs_contracting_dimensions(i)) split_dim += 1;
+    }
+  }
+
+  // generate parameters for each split
+  Shape split_shape = ShapeUtil::MakeShape(split_op->shape().element_type(),
+                                           split_op->shape().dimensions());
+  split_shape.set_dimensions(split_dim, split_size);
+
+  std::vector<int64> start, limit, stride;
+  for (int64 dim = 0; dim < split_op->shape().dimensions_size(); dim++) {
+    start.push_back(0);
+    limit.push_back(split_op->shape().dimensions(dim));
+    stride.push_back(1);
+  }
+
+  int64 split_parameter_idx, join_parameter_idx;
+  for (int64 i = 0, dims_done = 0; i < parameters_.size();
+       i++, dims_done += split_size) {
+    // build split parameter
+    split_parameter_idx = parameters_.at(i).size();
+    start[split_dim] = dims_done;
+    limit[split_dim] = dims_done + split_size;
+    HloInstruction* slice =
+        split_op->parent()->AddInstruction(HloInstruction::CreateSlice(
+            split_shape, split_op, absl::MakeSpan(start), absl::MakeSpan(limit),
+            absl::MakeSpan(stride)));
+    parameters_.at(i).push_back(slice);
+    // attach join parameter
+    join_parameter_idx = parameters_.at(i).size();
+    parameters_.at(i).push_back(join_op);
+  }
+
+  // build the final dot
+  HloInstruction* split_param =
+      builder_.AddInstruction(HloInstruction::CreateParameter(
+          split_parameter_idx, split_shape, "dot_split_tensor"));
+  HloInstruction* join_param =
+      builder_.AddInstruction(HloInstruction::CreateParameter(
+          join_parameter_idx, join_op->shape(), "dot_join_tensor"));
+
+  std::vector<HloInstruction*> ops;
+  if (split_is_lhs) {
+    ops = {split_param, join_param};
+  } else {
+    ops = {join_param, split_param};
+  }
+  return builder_.AddInstruction(
+      dot->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
+}
+
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterVisitor::Splitter::SplitLeafBroadcast(
+    HloInstruction* broadcast, int64 split_dim, int64 split_size) {
+  HloInstruction* operand;
+  CHECK(Match(broadcast, m::Broadcast(m::Op(&operand))));
+
+  // For a broadcast, we identify if we can split it by
+  // changeing the broadcast itself, of if we have to
+  // create slices of the underlying operand tensor.
+
+  bool split_on_original_dim =
+      absl::c_linear_search(broadcast->dimensions(), split_dim);
+
+  int64 parameter_idx;
+  Shape parameter_shape = ShapeUtil::MakeShape(operand->shape().element_type(),
+                                               operand->shape().dimensions());
+  if (split_on_original_dim) {
+    int64 operand_split_dim;
+    for (int64 i = 0; i < broadcast->dimensions().size(); i++) {
+      if (broadcast->dimensions(i) == split_dim) {
+        operand_split_dim = i;
+        break;
       }
     }
 
-    // generate parameters for each split
-    Shape split_shape = ShapeUtil::MakeShape(split_op->shape().element_type(),
-                                             split_op->shape().dimensions());
-    split_shape.set_dimensions(split_dim, split_size);
+    parameter_shape.set_dimensions(operand_split_dim, split_size);
 
     std::vector<int64> start, limit, stride;
-    for (int64 dim = 0; dim < split_op->shape().dimensions_size(); dim++) {
+    for (int64 dim = 0; dim < operand->shape().dimensions_size(); dim++) {
       start.push_back(0);
-      limit.push_back(split_op->shape().dimensions(dim));
+      limit.push_back(operand->shape().dimensions(dim));
       stride.push_back(1);
     }
 
-    int64 split_parameter_idx, join_parameter_idx;
     for (int64 i = 0, dims_done = 0; i < parameters_.size();
          i++, dims_done += split_size) {
-      // build split parameter
-      split_parameter_idx = parameters_.at(i).size();
+      parameter_idx = parameters_.at(i).size();
       start[split_dim] = dims_done;
       limit[split_dim] = dims_done + split_size;
       HloInstruction* slice =
-          split_op->parent()->AddInstruction(HloInstruction::CreateSlice(
-              split_shape, split_op, absl::MakeSpan(start),
+          operand->parent()->AddInstruction(HloInstruction::CreateSlice(
+              parameter_shape, operand, absl::MakeSpan(start),
               absl::MakeSpan(limit), absl::MakeSpan(stride)));
       parameters_.at(i).push_back(slice);
-      // attach join parameter
-      join_parameter_idx = parameters_.at(i).size();
-      parameters_.at(i).push_back(join_op);
     }
-
-    // build the final dot
-    HloInstruction* split_param =
-        builder_.AddInstruction(HloInstruction::CreateParameter(
-            split_parameter_idx, split_shape, "dot_split_tensor"));
-    HloInstruction* join_param =
-        builder_.AddInstruction(HloInstruction::CreateParameter(
-            join_parameter_idx, join_op->shape(), "dot_join_tensor"));
-
-    std::vector<HloInstruction*> ops;
-    if (split_is_lhs) {
-      ops = {split_param, join_param};
-    } else {
-      ops = {join_param, split_param};
-    }
-    return builder_.AddInstruction(
-        inst->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
-  } else if (Match(inst, m::Broadcast(m::Op(&operand)))) {
-    // For a broadcast, we identify if we can split it by
-    // changeing the broadcast itself, of if we have to
-    // create slices of the underlying operand tensor.
-
-    bool split_on_original_dim =
-        absl::c_linear_search(inst->dimensions(), split_dim);
-
-    int64 parameter_idx;
-    Shape parameter_shape = ShapeUtil::MakeShape(
-        operand->shape().element_type(), operand->shape().dimensions());
-    if (split_on_original_dim) {
-      int64 operand_split_dim;
-      for (int64 i = 0; i < inst->dimensions().size(); i++) {
-        if (inst->dimensions(i) == split_dim) {
-          operand_split_dim = i;
-          break;
-        }
-      }
-
-      parameter_shape.set_dimensions(operand_split_dim, split_size);
-
-      std::vector<int64> start, limit, stride;
-      for (int64 dim = 0; dim < operand->shape().dimensions_size(); dim++) {
-        start.push_back(0);
-        limit.push_back(operand->shape().dimensions(dim));
-        stride.push_back(1);
-      }
-
-      for (int64 i = 0, dims_done = 0; i < parameters_.size();
-           i++, dims_done += split_size) {
-        parameter_idx = parameters_.at(i).size();
-        start[split_dim] = dims_done;
-        limit[split_dim] = dims_done + split_size;
-        HloInstruction* slice =
-            operand->parent()->AddInstruction(HloInstruction::CreateSlice(
-                parameter_shape, operand, absl::MakeSpan(start),
-                absl::MakeSpan(limit), absl::MakeSpan(stride)));
-        parameters_.at(i).push_back(slice);
-      }
-    } else {
-      for (int64 i = 0; i < parameters_.size(); i++) {
-        parameter_idx = parameters_.at(i).size();
-        parameters_.at(i).push_back(operand);
-      }
-    }
-
-    HloInstruction* parameter =
-        builder_.AddInstruction(HloInstruction::CreateParameter(
-            parameter_idx, parameter_shape, "broadcast"));
-
-    Shape broadcast_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
-                                                 inst->shape().dimensions());
-    broadcast_shape.set_dimensions(split_dim, split_size);
-    std::vector<HloInstruction*> params = {parameter};
-    return builder_.AddInstruction(
-        inst->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
-  } else if (Match(inst, m::Iota())) {
-    // For an iota, we simply produce smaller iota and add a
-    // constant offset to each parameter
-
-    auto* iota_inst = DynCast<HloIotaInstruction>(inst);
-    CHECK(iota_inst != nullptr);
-
-    int64 parameter_idx = 0;
-    Shape iota_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
-                                            inst->shape().dimensions());
-    iota_shape.set_dimensions(split_dim, split_size);
-
-    if (split_dim == iota_inst->iota_dimension()) {
-      // The split is along the iota dimension, create offsets and add
-      // to a single internal iota
-      HloInstruction* offset;
-      for (int64 i = 0; i < parameters_.size(); i++) {
-        parameter_idx = parameters_.at(i).size();
-        offset = inst->parent()->AddInstruction(HloInstruction::CreateConstant(
-            LiteralUtil::CreateR0<int64>(i * split_size)));
-        parameters_.at(i).push_back(offset);
-      }
-
-      HloInstruction* iota = builder_.AddInstruction(
-          HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
-
-      HloInstruction* param =
-          builder_.AddInstruction(HloInstruction::CreateParameter(
-              parameter_idx, offset->shape(), "iota_offset"));
-
-      if (!ShapeUtil::SameElementType(param->shape(), iota->shape())) {
-        Shape convert_shape = ShapeUtil::MakeShape(
-            iota->shape().element_type(), offset->shape().dimensions());
-        param = builder_.AddInstruction(
-            HloInstruction::CreateConvert(convert_shape, param));
-      }
-
-      std::vector<int64> broadcast_dims = {};
-      HloInstruction* broadcast =
-          builder_.AddInstruction(HloInstruction::CreateBroadcast(
-              iota_shape, param, absl::MakeSpan(broadcast_dims)));
-
-      return builder_.AddInstruction(HloInstruction::CreateBinary(
-          iota_shape, HloOpcode::kAdd, iota, broadcast));
-    } else {
-      // The split is not along an iota dimension, simply
-      // create a smaller iota and add that as parameters.
-      HloInstruction* iota = inst->parent()->AddInstruction(
-          HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
-      for (std::vector<HloInstruction*>& params : parameters()) {
-        parameter_idx = params.size();
-        params.push_back(iota);
-      }
-
-      return builder_.AddInstruction(
-          HloInstruction::CreateParameter(parameter_idx, iota_shape, "iota"));
-    }
-  } else if (Match(inst, m::Transpose(m::Op(&operand)))) {
-    // For a transpose, the transpose might change which dimension is
-    // being split. So we obtain the new split dimension and then
-    // recursively a new operand to make a clone.
-    int64 operand_split_dim = inst->dimensions(split_dim);
-    TF_ASSIGN_OR_RETURN(
-        HloInstruction * new_operand,
-        SplitInstruction(operand, operand_split_dim, split_size));
-    std::vector<HloInstruction*> ops = {new_operand};
-    return builder_.AddInstruction(
-        inst->CloneWithNewOperands(new_operand->shape(), absl::MakeSpan(ops)));
-  } else if (MatchPointwiseNary(inst, &operands)) {
-    // For a pointwise operation recursively obtain the new operands and
-    // clone the operation.
-    std::vector<HloInstruction*> ops;
-    for (HloInstruction* operand : operands) {
-      TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
-                          SplitInstruction(operand, split_dim, split_size));
-      ops.push_back(new_operand);
-    }
-    Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
-                                           inst->shape().dimensions());
-    new_shape.set_dimensions(split_dim, split_size);
-    return builder_.AddInstruction(
-        inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
   } else {
-    // Invariant violation
-    // TODO: Is there a more idiomatic way to return a bad status?
-    CHECK(false);
+    for (int64 i = 0; i < parameters_.size(); i++) {
+      parameter_idx = parameters_.at(i).size();
+      parameters_.at(i).push_back(operand);
+    }
+  }
+
+  HloInstruction* parameter =
+      builder_.AddInstruction(HloInstruction::CreateParameter(
+          parameter_idx, parameter_shape, "broadcast"));
+
+  Shape broadcast_shape = ShapeUtil::MakeShape(
+      broadcast->shape().element_type(), broadcast->shape().dimensions());
+  broadcast_shape.set_dimensions(split_dim, split_size);
+  std::vector<HloInstruction*> params = {parameter};
+  return builder_.AddInstruction(
+      broadcast->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
+}
+
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterVisitor::Splitter::SplitLeafIota(HloInstruction* iota,
+                                                           int64 split_dim,
+                                                           int64 split_size) {
+  CHECK(Match(iota, m::Iota()));
+
+  // For an iota, we simply produce smaller iota and add a
+  // constant offset to each parameter
+
+  auto* iota_inst = DynCast<HloIotaInstruction>(iota);
+  CHECK(iota_inst != nullptr);
+
+  int64 parameter_idx = 0;
+  Shape iota_shape = ShapeUtil::MakeShape(iota->shape().element_type(),
+                                          iota->shape().dimensions());
+  iota_shape.set_dimensions(split_dim, split_size);
+
+  if (split_dim == iota_inst->iota_dimension()) {
+    // The split is along the iota dimension, create offsets and add
+    // to a single internal iota
+    HloInstruction* offset;
+    for (int64 i = 0; i < parameters_.size(); i++) {
+      parameter_idx = parameters_.at(i).size();
+      offset = iota->parent()->AddInstruction(HloInstruction::CreateConstant(
+          LiteralUtil::CreateR0<int64>(i * split_size)));
+      parameters_.at(i).push_back(offset);
+    }
+
+    HloInstruction* small_iota = builder_.AddInstruction(
+        HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
+
+    HloInstruction* param =
+        builder_.AddInstruction(HloInstruction::CreateParameter(
+            parameter_idx, offset->shape(), "iota_offset"));
+
+    if (!ShapeUtil::SameElementType(param->shape(), small_iota->shape())) {
+      Shape convert_shape = ShapeUtil::MakeShape(
+          small_iota->shape().element_type(), offset->shape().dimensions());
+      param = builder_.AddInstruction(
+          HloInstruction::CreateConvert(convert_shape, param));
+    }
+
+    std::vector<int64> broadcast_dims = {};
+    HloInstruction* broadcast =
+        builder_.AddInstruction(HloInstruction::CreateBroadcast(
+            iota_shape, param, absl::MakeSpan(broadcast_dims)));
+
+    return builder_.AddInstruction(HloInstruction::CreateBinary(
+        iota_shape, HloOpcode::kAdd, small_iota, broadcast));
+  } else {
+    // The split is not along an iota dimension, simply
+    // create a smaller iota and add that as parameters.
+    HloInstruction* small_iota = iota->parent()->AddInstruction(
+        HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
+    for (std::vector<HloInstruction*>& params : parameters()) {
+      parameter_idx = params.size();
+      params.push_back(small_iota);
+    }
+
+    return builder_.AddInstruction(
+        HloInstruction::CreateParameter(parameter_idx, iota_shape, "iota"));
   }
 }
 
