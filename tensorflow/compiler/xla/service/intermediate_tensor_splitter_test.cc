@@ -441,5 +441,66 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
   EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) <= max_size());
 }
 
+// Test nested reduce
+TEST_F(IntermediateTensorSplitterTest, NestedReduce) {
+  const string module_str = R"(
+HloModule a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.34
+
+%Sum-reduction.22 (x.23: f32[], y.24: f32[]) -> f32[] {
+  %x.23 = f32[] parameter(0)
+  %y.24 = f32[] parameter(1)
+  ROOT %add.25 = f32[] add(f32[] %x.23, f32[] %y.24)
+}
+
+ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.34 (arg0.1: f32[2000,3], arg1.2: f32[2000,3], arg2.3: f32[2000,2]) -> f32[2000,2] {
+  %arg0.1 = f32[2000,3]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.4 = f32[2000,3]{1,0} reshape(f32[2000,3]{1,0} %arg0.1)
+  %slice.7 = f32[2000,3]{1,0} slice(f32[2000,3]{1,0} %reshape.4), slice={[0:2000], [0:3]}, metadata={op_type="StridedSlice" op_name="strided_slice" source_file="xla_playground.py" source_line=142}
+  %reshape.8 = f32[1,2000,3]{2,1,0} reshape(f32[2000,3]{1,0} %slice.7), metadata={op_type="StridedSlice" op_name="strided_slice" source_file="xla_playground.py" source_line=142}
+  %reshape.11 = f32[2000,3]{1,0} reshape(f32[1,2000,3]{2,1,0} %reshape.8), metadata={op_type="Sub" op_name="sub" source_file="xla_playground.py" source_line=142}
+  %broadcast.12 = f32[2000,2000,3]{2,1,0} broadcast(f32[2000,3]{1,0} %reshape.11), dimensions={1,2}, metadata={op_type="Sub" op_name="sub" source_file="xla_playground.py" source_line=142}
+  %arg1.2 = f32[2000,3]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.5 = f32[2000,3]{1,0} reshape(f32[2000,3]{1,0} %arg1.2)
+  %slice.9 = f32[2000,3]{1,0} slice(f32[2000,3]{1,0} %reshape.5), slice={[0:2000], [0:3]}, metadata={op_type="StridedSlice" op_name="strided_slice_1" source_file="xla_playground.py" source_line=142}
+  %reshape.10 = f32[2000,1,3]{2,1,0} reshape(f32[2000,3]{1,0} %slice.9), metadata={op_type="StridedSlice" op_name="strided_slice_1" source_file="xla_playground.py" source_line=142}
+  %reshape.13 = f32[2000,3]{1,0} reshape(f32[2000,1,3]{2,1,0} %reshape.10), metadata={op_type="Sub" op_name="sub" source_file="xla_playground.py" source_line=142}
+  %broadcast.14 = f32[2000,2000,3]{2,1,0} broadcast(f32[2000,3]{1,0} %reshape.13), dimensions={0,2}, metadata={op_type="Sub" op_name="sub" source_file="xla_playground.py" source_line=142}
+  %subtract.15 = f32[2000,2000,3]{2,1,0} subtract(f32[2000,2000,3]{2,1,0} %broadcast.12, f32[2000,2000,3]{2,1,0} %broadcast.14), metadata={op_type="Sub" op_name="sub" source_file="xla_playground.py" source_line=142}
+  %constant.16 = f32[] constant(2), metadata={op_type="Pow" op_name="pow" source_file="xla_playground.py" source_line=143}
+  %broadcast.17 = f32[2000,2000,3]{2,1,0} broadcast(f32[] %constant.16), dimensions={}, metadata={op_type="Pow" op_name="pow" source_file="xla_playground.py" source_line=143}
+  %power.18 = f32[2000,2000,3]{2,1,0} power(f32[2000,2000,3]{2,1,0} %subtract.15, f32[2000,2000,3]{2,1,0} %broadcast.17), metadata={op_type="Pow" op_name="pow" source_file="xla_playground.py" source_line=143}
+  %convert.19 = f32[2000,2000,3]{2,1,0} convert(f32[2000,2000,3]{2,1,0} %power.18), metadata={op_type="Sum" op_name="Sum" source_file="xla_playground.py" source_line=143}
+  %constant.20 = f32[] constant(0), metadata={op_type="Sum" op_name="Sum" source_file="xla_playground.py" source_line=143}
+  %convert.21 = f32[] convert(f32[] %constant.20), metadata={op_type="Sum" op_name="Sum" source_file="xla_playground.py" source_line=143}
+  %reduce.26 = f32[2000,2000]{1,0} reduce(f32[2000,2000,3]{2,1,0} %convert.19, f32[] %convert.21), dimensions={2}, to_apply=%Sum-reduction.22, metadata={op_type="Sum" op_name="Sum" source_file="xla_playground.py" source_line=143}
+  %convert.27 = f32[2000,2000]{1,0} convert(f32[2000,2000]{1,0} %reduce.26), metadata={op_type="Sum" op_name="Sum" source_file="xla_playground.py" source_line=143}
+  %exponential.28 = f32[2000,2000]{1,0} exponential(f32[2000,2000]{1,0} %convert.27), metadata={op_type="Exp" op_name="Exp" source_file="xla_playground.py" source_line=144}
+  %arg2.3 = f32[2000,2]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.6 = f32[2000,2]{1,0} reshape(f32[2000,2]{1,0} %arg2.3)
+  %dot.29 = f32[2000,2]{1,0} dot(f32[2000,2000]{1,0} %exponential.28, f32[2000,2]{1,0} %reshape.6), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul" source_file="xla_playground.py" source_line=144}
+  %transpose.30 = f32[2000,2]{1,0} transpose(f32[2000,2]{1,0} %dot.29), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul" source_file="xla_playground.py" source_line=144}
+  %reshape.31 = f32[2000,2]{1,0} reshape(f32[2000,2]{1,0} %transpose.30), metadata={op_name="XLA_Retvals"}
+  %tuple.32 = (f32[2000,2]{1,0}) tuple(f32[2000,2]{1,0} %reshape.31), metadata={op_name="XLA_Retvals"}
+  ROOT %get-tuple-element.33 = f32[2000,2]{1,0} get-tuple-element((f32[2000,2]{1,0}) %tuple.32), index=0, metadata={op_name="XLA_Retvals"}
+}
+)";
+
+  string module_with_big_dims = replace_all_in_string(
+      module_str, "2000", std::to_string(large_dim()));
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_with_big_dims));
+
+  HloComputation* entry = module->entry_computation();
+
+  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) > max_size());
+
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) <= max_size());
+}
+
 }  // namespace
 }  // namespace xla
