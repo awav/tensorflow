@@ -14,15 +14,15 @@ namespace {
 
 namespace m = match;
 
-class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
+class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   int64 max_intermediate_size;
   int64 target_intermediate_size;
   HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterVisitor(int64 max_intermediate_size,
-                                             int64 target_intermediate_size,
-                                             HloModule* parent_module)
+  explicit IntermediateTensorSplitterRewriteVisitor(
+      int64 max_intermediate_size, int64 target_intermediate_size,
+      HloModule* parent_module)
       : max_intermediate_size(max_intermediate_size),
         target_intermediate_size(target_intermediate_size),
         parent_module(parent_module) {}
@@ -47,6 +47,8 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
   // Matches a reduce operation where all operands have the same shape
   // and all initilizers are scalars.
   static bool MatchSupportedReduce(HloInstruction* inst);
+
+  static bool MatchSupportedNestedReduce(HloInstruction* inst);
 
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
@@ -106,12 +108,12 @@ class IntermediateTensorSplitterVisitor : public DfsHloRewriteVisitor {
 
 }  // namespace
 
-bool IntermediateTensorSplitterVisitor::OperandShouldBeSplit(
+bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
   return ShapeUtil::ElementsIn(inst->shape()) > max_intermediate_size;
 }
 
-bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
+bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
   HloInstruction* next;
   std::vector<HloInstruction*> next_vec;
@@ -129,6 +131,8 @@ bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
     return true;
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
     return OperandCanBeSplit(next, split_leafs);
+  } else if (MatchSupportedNestedReduce(inst)) {
+    return OperandCanBeSplit(inst->mutable_operand(0), split_leafs);
   } else if (MatchPointwiseUnary(inst, &next)) {
     // This is a special case seperate from nary,
     // since we can make it tail recursive :)
@@ -144,7 +148,7 @@ bool IntermediateTensorSplitterVisitor::OperandCanBeSplit(
   }
 }
 
-bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
+bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseUnary(
     HloInstruction* inst, HloInstruction** operand) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() == 1) {
@@ -157,7 +161,7 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseUnary(
   }
 }
 
-bool IntermediateTensorSplitterVisitor::MatchPointwiseNary(
+bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseNary(
     HloInstruction* inst, std::vector<HloInstruction*>* operands) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() > 0) {
@@ -171,7 +175,7 @@ bool IntermediateTensorSplitterVisitor::MatchPointwiseNary(
   }
 }
 
-bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
+bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedReduce(
     HloInstruction* inst) {
   if (inst->opcode() == HloOpcode::kReduce) {
     int64 opt_count = inst->operand_count() / 2;
@@ -192,7 +196,12 @@ bool IntermediateTensorSplitterVisitor::MatchSupportedReduce(
   }
 }
 
-int64 IntermediateTensorSplitterVisitor::BestSplitDim(
+bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedNestedReduce(
+    HloInstruction* inst) {
+  return MatchSupportedReduce(inst) && inst->operand_count() == 2;
+}
+
+int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
     HloInstruction* inst, absl::Span<const int64> excluded) {
   const Shape& shape = inst->shape();
   int64 best_dim = -1, best_size = 0;
@@ -213,8 +222,8 @@ const int64 primes[64] = {2,   3,   5,   7,   11,  13,  17,  19,  23,  29,  31,
                           197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257,
                           263, 269, 271, 277, 281, 283, 293, 307, 311};
 
-int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
-                                                       int64 split_dim) {
+int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
+    HloInstruction* inst, int64 split_dim) {
   int64 split_size = inst->shape().dimensions(split_dim);
   int64 rest_size = ShapeUtil::ElementsIn(inst->shape()) / split_size;
   int64 factors[64];
@@ -237,7 +246,7 @@ int64 IntermediateTensorSplitterVisitor::BestSplitSize(HloInstruction* inst,
 }
 
 StatusOr<HloInstruction*>
-IntermediateTensorSplitterVisitor::Splitter::SplitInstruction(
+IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
     HloInstruction* inst, int64 split_dim, int64 split_size) {
   if (absl::c_linear_search(leafs_, inst)) {
     if (Match(inst, m::Dot())) {
@@ -262,6 +271,32 @@ IntermediateTensorSplitterVisitor::Splitter::SplitInstruction(
       std::vector<HloInstruction*> ops = {new_operand};
       return builder_.AddInstruction(inst->CloneWithNewOperands(
           new_operand->shape(), absl::MakeSpan(ops)));
+    } else if (MatchSupportedNestedReduce(inst)) {
+      // For a reduce, split the 0th and only operand
+      // (the initializer a scalar, so all we need to do
+      // is update the shape and clone the operand with new
+      // inputs)
+      int64 operand_split_dim = split_dim;  // split dim in operand
+      if (inst->dimensions(0) <= split_dim) operand_split_dim += 1;
+
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * new_operand,
+          SplitInstruction(inst->mutable_operand(0), operand_split_dim, split_size));
+
+      HloInstruction* init_operand = inst->mutable_operand(1);
+      int64 param_idx;
+      for (auto& params : parameters_) {
+        param_idx = params.size();
+        params.push_back(init_operand);
+      }
+      HloInstruction* new_init_operand = builder_.AddInstruction(
+          HloInstruction::CreateParameter(
+            param_idx, init_operand->shape(), "init_op_param"));
+      
+      Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                             inst->shape().dimensions());
+      new_shape.set_dimensions(split_dim, split_size);
+      return builder_.AddInstruction(inst->CloneWithNewOperands(new_shape, {new_operand, new_init_operand}));
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
@@ -279,15 +314,15 @@ IntermediateTensorSplitterVisitor::Splitter::SplitInstruction(
     } else {
       // Invariant violation
       // TODO: Is there a more idiomatic way to return a bad status?
+      LOG(ERROR) << "Trying to split invalid operation.";
       CHECK(false);
     }
   }
 }
 
 StatusOr<HloInstruction*>
-IntermediateTensorSplitterVisitor::Splitter::SplitLeafDot(HloInstruction* dot,
-                                                          int64 split_dim,
-                                                          int64 split_size) {
+IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafDot(
+    HloInstruction* dot, int64 split_dim, int64 split_size) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
 
@@ -374,7 +409,7 @@ IntermediateTensorSplitterVisitor::Splitter::SplitLeafDot(HloInstruction* dot,
 }
 
 StatusOr<HloInstruction*>
-IntermediateTensorSplitterVisitor::Splitter::SplitLeafBroadcast(
+IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
     HloInstruction* broadcast, int64 split_dim, int64 split_size) {
   HloInstruction* operand;
   CHECK(Match(broadcast, m::Broadcast(m::Op(&operand))));
@@ -438,9 +473,8 @@ IntermediateTensorSplitterVisitor::Splitter::SplitLeafBroadcast(
 }
 
 StatusOr<HloInstruction*>
-IntermediateTensorSplitterVisitor::Splitter::SplitLeafIota(HloInstruction* iota,
-                                                           int64 split_dim,
-                                                           int64 split_size) {
+IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
+    HloInstruction* iota, int64 split_dim, int64 split_size) {
   CHECK(Match(iota, m::Iota()));
 
   // For an iota, we simply produce smaller iota and add a
@@ -501,7 +535,8 @@ IntermediateTensorSplitterVisitor::Splitter::SplitLeafIota(HloInstruction* iota,
   }
 }
 
-Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
+Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
+    HloInstruction* dot) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
   auto& dnums = dot->dot_dimension_numbers();
@@ -599,12 +634,18 @@ Status IntermediateTensorSplitterVisitor::HandleDot(HloInstruction* dot) {
   }
 }
 
-Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
+Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
+    HloInstruction* reduce) {
   if (!MatchSupportedReduce(reduce)) return Status::OK();
 
   // MatchSupportedReduce enforces that all inputs are of the
   // same shape, and that there is at least one operand!
   if (!OperandShouldBeSplit(reduce->mutable_operand(0))) return Status::OK();
+
+  // TODO: This is a hack, I need to more seriously rethink the
+  //       two pass system, to mark elements in a first pass and combine
+  //       sections properly ...
+  if (OperandShouldBeSplit(reduce)) return Status::OK();
 
   // MatchSupportedReduce enforces that all initializers are
   // scalars, so we only need to split the operands to the
@@ -732,8 +773,9 @@ Status IntermediateTensorSplitterVisitor::HandleReduce(HloInstruction* reduce) {
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
   int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
-  IntermediateTensorSplitterVisitor visitor(split_size, split_size, module);
-  return visitor.RunOnModule(module);
+  IntermediateTensorSplitterRewriteVisitor rewrite(split_size, split_size,
+                                                   module);
+  return rewrite.RunOnModule(module);
 }
 
 }  // namespace xla
