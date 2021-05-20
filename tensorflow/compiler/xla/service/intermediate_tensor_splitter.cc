@@ -279,9 +279,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       int64 operand_split_dim = split_dim;  // split dim in operand
       if (inst->dimensions(0) <= split_dim) operand_split_dim += 1;
 
-      TF_ASSIGN_OR_RETURN(
-          HloInstruction * new_operand,
-          SplitInstruction(inst->mutable_operand(0), operand_split_dim, split_size));
+      TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
+                          SplitInstruction(inst->mutable_operand(0),
+                                           operand_split_dim, split_size));
 
       HloInstruction* init_operand = inst->mutable_operand(1);
       int64 param_idx;
@@ -289,14 +289,15 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
         param_idx = params.size();
         params.push_back(init_operand);
       }
-      HloInstruction* new_init_operand = builder_.AddInstruction(
-          HloInstruction::CreateParameter(
-            param_idx, init_operand->shape(), "init_op_param"));
-      
+      HloInstruction* new_init_operand =
+          builder_.AddInstruction(HloInstruction::CreateParameter(
+              param_idx, init_operand->shape(), "init_op_param"));
+
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(inst->CloneWithNewOperands(new_shape, {new_operand, new_init_operand}));
+      return builder_.AddInstruction(inst->CloneWithNewOperands(
+          new_shape, {new_operand, new_init_operand}));
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
