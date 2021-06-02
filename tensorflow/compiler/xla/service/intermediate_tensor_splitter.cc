@@ -14,15 +14,16 @@ namespace {
 
 namespace m = match;
 
-class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
+class IntermediateTensorSplitterBaseVisitor : public DfsHloRewriteVisitor {
+ protected:
   int64 max_intermediate_size;
   int64 target_intermediate_size;
   HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterRewriteVisitor(
-      int64 max_intermediate_size, int64 target_intermediate_size,
-      HloModule* parent_module)
+  explicit IntermediateTensorSplitterBaseVisitor(int64 max_intermediate_size,
+                                                 int64 target_intermediate_size,
+                                                 HloModule* parent_module)
       : max_intermediate_size(max_intermediate_size),
         target_intermediate_size(target_intermediate_size),
         parent_module(parent_module) {}
@@ -49,6 +50,13 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   static bool MatchSupportedReduce(HloInstruction* inst);
 
   static bool MatchSupportedNestedReduce(HloInstruction* inst);
+};
+
+class IntermediateTensorSplitterRewriteVisitor
+    : public IntermediateTensorSplitterBaseVisitor {
+ public:
+  using IntermediateTensorSplitterBaseVisitor::
+      IntermediateTensorSplitterBaseVisitor;
 
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
@@ -108,12 +116,12 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
 }  // namespace
 
-bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
+bool IntermediateTensorSplitterBaseVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
   return ShapeUtil::ElementsIn(inst->shape()) > max_intermediate_size;
 }
 
-bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
+bool IntermediateTensorSplitterBaseVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
   HloInstruction* next;
   std::vector<HloInstruction*> next_vec;
@@ -148,7 +156,7 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
   }
 }
 
-bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseUnary(
+bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseUnary(
     HloInstruction* inst, HloInstruction** operand) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() == 1) {
@@ -161,7 +169,7 @@ bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseUnary(
   }
 }
 
-bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseNary(
+bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseNary(
     HloInstruction* inst, std::vector<HloInstruction*>* operands) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() > 0) {
@@ -175,7 +183,7 @@ bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseNary(
   }
 }
 
-bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedReduce(
+bool IntermediateTensorSplitterBaseVisitor::MatchSupportedReduce(
     HloInstruction* inst) {
   if (inst->opcode() == HloOpcode::kReduce) {
     int64 opt_count = inst->operand_count() / 2;
@@ -196,7 +204,7 @@ bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedReduce(
   }
 }
 
-bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedNestedReduce(
+bool IntermediateTensorSplitterBaseVisitor::MatchSupportedNestedReduce(
     HloInstruction* inst) {
   return MatchSupportedReduce(inst) && inst->operand_count() == 2;
 }
