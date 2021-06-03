@@ -2095,6 +2095,7 @@ cc_library(
     deps = [
         ":hlo_pass",
         ":hlo_creation_utils",
+        ":call_inliner",
         ":pattern_matcher",
         "@com_google_absl//absl/algorithm:container",
     ],

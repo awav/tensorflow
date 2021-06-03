@@ -3,6 +3,7 @@
 
 #include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
+#include "tensorflow/compiler/xla/service/call_inliner.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
@@ -50,6 +51,37 @@ class IntermediateTensorSplitterBaseVisitor : public DfsHloRewriteVisitor {
   static bool MatchSupportedReduce(HloInstruction* inst);
 
   static bool MatchSupportedNestedReduce(HloInstruction* inst);
+};
+
+class IntermediateTensorSplitterInlinerVisitor
+    : public IntermediateTensorSplitterBaseVisitor {
+ public:
+  // TODO: The super class should be put into a seperate header file, and
+  // this should eventually probably be it's own pass ..
+  using IntermediateTensorSplitterBaseVisitor::
+      IntermediateTensorSplitterBaseVisitor;
+
+  // Find tainted instructions in both the body and condition computation
+  std::vector<HloInstruction*> FindTaintedConditionals(
+      HloInstruction* loop, std::vector<HloInstruction*>* acc = nullptr);
+  std::vector<HloInstruction*> FindTaintedCalls(
+      HloInstruction* loop, std::vector<HloInstruction*>* acc = nullptr);
+
+  Status HandleWhile(HloInstruction* loop) override;
+};
+
+class IntermediateTensorSplitterFlattenVisitor
+    : public IntermediateTensorSplitterBaseVisitor {
+ public:
+  // TODO: We should also pass along the spans of
+  // tainted operations later, when we only inline
+  // those ...
+  using IntermediateTensorSplitterBaseVisitor::
+      IntermediateTensorSplitterBaseVisitor;
+
+  Status HandleCall(HloInstruction* call) override;
+
+  Status HandleConditional(HloInstruction* cond) override;
 };
 
 class IntermediateTensorSplitterRewriteVisitor
@@ -207,6 +239,88 @@ bool IntermediateTensorSplitterBaseVisitor::MatchSupportedReduce(
 bool IntermediateTensorSplitterBaseVisitor::MatchSupportedNestedReduce(
     HloInstruction* inst) {
   return MatchSupportedReduce(inst) && inst->operand_count() == 2;
+}
+
+Status IntermediateTensorSplitterFlattenVisitor::HandleCall(
+    HloInstruction* call) {
+  TF_RETURN_IF_ERROR(CallInliner::Inline(call).status());
+}
+
+Status IntermediateTensorSplitterFlattenVisitor::HandleConditional(
+    HloInstruction* conditional) {
+  // stolen from conditional_to_select.cc ...
+  // Only allow conditional to select if the called computations
+  // do not have side effects.
+  if (conditional->true_computation()->HasSideEffect() ||
+      conditional->false_computation()->HasSideEffect()) {
+    VLOG(1) << "Not transforming conditional; branches have side effects:"
+            << conditional->ToString();
+    return Status::OK();
+  }
+
+  auto computation = conditional->parent();
+
+  // Create new instructions
+  HloInstruction* if_call_op =
+      computation->AddInstruction(HloInstruction::CreateCall(
+          conditional->shape(), {conditional->mutable_operand(1)},
+          conditional->true_computation()));
+  conditional->SetupDerivedInstruction(if_call_op);
+  HloInstruction* else_call_op =
+      computation->AddInstruction(HloInstruction::CreateCall(
+          conditional->shape(), {conditional->mutable_operand(2)},
+          conditional->false_computation()));
+  conditional->SetupDerivedInstruction(else_call_op);
+  HloInstruction* condition = conditional->mutable_operand(0);
+  TF_ASSIGN_OR_RETURN(
+      HloInstruction * select_op,
+      MakeSelectHlo(condition, if_call_op, else_call_op, conditional));
+  TF_RETURN_IF_ERROR(computation->ReplaceInstruction(conditional, select_op));
+  TF_RETURN_IF_ERROR(CallInliner::Inline(if_call_op).status());
+  TF_RETURN_IF_ERROR(CallInliner::Inline(else_call_op).status());
+  return Status::OK();
+}
+
+std::vector<HloInstruction*>
+IntermediateTensorSplitterInlinerVisitor::FindTaintedConditionals(
+    HloInstruction* loop, std::vector<HloInstruction*>* acc) {
+  // TODO: For now, just inline everything ...
+}
+std::vector<HloInstruction*>
+IntermediateTensorSplitterInlinerVisitor::FindTaintedCalls(
+    HloInstruction* loop, std::vector<HloInstruction*>* acc) {
+  // TODO: For now, just inline everything ...
+}
+
+Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
+    HloInstruction* loop) {
+  // basic checks (does not actually check if CAN inline ..)
+  HloInstruction* init = loop->mutable_operand(0);
+  if (!init->shape().IsTuple()) {
+    return Status::OK();  // TODO: Handle this case as well ...
+  }
+
+  HloInstruction* split_arg = nullptr;
+  int64 split_arg_idx = -1;
+  for (int64 idx = 0; idx < init->operand_count(); idx++) {
+    auto* arg = init->mutable_operand(idx);
+    if (OperandShouldBeSplit(arg) && OperandCanBeSplit(arg)) {
+      split_arg = init->mutable_operand(idx);
+      split_arg_idx = idx;
+    }
+  }
+  if (split_arg == nullptr) {
+    return Status::OK();  // Nothing to split ...
+  }
+
+  // to linline (>.<)
+
+  // 1) 1 -> inline the large parameter (split_arg)
+
+  // TODO: Determine which things inside are tainted and only inline
+  // those ...
+
+  // 2) 2 -> run the inside inliner to inline conditionals and calls
 }
 
 int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
