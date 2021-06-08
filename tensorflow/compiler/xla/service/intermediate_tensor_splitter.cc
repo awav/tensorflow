@@ -67,6 +67,10 @@ class IntermediateTensorSplitterInlinerVisitor
   std::vector<HloInstruction*> FindTaintedCalls(
       HloInstruction* loop, std::vector<HloInstruction*>* acc = nullptr);
 
+  HloInstruction* InlineIntoComputation(
+      HloInstruction* inst, HloComputation* comp,
+      std::vector<HloInstruction*>* parameters, HloInstruction* param_tuple);
+
   Status HandleWhile(HloInstruction* loop) override;
 };
 
@@ -292,6 +296,41 @@ IntermediateTensorSplitterInlinerVisitor::FindTaintedCalls(
   // TODO: For now, just inline everything ...
 }
 
+HloInstruction* IntermediateTensorSplitterInlinerVisitor::InlineIntoComputation(
+    HloInstruction* inst, HloComputation* comp,
+    std::vector<HloInstruction*>* parameters, HloInstruction* param_tuple) {
+  changed_ = true;
+
+  if (OperandShouldBeSplit(inst)) {
+    // inline the operands recursively
+    std::vector<HloInstruction*> operands;
+    for (HloInstruction* op : inst->operands()) {
+      operands.push_back(
+          InlineIntoComputation(op, comp, parameters, param_tuple));
+    }
+    return comp->AddInstruction(
+        inst->CloneWithNewOperands(inst->shape(), operands));
+  } else {
+    // this is a leaf of the inline process, create a 'parameter'
+    if (parameters != nullptr) parameters->push_back(inst);
+
+    int64 tuple_count = ShapeUtil::TupleElementCount(param_tuple->shape());
+    param_tuple->mutable_shape()->mutable_tuple_shapes()->push_back(
+        inst->shape());
+    HloInstruction* param =
+        comp->AddInstruction(HloInstruction::CreateGetTupleElement(
+            inst->shape(), param_tuple, tuple_count));
+
+    comp->root_instruction()->AppendOperand(param);
+    comp->root_instruction()
+        ->mutable_shape()
+        ->mutable_tuple_shapes()
+        ->push_back(param->shape());
+
+    return param;
+  }
+}
+
 Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
     HloInstruction* loop) {
   // basic checks (does not actually check if CAN inline ..)
@@ -313,9 +352,62 @@ Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
     return Status::OK();  // Nothing to split ...
   }
 
+  // inline argument into the computation
+  std::vector<HloInstruction*> params;
+  HloInstruction* inline_arg_body =
+      InlineIntoComputation(split_arg, loop->while_body(), &params,
+                            loop->while_body()->parameter_instruction(0));
+  HloInstruction* inline_arg_cond =
+      InlineIntoComputation(split_arg, loop->while_condition(), nullptr,
+                            loop->while_condition()->parameter_instruction(0));
+
+  // add parameters into the initialize tuple
+  for (auto* param : params) {
+    loop->AppendOperand(param);
+    loop->mutable_shape()->mutable_tuple_shapes()->push_back(param->shape());
+  }
+
+  // replace instances to touple get with the inline parameter
+  for (HloInstruction* user :
+       loop->while_body()->parameter_instruction(0)->users()) {
+    if (user->opcode() != HloOpcode::kGetTupleElement) continue;
+    if (user->tuple_index() != split_arg_idx) continue;
+    TF_RETURN_IF_ERROR(ReplaceInstruction(user, inline_arg_body));
+  }
+  for (HloInstruction* user :
+       loop->while_condition()->parameter_instruction(0)->users()) {
+    if (user->opcode() != HloOpcode::kGetTupleElement) continue;
+    if (user->tuple_index() != split_arg_idx) continue;
+    TF_RETURN_IF_ERROR(ReplaceInstruction(user, inline_arg_cond));
+  }
+
+  // remove the original large param
+  std::vector<Shape> tuple_shapes =
+      *init->mutable_shape()->mutable_tuple_shapes();
+  tuple_shapes.erase(tuple_shapes.begin() + split_arg_idx);
+  Shape tuple_shape = ShapeUtil::MakeTupleShape(tuple_shapes);
+
+  std::vector<HloInstruction*> tuple_operands; init->operands();
+  for (int64 i = 0; i < init->operand_count(); i ++) {
+    if (i == split_arg_idx) continue;
+    tuple_operands.push_back(init->mutable_operand(i));
+  }
+
+  HloInstruction* new_tuple = init->parent()->AddInstruction(
+      init->CloneWithNewOperands(tuple_shape, tuple_operands));
+  TF_RETURN_IF_ERROR(ReplaceInstruction(init, new_tuple));
+
   // to linline (>.<)
 
   // 1) 1 -> inline the large parameter (split_arg)
+  // 1.1 --> [DONE] identify parameter in tupel
+  // 1.2 --> replace very get_tuple X from parameters with inlined version
+  //         (for this step, memoize the inlined version after first inline)
+
+  // actually, we can play dirty and build a nested tuple ;)
+  // but its probably better + easier not to ..
+  // 1.3 --> replace the tuples N>X with N-1
+  // 1.4 --> replace the outside tuple with a X removed tuple
 
   // TODO: Determine which things inside are tainted and only inline
   // those ...
@@ -896,9 +988,13 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
   int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  IntermediateTensorSplitterInlinerVisitor inliner(split_size, split_size,
+                                                   module);
   IntermediateTensorSplitterRewriteVisitor rewrite(split_size, split_size,
                                                    module);
-  return rewrite.RunOnModule(module);
+  TF_ASSIGN_OR_RETURN(bool did_inline, inliner.RunOnModule(module));
+  TF_ASSIGN_OR_RETURN(bool did_rewrite, rewrite.RunOnModule(module));
+  return did_inline || did_rewrite;
 }
 
 }  // namespace xla
