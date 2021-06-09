@@ -3,7 +3,6 @@
 
 #include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
-#include "tensorflow/compiler/xla/service/call_inliner.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
@@ -15,16 +14,15 @@ namespace {
 
 namespace m = match;
 
-class IntermediateTensorSplitterBaseVisitor : public DfsHloRewriteVisitor {
- protected:
+class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   int64 max_intermediate_size;
   int64 target_intermediate_size;
   HloModule* parent_module;
 
  public:
-  explicit IntermediateTensorSplitterBaseVisitor(int64 max_intermediate_size,
-                                                 int64 target_intermediate_size,
-                                                 HloModule* parent_module)
+  explicit IntermediateTensorSplitterRewriteVisitor(
+      int64 max_intermediate_size, int64 target_intermediate_size,
+      HloModule* parent_module)
       : max_intermediate_size(max_intermediate_size),
         target_intermediate_size(target_intermediate_size),
         parent_module(parent_module) {}
@@ -51,48 +49,6 @@ class IntermediateTensorSplitterBaseVisitor : public DfsHloRewriteVisitor {
   static bool MatchSupportedReduce(HloInstruction* inst);
 
   static bool MatchSupportedNestedReduce(HloInstruction* inst);
-};
-
-class IntermediateTensorSplitterInlinerVisitor
-    : public IntermediateTensorSplitterBaseVisitor {
- public:
-  // TODO: The super class should be put into a seperate header file, and
-  // this should eventually probably be it's own pass ..
-  using IntermediateTensorSplitterBaseVisitor::
-      IntermediateTensorSplitterBaseVisitor;
-
-  // Find tainted instructions in both the body and condition computation
-  std::vector<HloInstruction*> FindTaintedConditionals(
-      HloInstruction* loop, std::vector<HloInstruction*>* acc = nullptr);
-  std::vector<HloInstruction*> FindTaintedCalls(
-      HloInstruction* loop, std::vector<HloInstruction*>* acc = nullptr);
-
-  HloInstruction* InlineIntoComputation(
-      HloInstruction* inst, HloComputation* comp,
-      std::vector<HloInstruction*>* parameters, HloInstruction* param_tuple);
-
-  Status HandleWhile(HloInstruction* loop) override;
-};
-
-class IntermediateTensorSplitterFlattenVisitor
-    : public IntermediateTensorSplitterBaseVisitor {
- public:
-  // TODO: We should also pass along the spans of
-  // tainted operations later, when we only inline
-  // those ...
-  using IntermediateTensorSplitterBaseVisitor::
-      IntermediateTensorSplitterBaseVisitor;
-
-  Status HandleCall(HloInstruction* call) override;
-
-  Status HandleConditional(HloInstruction* cond) override;
-};
-
-class IntermediateTensorSplitterRewriteVisitor
-    : public IntermediateTensorSplitterBaseVisitor {
- public:
-  using IntermediateTensorSplitterBaseVisitor::
-      IntermediateTensorSplitterBaseVisitor;
 
   // Determine the best dimesion to split on, excluding a given one.
   int64 BestSplitDim(HloInstruction* inst, absl::Span<const int64> excluded);
@@ -152,12 +108,12 @@ class IntermediateTensorSplitterRewriteVisitor
 
 }  // namespace
 
-bool IntermediateTensorSplitterBaseVisitor::OperandShouldBeSplit(
+bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
   return ShapeUtil::ElementsIn(inst->shape()) > max_intermediate_size;
 }
 
-bool IntermediateTensorSplitterBaseVisitor::OperandCanBeSplit(
+bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
   HloInstruction* next;
   std::vector<HloInstruction*> next_vec;
@@ -192,7 +148,7 @@ bool IntermediateTensorSplitterBaseVisitor::OperandCanBeSplit(
   }
 }
 
-bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseUnary(
+bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseUnary(
     HloInstruction* inst, HloInstruction** operand) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() == 1) {
@@ -205,7 +161,7 @@ bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseUnary(
   }
 }
 
-bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseNary(
+bool IntermediateTensorSplitterRewriteVisitor::MatchPointwiseNary(
     HloInstruction* inst, std::vector<HloInstruction*>* operands) {
   if (inst->IsElementwise() && !inst->HasSideEffect() &&
       inst->operand_count() > 0) {
@@ -219,7 +175,7 @@ bool IntermediateTensorSplitterBaseVisitor::MatchPointwiseNary(
   }
 }
 
-bool IntermediateTensorSplitterBaseVisitor::MatchSupportedReduce(
+bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedReduce(
     HloInstruction* inst) {
   if (inst->opcode() == HloOpcode::kReduce) {
     int64 opt_count = inst->operand_count() / 2;
@@ -240,190 +196,9 @@ bool IntermediateTensorSplitterBaseVisitor::MatchSupportedReduce(
   }
 }
 
-bool IntermediateTensorSplitterBaseVisitor::MatchSupportedNestedReduce(
+bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedNestedReduce(
     HloInstruction* inst) {
   return MatchSupportedReduce(inst) && inst->operand_count() == 2;
-}
-
-Status IntermediateTensorSplitterFlattenVisitor::HandleCall(
-    HloInstruction* call) {
-  TF_RETURN_IF_ERROR(CallInliner::Inline(call).status());
-}
-
-Status IntermediateTensorSplitterFlattenVisitor::HandleConditional(
-    HloInstruction* conditional) {
-  // stolen from conditional_to_select.cc ...
-  // Only allow conditional to select if the called computations
-  // do not have side effects.
-  if (conditional->true_computation()->HasSideEffect() ||
-      conditional->false_computation()->HasSideEffect()) {
-    VLOG(1) << "Not transforming conditional; branches have side effects:"
-            << conditional->ToString();
-    return Status::OK();
-  }
-
-  auto computation = conditional->parent();
-
-  // Create new instructions
-  HloInstruction* if_call_op =
-      computation->AddInstruction(HloInstruction::CreateCall(
-          conditional->shape(), {conditional->mutable_operand(1)},
-          conditional->true_computation()));
-  conditional->SetupDerivedInstruction(if_call_op);
-  HloInstruction* else_call_op =
-      computation->AddInstruction(HloInstruction::CreateCall(
-          conditional->shape(), {conditional->mutable_operand(2)},
-          conditional->false_computation()));
-  conditional->SetupDerivedInstruction(else_call_op);
-  HloInstruction* condition = conditional->mutable_operand(0);
-  TF_ASSIGN_OR_RETURN(
-      HloInstruction * select_op,
-      MakeSelectHlo(condition, if_call_op, else_call_op, conditional));
-  TF_RETURN_IF_ERROR(computation->ReplaceInstruction(conditional, select_op));
-  TF_RETURN_IF_ERROR(CallInliner::Inline(if_call_op).status());
-  TF_RETURN_IF_ERROR(CallInliner::Inline(else_call_op).status());
-  return Status::OK();
-}
-
-std::vector<HloInstruction*>
-IntermediateTensorSplitterInlinerVisitor::FindTaintedConditionals(
-    HloInstruction* loop, std::vector<HloInstruction*>* acc) {
-  // TODO: For now, just inline everything ...
-}
-std::vector<HloInstruction*>
-IntermediateTensorSplitterInlinerVisitor::FindTaintedCalls(
-    HloInstruction* loop, std::vector<HloInstruction*>* acc) {
-  // TODO: For now, just inline everything ...
-}
-
-HloInstruction* IntermediateTensorSplitterInlinerVisitor::InlineIntoComputation(
-    HloInstruction* inst, HloComputation* comp,
-    std::vector<HloInstruction*>* parameters, HloInstruction* param_tuple) {
-  changed_ = true;
-
-  if (OperandShouldBeSplit(inst)) {
-    // inline the operands recursively
-    std::vector<HloInstruction*> operands;
-    for (HloInstruction* op : inst->operands()) {
-      operands.push_back(
-          InlineIntoComputation(op, comp, parameters, param_tuple));
-    }
-    return comp->AddInstruction(
-        inst->CloneWithNewOperands(inst->shape(), operands));
-  } else {
-    // this is a leaf of the inline process, create a 'parameter'
-    if (parameters != nullptr) parameters->push_back(inst);
-
-    int64 tuple_count = ShapeUtil::TupleElementCount(param_tuple->shape());
-    param_tuple->mutable_shape()->mutable_tuple_shapes()->push_back(
-        inst->shape());
-    HloInstruction* param =
-        comp->AddInstruction(HloInstruction::CreateGetTupleElement(
-            inst->shape(), param_tuple, tuple_count));
-
-    comp->root_instruction()->AppendOperand(param);
-    comp->root_instruction()
-        ->mutable_shape()
-        ->mutable_tuple_shapes()
-        ->push_back(param->shape());
-
-    return param;
-  }
-}
-
-Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
-    HloInstruction* loop) {
-  // basic checks (does not actually check if CAN inline ..)
-  HloInstruction* init = loop->mutable_operand(0);
-  if (!init->shape().IsTuple()) {
-    return Status::OK();  // TODO: Handle this case as well ...
-  }
-
-  HloInstruction* split_arg = nullptr;
-  int64 split_arg_idx = -1;
-  for (int64 idx = 0; idx < init->operand_count(); idx++) {
-    auto* arg = init->mutable_operand(idx);
-    if (OperandShouldBeSplit(arg) && OperandCanBeSplit(arg)) {
-      split_arg = init->mutable_operand(idx);
-      split_arg_idx = idx;
-    }
-  }
-  if (split_arg == nullptr) {
-    return Status::OK();  // Nothing to split ...
-  }
-
-  // inline argument into the computation
-  std::vector<HloInstruction*> params;
-  HloInstruction* inline_arg_body =
-      InlineIntoComputation(split_arg, loop->while_body(), &params,
-                            loop->while_body()->parameter_instruction(0));
-  HloInstruction* inline_arg_cond =
-      InlineIntoComputation(split_arg, loop->while_condition(), nullptr,
-                            loop->while_condition()->parameter_instruction(0));
-
-  // add parameters into the initialize tuple
-  for (auto* param : params) {
-    loop->AppendOperand(param);
-    loop->mutable_shape()->mutable_tuple_shapes()->push_back(param->shape());
-  }
-
-  // replace instances to touple get with the inline parameter
-  for (HloInstruction* user :
-       loop->while_body()->parameter_instruction(0)->users()) {
-    if (user->opcode() != HloOpcode::kGetTupleElement) continue;
-    if (user->tuple_index() != split_arg_idx) continue;
-    TF_RETURN_IF_ERROR(ReplaceInstruction(user, inline_arg_body));
-  }
-  for (HloInstruction* user :
-       loop->while_condition()->parameter_instruction(0)->users()) {
-    if (user->opcode() != HloOpcode::kGetTupleElement) continue;
-    if (user->tuple_index() != split_arg_idx) continue;
-    TF_RETURN_IF_ERROR(ReplaceInstruction(user, inline_arg_cond));
-  }
-
-  // remove the original large param (FIXME ...)
-  std::vector<Shape> tuple_shapes =
-      *init->mutable_shape()->mutable_tuple_shapes();
-  tuple_shapes.erase(tuple_shapes.begin() + split_arg_idx);
-  Shape tuple_shape = ShapeUtil::MakeTupleShape(tuple_shapes);
-
-  std::vector<HloInstruction*> tuple_operands; init->operands();
-  for (int64 i = 0; i < init->operand_count(); i ++) {
-    if (i == split_arg_idx) continue;
-    tuple_operands.push_back(init->mutable_operand(i));
-  }
-
-  HloInstruction* new_tuple = init->parent()->AddInstruction(
-      init->CloneWithNewOperands(tuple_shape, tuple_operands));
-  TF_RETURN_IF_ERROR(ReplaceInstruction(init, new_tuple));
-
-  // replace users of the original large parameter in the while tuple with the original value
-
-  // replace the shape of the wile tuple
-  // update the tuple indexes of all the users ...
-
-  // to linline (>.<)
-
-  // TODO: This is broken currently:
-  // - need to clone the computations with edits (i.e. inlines)
-  // - need to clone the while loop with edits to the parameters etc
-  // - need to replace the users of the while loop ...
-  // --> problem: what if someone uses the large parameter we're inlining(?)
-
-  // 1) 1 -> inline the large parameter (split_arg)
-  // 1.1 --> [DONE] identify parameter in tupel
-  // 1.2 --> replace very get_tuple X from parameters with inlined version
-  //         (for this step, memoize the inlined version after first inline)
-
-  // actually, we can play dirty and build a nested tuple ;)
-  // but its probably better + easier not to ..
-  // 1.3 --> replace the tuples N>X with N-1
-  // 1.4 --> replace the outside tuple with a X removed tuple
-
-  // TODO: Determine which things inside are tainted and only inline
-  // those ...
-
-  // 2) 2 -> run the inside inliner to inline conditionals and calls
 }
 
 int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
@@ -504,9 +279,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       int64 operand_split_dim = split_dim;  // split dim in operand
       if (inst->dimensions(0) <= split_dim) operand_split_dim += 1;
 
-      TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
-                          SplitInstruction(inst->mutable_operand(0),
-                                           operand_split_dim, split_size));
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * new_operand,
+          SplitInstruction(inst->mutable_operand(0), operand_split_dim, split_size));
 
       HloInstruction* init_operand = inst->mutable_operand(1);
       int64 param_idx;
@@ -514,15 +289,14 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
         param_idx = params.size();
         params.push_back(init_operand);
       }
-      HloInstruction* new_init_operand =
-          builder_.AddInstruction(HloInstruction::CreateParameter(
-              param_idx, init_operand->shape(), "init_op_param"));
-
+      HloInstruction* new_init_operand = builder_.AddInstruction(
+          HloInstruction::CreateParameter(
+            param_idx, init_operand->shape(), "init_op_param"));
+      
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(inst->CloneWithNewOperands(
-          new_shape, {new_operand, new_init_operand}));
+      return builder_.AddInstruction(inst->CloneWithNewOperands(new_shape, {new_operand, new_init_operand}));
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
@@ -999,13 +773,9 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
   int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
-  IntermediateTensorSplitterInlinerVisitor inliner(split_size, split_size,
-                                                   module);
   IntermediateTensorSplitterRewriteVisitor rewrite(split_size, split_size,
                                                    module);
-  TF_ASSIGN_OR_RETURN(bool did_inline, inliner.RunOnModule(module));
-  TF_ASSIGN_OR_RETURN(bool did_rewrite, rewrite.RunOnModule(module));
-  return did_inline || did_rewrite;
+  return rewrite.RunOnModule(module);
 }
 
 }  // namespace xla
