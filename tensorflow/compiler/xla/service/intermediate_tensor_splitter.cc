@@ -381,7 +381,7 @@ Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
     TF_RETURN_IF_ERROR(ReplaceInstruction(user, inline_arg_cond));
   }
 
-  // remove the original large param
+  // remove the original large param (FIXME ...)
   std::vector<Shape> tuple_shapes =
       *init->mutable_shape()->mutable_tuple_shapes();
   tuple_shapes.erase(tuple_shapes.begin() + split_arg_idx);
@@ -397,7 +397,18 @@ Status IntermediateTensorSplitterInlinerVisitor::HandleWhile(
       init->CloneWithNewOperands(tuple_shape, tuple_operands));
   TF_RETURN_IF_ERROR(ReplaceInstruction(init, new_tuple));
 
+  // replace users of the original large parameter in the while tuple with the original value
+
+  // replace the shape of the wile tuple
+  // update the tuple indexes of all the users ...
+
   // to linline (>.<)
+
+  // TODO: This is broken currently:
+  // - need to clone the computations with edits (i.e. inlines)
+  // - need to clone the while loop with edits to the parameters etc
+  // - need to replace the users of the while loop ...
+  // --> problem: what if someone uses the large parameter we're inlining(?)
 
   // 1) 1 -> inline the large parameter (split_arg)
   // 1.1 --> [DONE] identify parameter in tupel
