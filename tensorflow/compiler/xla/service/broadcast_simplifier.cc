@@ -32,6 +32,8 @@ class BroadcastSimplifierVisitor : public DfsHloRewriteVisitor {
   Status HandleTranspose(HloInstruction* transpose) override;
 
   Status HandleReshape(HloInstruction* reshape) override;
+
+  Status HandleConvert(HloInstruction* convert) override;
 };
 
 }  // namespace
@@ -79,6 +81,16 @@ Status BroadcastSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
   if (ShapeUtil::Equal(reshape->shape(), op->shape())) {
     // This reshape does nothing, remove it
     return ReplaceInstruction(reshape, op);
+  }
+}
+
+Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
+  HloInstruction* op;
+  CHECK(Match(convert, m::Convert(m::Op(&op))));
+
+  if (ShapeUtil::Equal(convert->shape(), op->shape())) {
+    // This convert does nothing, remove it
+    return ReplaceInstruction(convert, op);
   }
 }
 
