@@ -64,16 +64,16 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(HloInstruction* reduce,
   //   return false;
   // }
 
-  if (!Match(lhs, m::Broadcast(m::Op(x))) ||
-      !Match(rhs, m::Broadcast(m::Op(y))))
-    return false;
+  // if (!Match(lhs, m::Broadcast(m::Op(x))) ||
+  //     !Match(rhs, m::Broadcast(m::Op(y))))
+  //   return false;
 
   // TODO: Check that the broad-casts are of the appropriate dimensions
 
   return true;
 }
 
-Status AlgebraicRewriteVisitor::HandleReduce(HloInstruction* reduce) {
+Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   LOG(INFO) << "Hello world!";
 
   // match (x +/- y)
