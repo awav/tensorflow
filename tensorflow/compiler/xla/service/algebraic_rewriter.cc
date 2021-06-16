@@ -36,7 +36,7 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(HloInstruction* power,
   HloInstruction* add_or_sub;
   HloInstruction* reduce_init;
   HloInstruction* power_const;
-  if (!Match(power, m::Power(m::Op(&reduce), m::Constant(&power_const))))
+  if (!Match(power, m::Power(m::Op(&reduce), m::Broadcast(m::Constant(&power_const)))))
     return false;
   LOG(INFO) << "matched power";
   if (!Match(reduce, m::Reduce(m::Op(&add_or_sub), m::Constant(&reduce_init))))
