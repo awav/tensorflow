@@ -21,64 +21,68 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
                            HloInstruction** y, bool* is_sub);
 
-  Status HandleReduce(HloInstruction* reduce) override;
+  Status HandlePower(HloInstruction* pow) override;
 };
 
 }  // namespace
 
-bool AlgebraicRewriterVisitor::MatchDistanceMatrix(HloInstruction* reduce,
+bool AlgebraicRewriterVisitor::MatchDistanceMatrix(HloInstruction* power,
                                                    HloInstruction** x,
                                                    HloInstruction** y,
                                                    bool* is_sub) {
-  HloInstruction* reduce_op;
+  // Check up to reduce
+  HloInstruction* _;
+  HloInstruction* reduce;
+  HloInstruction* add_or_sub;
   HloInstruction* reduce_init;
-  if (!Match(reduce, m::Reduce(m::Op(&reduce_op), m::Op(&reduce_init))))
+  HloInstruction* power_const;
+  if (!Match(power, m::Power(m::Op(&reduce), m::Constant(&power_const))))
     return false;
-  HloInstruction* reduce_init_const;
-  if (!Match(reduce_init, m::Constant(&reduce_init_const)) &&
-      !Match(reduce_init, m::Convert(m::Constant(&reduce_init_const))))
+  LOG(INFO) << "matched power";
+  if (!Match(reduce, m::Reduce(m::Op(&add_or_sub), m::Constant(&reduce_init))))
     return false;
+  LOG(INFO) << "matched reduce";
 
-  if (ShapeUtil::ElementsIn(reduce_init_const->shape()) != 1) return false;
-  if (!reduce_init_const->literal().IsZero({0})) return false;
+  // Check add or sub
+  HloInstruction *lhs, *rhs;
+  if (Match(add_or_sub, m::Add(m::Op(&lhs), m::Op(&rhs))))
+    *is_sub = false;
+  else if (Match(add_or_sub, m::Subtract(m::Op(&lhs), m::Op(&rhs))))
+    *is_sub = true;
+  else
+    return false;
+  LOG(INFO) << "matched addition/ subtraction";
 
-  // TODO: Verify the reduce computation is indeed a sum ...
-  HloComputation* reduce_computation = reduce->called_computations()[0];
+  // Check broadcast
+  if (!Match(lhs, m::Broadcast(m::Op(x))) ||
+      !Match(rhs, m::Broadcast(m::Op(y))))
+    return false;
+  LOG(INFO) << "matched broadcast";
 
-  // TODO: Redo this without the converts, since we now have a
-  // pass to remove them ...
-  // HloInstruction* sub_or_add;
-  // if (!Match(reduce_op, m::Add(&sub_or_add)) &&
-  //     !Match(reduce_op, m::Convert(m::Add(&sub_or_add))) &&
-  //     !Match(reduce_op, m::Subtract(&sub_or_add)) &&
-  //     !Match(reduce_op, m::Convert(m::Subtract(&sub_or_add))))
-  //   return false;
+  // Check the constants are correct
+  if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1) return false;
+  if (!reduce_init->literal().IsZero({0})) return false;
+  LOG(INFO) << "matched reduce init = 0";
 
-  // HloInstruction* lhs;
-  // HloInstruction* rhs;
-  // if (Match(sub_or_add, m::Add(&sub_or_add, m::Op(&lhs), m::Op(&rhs)))) {
-  //   *is_sub = false;
-  // } else if (Match(sub_or_add, m::Subtract(&sub_or_add, m::Op(&lhs), m::Op(&rhs)))) {
-  //   *is_sub = true;
-  // } else {
-  //   return false;
-  // }
+  if (ShapeUtil::ElementsIn(power_const->shape()) != 1) return false;
+  if (!power_const->literal().Get<float>({0}) == 2.0) return false;
+  LOG(INFO) << "matched power = 2";
 
-  // if (!Match(lhs, m::Broadcast(m::Op(x))) ||
-  //     !Match(rhs, m::Broadcast(m::Op(y))))
-  //   return false;
+  // TODO: Check the broadcast + reduce dimensions are correct
 
-  // TODO: Check that the broad-casts are of the appropriate dimensions
+  // TODO: Check reduce computation is add
 
   return true;
 }
 
-Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
+Status AlgebraicRewriterVisitor::HandlePower(HloInstruction* pow) {
   LOG(INFO) << "Hello world!";
 
-  // match (x +/- y)
-  HloInstruction* x;
-  HloInstruction* y;
+  HloInstruction *x, *y;
+  bool is_sub;
+  if (!MatchDistanceMatrix(pow, &x, &y, &is_sub)) return Status::OK();
+
+  LOG(INFO) << "Matched dist matrix! Is sub = " << (is_sub ? "yes" : "no");
 }
 
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
