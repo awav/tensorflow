@@ -20,8 +20,8 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
                            HloInstruction** y, bool* is_sub, int64* x_dim,
-                           int64* x_redzce_dim, int64* y_dim,
-                           int64* y_reduce_dim);
+                           int64* x_reduce_dim, int64* x_dot_dim, int64* y_dim,
+                           int64* y_reduce_dim, int64* y_dot_dim);
 
   Status HandleReduce(HloInstruction* reduce) override;
 };
@@ -30,8 +30,8 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
 bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     HloInstruction* reduce, HloInstruction** x, HloInstruction** y,
-    bool* is_sub, int64* x_dim, int64* x_reduce_dim, int64* y_dim,
-    int64* y_reduce_dim) {
+    bool* is_sub, int64* x_dim, int64* x_reduce_dim, int64* x_dot_dim,
+    int64* y_dim, int64* y_reduce_dim, int64* y_dot_dim) {
   // Check up to reduce
   HloInstruction* add_or_sub;
   HloInstruction* reduce_init;
@@ -83,19 +83,24 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   // there must be a pair of dims i =/= j such that:
   // x -> i : R, j : B and y -> i : B, j : R
   CHECK(ShapeUtil::Equal(lhs->shape(), rhs->shape()));
-  if (lhs->shape().rank() < 3) return false;
+  if (lhs->shape().rank() != 3) return false;
   int64 rank = lhs->shape().rank();
   *x_dim = -1;
   *y_dim = -1;
   for (int64 i = 0; i < rank; i++) {
     for (int64 j = 0; j < rank; j++) {
       if (i == j) continue;
+      if (i == reduce_dim || j == reduce_dim) continue;
       if (absl::c_linear_search(lhs->dimensions(), i) &&
           !absl::c_linear_search(lhs->dimensions(), j) &&
           !absl::c_linear_search(rhs->dimensions(), i) &&
           absl::c_linear_search(rhs->dimensions(), j)) {
         *x_dim = i;
         *y_dim = j;
+        for (int64 k = 0; k < lhs->dimensions().size(); k++)
+          if (lhs->dimensions(k) == i) *x_dot_dim = k;
+        for (int64 k = 0; k < rhs->dimensions().size(); k++)
+          if (rhs->dimensions(k) == i) *y_dot_dim = k;
       }
     }
   }
@@ -111,9 +116,9 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 
   HloInstruction *x, *y;
   bool is_sub;
-  int64 x_dim, x_reduce_dim, y_dim, y_reduce_dim;
+  int64 x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
   if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
-                           &y_dim, &y_reduce_dim))
+                           &x_dot_dim, &y_dim, &y_reduce_dim, &y_dot_dim))
     return Status::OK();
 
   LOG(INFO) << "Matched dist matrix! Is sub = " << (is_sub ? "yes" : "no");
@@ -140,7 +145,6 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   Shape x_reduce_shape = ShapeUtil::MakeShape(x_squared->shape().element_type(),
                                               x_squared->shape().dimensions());
   x_reduce_shape.DeleteDimension(x_reduce_dim);
-  if (x_reduce_dim < x_dim) x_dim--;
   HloInstruction* x_reduce =
       reduce->parent()->AddInstruction(HloInstruction::CreateReduce(
           x_reduce_shape, x_squared, zero, {x_reduce_dim}, reduce_sum));
@@ -148,12 +152,26 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   Shape y_reduce_shape = ShapeUtil::MakeShape(y_squared->shape().element_type(),
                                               y_squared->shape().dimensions());
   y_reduce_shape.DeleteDimension(y_reduce_dim);
-  if (y_reduce_dim < y_dim) y_dim--;
   HloInstruction* y_reduce =
       reduce->parent()->AddInstruction(HloInstruction::CreateReduce(
           y_reduce_shape, y_squared, zero, {y_reduce_dim}, reduce_sum));
 
-  // - create outer product
+  // x y outer product
+  Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
+  for (int64 i = 0; i < x->shape().rank(); i++)
+    if (i != x_dot_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
+  for (int64 i = 0; i < y->shape().rank(); i++)
+    if (i != y_dot_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
+
+  PrecisionConfig conf;
+  DotDimensionNumbers dnums;
+  dnums.add_lhs_contracting_dimensions(x_dot_dim);
+  dnums.add_rhs_contracting_dimensions(y_dot_dim);
+  HloInstruction* xy = reduce->parent()->AddInstruction(
+      HloInstruction::CreateDot(xy_shape, x, y, dnums, conf));
+
+  // transpose to match original
+
   // - create transpose to match previous dims (generate dims, if none changed,
   //   ignore the step)
   // - create broadcasts for x² and y² create sums to get
