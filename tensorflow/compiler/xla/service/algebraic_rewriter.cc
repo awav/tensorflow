@@ -117,6 +117,49 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
     return Status::OK();
 
   LOG(INFO) << "Matched dist matrix! Is sub = " << (is_sub ? "yes" : "no");
+
+  // constants
+  HloInstruction* zero = reduce->parent()->AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0)));
+  HloInstruction* two = reduce->parent()->AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(2)));
+
+  // squares
+  HloInstruction* two_x = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBroadcast(x->shape(), two, {}));
+  HloInstruction* x_squared = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBinary(x->shape(), HloOpcode::kPower, x, two_x));
+  HloInstruction* two_y = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBroadcast(y->shape(), two, {}));
+  HloInstruction* y_squared = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBinary(y->shape(), HloOpcode::kPower, y, two_y));
+
+  // reduce the squares
+  HloComputation* reduce_sum = reduce->called_computations()[0];
+
+  Shape x_reduce_shape = ShapeUtil::MakeShape(x_squared->shape().element_type(),
+                                              x_squared->shape().dimensions());
+  x_reduce_shape.DeleteDimension(x_reduce_dim);
+  if (x_reduce_dim < x_dim) x_dim--;
+  HloInstruction* x_reduce =
+      reduce->parent()->AddInstruction(HloInstruction::CreateReduce(
+          x_reduce_shape, x_squared, zero, {x_reduce_dim}, reduce_sum));
+
+  Shape y_reduce_shape = ShapeUtil::MakeShape(y_squared->shape().element_type(),
+                                              y_squared->shape().dimensions());
+  y_reduce_shape.DeleteDimension(y_reduce_dim);
+  if (y_reduce_dim < y_dim) y_dim--;
+  HloInstruction* y_reduce =
+      reduce->parent()->AddInstruction(HloInstruction::CreateReduce(
+          y_reduce_shape, y_squared, zero, {y_reduce_dim}, reduce_sum));
+
+  // - create outer product
+  // - create transpose to match previous dims (generate dims, if none changed,
+  //   ignore the step)
+  // - create broadcasts for x² and y² create sums to get
+  //   everything together ...
+
+  // DONE: replace instruction
 }
 
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
