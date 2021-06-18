@@ -20,8 +20,8 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
                            HloInstruction** y, bool* is_sub, int64* x_dim,
-                           int64* x_reduce_dim, int64* x_dot_dim, int64* y_dim,
-                           int64* y_reduce_dim, int64* y_dot_dim);
+                           int64* x_reduce_dim, int64* y_dim,
+                           int64* y_reduce_dim);
 
   Status HandleReduce(HloInstruction* reduce) override;
 };
@@ -30,8 +30,8 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
 bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     HloInstruction* reduce, HloInstruction** x, HloInstruction** y,
-    bool* is_sub, int64* x_dim, int64* x_reduce_dim, int64* x_dot_dim,
-    int64* y_dim, int64* y_reduce_dim, int64* y_dot_dim) {
+    bool* is_sub, int64* x_dim, int64* x_reduce_dim, int64* y_dim,
+    int64* y_reduce_dim) {
   // Check up to reduce
   HloInstruction* add_or_sub;
   HloInstruction* reduce_init;
@@ -97,10 +97,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
           absl::c_linear_search(rhs->dimensions(), j)) {
         *x_dim = i;
         *y_dim = j;
-        for (int64 k = 0; k < lhs->dimensions().size(); k++)
-          if (lhs->dimensions(k) == i) *x_dot_dim = k;
-        for (int64 k = 0; k < rhs->dimensions().size(); k++)
-          if (rhs->dimensions(k) == i) *y_dot_dim = k;
       }
     }
   }
@@ -118,10 +114,12 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   bool is_sub;
   int64 x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
   if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
-                           &x_dot_dim, &y_dim, &y_reduce_dim, &y_dot_dim))
+                           &y_dim, &y_reduce_dim))
     return Status::OK();
 
   LOG(INFO) << "Matched dist matrix! Is sub = " << (is_sub ? "yes" : "no");
+  LOG(INFO) << "x_dim " << x_dim << " reduce " << x_reduce_dim;
+  LOG(INFO) << "y_dim " << y_dim << " reduce " << y_reduce_dim;
 
   // constants
   HloInstruction* zero = reduce->parent()->AddInstruction(
@@ -159,25 +157,44 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   // x y outer product
   Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
   for (int64 i = 0; i < x->shape().rank(); i++)
-    if (i != x_dot_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
+    if (i != x_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
   for (int64 i = 0; i < y->shape().rank(); i++)
-    if (i != y_dot_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
+    if (i != y_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
 
   PrecisionConfig conf;
   DotDimensionNumbers dnums;
-  dnums.add_lhs_contracting_dimensions(x_dot_dim);
-  dnums.add_rhs_contracting_dimensions(y_dot_dim);
+  dnums.add_lhs_contracting_dimensions(x_reduce_dim);
+  dnums.add_rhs_contracting_dimensions(y_reduce_dim);
   HloInstruction* xy = reduce->parent()->AddInstruction(
       HloInstruction::CreateDot(xy_shape, x, y, dnums, conf));
 
-  // transpose to match original
+  // transpose to match original (TODO: Support more than 3 dims ...)
+  // FIXME: Having a transpose causes a core dump (?)
+  //        fails condition in tensorflow/compiler/xla/permutation_util.cc:46
+  //
+  // fix could be: do the dots the right way around from the start ...
+  if (x_dim == 1) {
+    CHECK(y_dim == 0);
+    CHECK(xy->shape().rank() == 2);
+    Shape tshape = ShapeUtil::MakeShape(
+        xy->shape().element_type(),
+        {xy->shape().dimensions(1), xy->shape().dimensions(0)});
+    xy = reduce->parent()->AddInstruction(
+        HloInstruction::CreateTranspose(tshape, xy, {1, 0}));
+  }
 
-  // - create transpose to match previous dims (generate dims, if none changed,
-  //   ignore the step)
-  // - create broadcasts for x² and y² create sums to get
-  //   everything together ...
+  HloInstruction* x_broadcast = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBroadcast(xy->shape(), x_reduce, {x_dim}));
+  HloInstruction* y_broadcast = reduce->parent()->AddInstruction(
+      HloInstruction::CreateBroadcast(xy->shape(), y_reduce, {y_dim}));
 
-  // DONE: replace instruction
+  HloInstruction* x_y_sum =
+      reduce->parent()->AddInstruction(HloInstruction::CreateBinary(
+          xy->shape(), HloOpcode::kAdd, x_broadcast, y_broadcast));
+
+  ReplaceInstruction(
+      reduce, reduce->parent()->AddInstruction(HloInstruction::CreateBinary(
+                  xy->shape(), HloOpcode::kAdd, x_y_sum, xy)));
 }
 
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
