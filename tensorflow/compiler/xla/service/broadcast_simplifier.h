@@ -13,7 +13,7 @@ namespace xla {
 // like intermediate_tensor_splitter.
 class BroadcastSimplifier : public HloModulePass {
  public:
-  absl::string_view name() const override { return "split-intermediate-tensors"; }
+  absl::string_view name() const override { return "broadcast-simplifier"; }
 
   StatusOr<bool> Run(HloModule* module) override;
 };

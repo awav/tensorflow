@@ -197,6 +197,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:dot_order_optimizer",
         "//tensorflow/compiler/xla/service:intermediate_tensor_splitter",
         "//tensorflow/compiler/xla/service:broadcast_simplifier",
+        "//tensorflow/compiler/xla/service:algebraic_rewriter",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_constant_folding",
         "//tensorflow/compiler/xla/service:hlo_cse",

@@ -2061,6 +2061,18 @@ cc_library(
 )
 
 cc_library(
+    name = "algebraic_rewriter",
+    srcs = ["algebraic_rewriter.cc"],
+    hdrs = ["algebraic_rewriter.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:status_macros",
+    ],
+)
+
+cc_library(
     name = "dot_order_optimizer",
     srcs = ["dot_order_optimizer.cc"],
     hdrs = ["dot_order_optimizer.h"],
