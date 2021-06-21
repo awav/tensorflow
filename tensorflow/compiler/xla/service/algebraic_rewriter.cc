@@ -41,7 +41,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
                                 m::Broadcast(m::Constant(&power_const))),
                        m::Constant(&reduce_init))))
     return false;
-  LOG(INFO) << "match reduce + power";
 
   // Check add or sub
   HloInstruction *lhs, *rhs;
@@ -51,22 +50,18 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     *is_sub = true;
   else
     return false;
-  LOG(INFO) << "match add or sub";
 
   // Check broadcast
   if (!Match(lhs, m::Broadcast(m::Op(x))) ||
       !Match(rhs, m::Broadcast(m::Op(y))))
     return false;
-  LOG(INFO) << "match broadcasts";
 
   // Check the constants are correct
   if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1) return false;
   if (!reduce_init->literal().IsZero({0})) return false;
-  LOG(INFO) << "match reduce const";
 
   if (ShapeUtil::ElementsIn(power_const->shape()) != 1) return false;
   if (!power_const->literal().Get<float>({0}) == 2.0) return false;
-  LOG(INFO) << "match power const";
 
   // Check the broadcast + reduce dimensions are correct
   int64 reduce_dim = reduce->dimensions(0);
@@ -108,7 +103,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
 }
 
 Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
-  LOG(INFO) << "Hello world!";
 
   HloInstruction *x, *y;
   bool is_sub;
@@ -116,10 +110,6 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
                            &y_dim, &y_reduce_dim))
     return Status::OK();
-
-  LOG(INFO) << "Matched dist matrix! Is sub = " << (is_sub ? "yes" : "no");
-  LOG(INFO) << "x_dim " << x_dim << " reduce " << x_reduce_dim;
-  LOG(INFO) << "y_dim " << y_dim << " reduce " << y_reduce_dim;
 
   // constants
   HloInstruction* zero = reduce->parent()->AddInstruction(
@@ -155,32 +145,36 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
           y_reduce_shape, y_squared, zero, {y_reduce_dim}, reduce_sum));
 
   // x y outer product
-  Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
-  for (int64 i = 0; i < x->shape().rank(); i++)
-    if (i != x_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
-  for (int64 i = 0; i < y->shape().rank(); i++)
-    if (i != y_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
+  HloInstruction* xy;
+  if (x_dim == 0 && y_dim == 1) {
+    Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
+    for (int64 i = 0; i < x->shape().rank(); i++)
+      if (i != x_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
+    for (int64 i = 0; i < y->shape().rank(); i++)
+      if (i != y_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
 
-  PrecisionConfig conf;
-  DotDimensionNumbers dnums;
-  dnums.add_lhs_contracting_dimensions(x_reduce_dim);
-  dnums.add_rhs_contracting_dimensions(y_reduce_dim);
-  HloInstruction* xy = reduce->parent()->AddInstruction(
-      HloInstruction::CreateDot(xy_shape, x, y, dnums, conf));
-
-  // transpose to match original (TODO: Support more than 3 dims ...)
-  // FIXME: Having a transpose causes a core dump (?)
-  //        fails condition in tensorflow/compiler/xla/permutation_util.cc:46
-  //
-  // fix could be: do the dots the right way around from the start ...
-  if (x_dim == 1) {
-    CHECK(y_dim == 0);
-    CHECK(xy->shape().rank() == 2);
-    Shape tshape = ShapeUtil::MakeShape(
-        xy->shape().element_type(),
-        {xy->shape().dimensions(1), xy->shape().dimensions(0)});
+    PrecisionConfig conf;
+    DotDimensionNumbers dnums;
+    dnums.add_lhs_contracting_dimensions(x_reduce_dim);
+    dnums.add_rhs_contracting_dimensions(y_reduce_dim);
     xy = reduce->parent()->AddInstruction(
-        HloInstruction::CreateTranspose(tshape, xy, {1, 0}));
+        HloInstruction::CreateDot(xy_shape, x, y, dnums, conf));
+  } else if (x_dim == 1 && y_dim == 0) {
+    Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
+    for (int64 i = 0; i < y->shape().rank(); i++)
+      if (i != x_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
+    for (int64 i = 0; i < x->shape().rank(); i++)
+      if (i != y_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
+
+    PrecisionConfig conf;
+    DotDimensionNumbers dnums;
+    dnums.add_lhs_contracting_dimensions(y_reduce_dim);
+    dnums.add_rhs_contracting_dimensions(x_reduce_dim);
+    xy = reduce->parent()->AddInstruction(
+        HloInstruction::CreateDot(xy_shape, y, x, dnums, conf));
+  } else {
+    // failed pre-condition :/
+    CHECK((x_dim == 0 && y_dim == 1) || (x_dim == 1 && y_dim == 0));
   }
 
   HloInstruction* x_broadcast = reduce->parent()->AddInstruction(
