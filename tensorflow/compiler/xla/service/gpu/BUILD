@@ -1434,6 +1434,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:hlo_verifier",
         "//tensorflow/compiler/xla/service:intermediate_tensor_splitter",
         "//tensorflow/compiler/xla/service:broadcast_simplifier",
+        "//tensorflow/compiler/xla/service:algebraic_rewriter",
         "//tensorflow/compiler/xla/service:llvm_compiler",
         "//tensorflow/compiler/xla/service:logistic_expander",
         "//tensorflow/compiler/xla/service:loop_schedule_linearizer",
