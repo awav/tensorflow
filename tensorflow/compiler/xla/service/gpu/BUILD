@@ -1415,6 +1415,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:conditional_simplifier",
         "//tensorflow/compiler/xla/service:convolution_4d_expander",
         "//tensorflow/compiler/xla/service:dot_decomposer",
+        "//tensorflow/compiler/xla/service:dot_order_optimizer",
         "//tensorflow/compiler/xla/service:dump",
         "//tensorflow/compiler/xla/service:dynamic_index_splitter",
         "//tensorflow/compiler/xla/service:dynamic_padder",
