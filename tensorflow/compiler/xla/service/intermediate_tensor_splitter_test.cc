@@ -22,13 +22,17 @@ class IntermediateTensorSplitterTest : public HloTestBase {
 
   const int64 large_dim() { return 2 * max_size() / 10000; }
 
-  const int64 max_op_size_in_graph(HloInstruction* inst) {
+  const int64 max_op_bytes_in_graph(HloInstruction* inst) {
     int64 max_size = 0;
-    max_size = std::max(max_size, ShapeUtil::ElementsIn(inst->shape()));
+    max_size = std::max(max_size, ShapeUtil::ByteSizeOf(inst->shape(), 8));
     for (HloInstruction* op : inst->operands()) {
-      max_size = std::max(max_size, max_op_size_in_graph(op));
+      max_size = std::max(max_size, max_op_bytes_in_graph(op));
     }
     return max_size;
+  }
+
+  const bool graph_needs_split(HloInstruction* inst) {
+    return max_size() < max_op_bytes_in_graph(inst);
   }
 
   string replace_all_in_string(string original, string find, string replace) {
@@ -81,15 +85,13 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test the most basic rhs case: exp(AB^T)v
@@ -129,15 +131,13 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test the case where the to split dimension lies on the
@@ -178,15 +178,13 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test broadcast instructions as source
@@ -218,15 +216,13 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test broadcast instructions as source when split dim
@@ -259,15 +255,13 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test iota with iota dimension along split
@@ -293,15 +287,13 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongIotaDim) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test iota with non-iota dimension along split
@@ -327,15 +319,13 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test single argument reduce (e.g. max)
@@ -368,15 +358,13 @@ TEST_F(IntermediateTensorSplitterTest, SingleOperandReduce) {
 
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Reduce(m::Op().Is(a), m::Op().Is(init))));
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) >
-              max_size());
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(computation->root_instruction()) <=
-              max_size());
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
 // Test multi argument reduce (e.g. argmax)
@@ -425,20 +413,20 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 )";
 
   string module_with_big_dims = replace_all_in_string(
-      module_str, "2000", std::to_string(large_dim() / 3));
+      module_str, "2000", std::to_string(large_dim() / 100));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));
 
   HloComputation* entry = module->entry_computation();
 
-  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) > max_size());
+  EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) <= max_size());
+  EXPECT_FALSE(graph_needs_split(entry->root_instruction()));
 }
 
 // Test nested reduce
@@ -485,21 +473,21 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 }
 )";
 
-  string module_with_big_dims = replace_all_in_string(
-      module_str, "2000", std::to_string(large_dim()));
+  string module_with_big_dims =
+      replace_all_in_string(module_str, "2000", std::to_string(large_dim()));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));
 
   HloComputation* entry = module->entry_computation();
 
-  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) > max_size());
+  EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
   IntermediateTensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
-  EXPECT_TRUE(max_op_size_in_graph(entry->root_instruction()) <= max_size());
+  EXPECT_FALSE(graph_needs_split(entry->root_instruction()));
 }
 
 }  // namespace

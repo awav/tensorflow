@@ -15,16 +15,16 @@ namespace {
 namespace m = match;
 
 class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
-  int64 max_intermediate_size;
-  int64 target_intermediate_size;
+  int64 max_intermediate_bytes;
+  int64 target_intermediate_bytes;
   HloModule* parent_module;
 
  public:
   explicit IntermediateTensorSplitterRewriteVisitor(
-      int64 max_intermediate_size, int64 target_intermediate_size,
+      int64 max_intermediate_bytes, int64 target_intermediate_bytes,
       HloModule* parent_module)
-      : max_intermediate_size(max_intermediate_size),
-        target_intermediate_size(target_intermediate_size),
+      : max_intermediate_bytes(max_intermediate_bytes),
+        target_intermediate_bytes(target_intermediate_bytes),
         parent_module(parent_module) {}
 
   // Determine if an operand is large enough such that we are
@@ -110,7 +110,8 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
 bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
-  return ShapeUtil::ElementsIn(inst->shape()) > max_intermediate_size;
+  if (!inst->shape().IsArray()) return false;
+  return ShapeUtil::ByteSizeOfElements(inst->shape()) > max_intermediate_bytes;
 }
 
 bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
@@ -226,6 +227,8 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
     HloInstruction* inst, int64 split_dim) {
   int64 split_size = inst->shape().dimensions(split_dim);
   int64 rest_size = ShapeUtil::ElementsIn(inst->shape()) / split_size;
+  int64 elem_bytes =
+      ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type());
   int64 factors[64];
 
   int64 tmp_size = split_size;
@@ -238,11 +241,15 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
   }
 
   for (int i = 0; i < 64; i++)
-    while (split_size * rest_size > target_intermediate_size &&
+    while (split_size * rest_size * elem_bytes > target_intermediate_bytes &&
            factors[i]-- > 0)
       split_size /= primes[i];
 
-  return split_size <= max_intermediate_size ? split_size : -1;
+  if (split_size * rest_size * elem_bytes <= max_intermediate_bytes) {
+    return split_size;
+  } else {
+    return -1;
+  }
 }
 
 StatusOr<HloInstruction*>
@@ -279,9 +286,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       int64 operand_split_dim = split_dim;  // split dim in operand
       if (inst->dimensions(0) <= split_dim) operand_split_dim += 1;
 
-      TF_ASSIGN_OR_RETURN(
-          HloInstruction * new_operand,
-          SplitInstruction(inst->mutable_operand(0), operand_split_dim, split_size));
+      TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
+                          SplitInstruction(inst->mutable_operand(0),
+                                           operand_split_dim, split_size));
 
       HloInstruction* init_operand = inst->mutable_operand(1);
       int64 param_idx;
@@ -289,14 +296,15 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
         param_idx = params.size();
         params.push_back(init_operand);
       }
-      HloInstruction* new_init_operand = builder_.AddInstruction(
-          HloInstruction::CreateParameter(
-            param_idx, init_operand->shape(), "init_op_param"));
-      
+      HloInstruction* new_init_operand =
+          builder_.AddInstruction(HloInstruction::CreateParameter(
+              param_idx, init_operand->shape(), "init_op_param"));
+
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(inst->CloneWithNewOperands(new_shape, {new_operand, new_init_operand}));
+      return builder_.AddInstruction(inst->CloneWithNewOperands(
+          new_shape, {new_operand, new_init_operand}));
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
@@ -573,6 +581,11 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     CHECK(split_size != -1);
     CHECK(split_count * split_size ==
           split_inst->shape().dimensions(split_dim));
+
+    // LOG(INFO) << "SIZES: split_dim = " << split_dim
+    //           << ", split_size = " << split_size
+    //           << ", split_count = " << split_count << "\n";
+    // CHECK(false);
 
     HloComputation::Builder builder("intermediate_tensor_splitter_dot");
     Splitter splitter(builder, absl::MakeSpan(split_leafs), split_count);

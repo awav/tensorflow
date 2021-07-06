@@ -37,6 +37,7 @@ limitations under the License.
 #include "mlir/InitAllDialects.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
+#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/all_gather_decomposer.h"
 #include "tensorflow/compiler/xla/service/all_reduce_combiner.h"
@@ -176,11 +177,13 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
+    // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     pipeline.AddPass<IntermediateTensorSplitter>();
-    // splitter can cut out large chunks of the graph
-    pipeline.AddPass<HloDCE>();
+    pipeline
+        .AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
     pipeline.AddPass<GpuScatterExpander>();
     // TODO(phawkins): replace QR decompositions with calls to cuSOLVER.
