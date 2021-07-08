@@ -69,7 +69,7 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   class Splitter {
     HloInstruction* param_;   // single tuple param instruction
     HloInstruction* offset_;  // get offset from tuple param
-    std::vector<HloInstruction>*
+    std::vector<HloInstruction*>
         parameters_;  // initialize tuple parameter elements
 
     HloComputation::Builder& builder_;
@@ -108,25 +108,23 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
     // Add the parameter and returnd it's index in the tuple. If get_tuple
     // is passed, it will also create an accessor for the parameter.
-    StatusOr<int64> AddParameter(HloInstruction* inst,
-                                 HloInstruction** get_tuple = nullptr) {
+    int64 AddParameter(HloInstruction* inst,
+                       HloInstruction** get_tuple = nullptr) {
       int64 idx = parameters_size();
       parameters_.push_back(inst);
-      param_.mutable_shape().mutable_tuple_shapes().push_back(inst->shape());
+      param_->mutable_shape()->mutable_tuple_shapes()->push_back(inst->shape());
       if (get_tuple != nullptr) {
-        *get_tuple =
-            builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-                split_op->shape(), param_, idx));
+        *get_tuple = builder_.AddInstruction(
+            HloInstruction::CreateGetTupleElement(inst->shape(), param_, idx));
       }
       return idx;
     }
 
     // Generates the final output tuple from the given root
     // computation part.
-    StatusOr<HloInstruction*> BuildOutputTuple(int64 split_dim,
-                                               int64 split_size,
-                                               HloInstruction* original,
-                                               HloInstruction* part);
+    HloInstruction* BuildOutputTuple(int64 split_dim, int64 split_size,
+                                     HloInstruction* original,
+                                     HloInstruction* part);
 
     int64 parameters_size() { return parameters_.size(); }
 
@@ -309,6 +307,8 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       return builder_.AddInstruction(inst->CloneWithNewOperands(
           new_operand->shape(), absl::MakeSpan(ops)));
     } else if (MatchSupportedNestedReduce(inst)) {
+      CHECK(false); // TODO ...
+      /*
       // For a reduce, split the 0th and only operand
       // (the initializer a scalar, so all we need to do
       // is update the shape and clone the operand with new
@@ -334,7 +334,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
       return builder_.AddInstruction(inst->CloneWithNewOperands(
-          new_shape, {new_operand, new_init_operand}));
+          new_shape, {new_operand, new_init_operand}));*/
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
@@ -420,9 +420,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafDot(
     }
   }
   HloInstruction* split_slice =
-      builder._AddInstruction(HloInstruction::CreateDynamicSlice(
+      builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
           split_shape, split_op_param, absl::MakeSpan(start_indices),
-          absl::MakeSpan(split_shape.dimensions())));
+          split_shape.dimensions()));
 
   // build the final dot
   std::vector<HloInstruction*> ops;
@@ -451,8 +451,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
   int64 parameter_idx;
   Shape parameter_shape = ShapeUtil::MakeShape(operand->shape().element_type(),
                                                operand->shape().dimensions());
-  HloInstruction new_operand;
-
+  HloInstruction* new_operand;
   if (split_on_original_dim) {
     // we need to slice the parameter ...
     int64 operand_split_dim;
@@ -481,9 +480,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
             parameter_shape, param_, parameter_idx));
 
     HloInstruction* new_operand =
-        builder._AddInstruction(HloInstruction::CreateDynamicSlice(
+        builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
             parameter_shape, parameter, absl::MakeSpan(start_indices),
-            absl::MakeSpan(parameter_shape.dimensions())));
+            parameter_shape.dimensions()));
   } else {
     // This will be a parameter and we just modify the broadcast ...
     parameter_idx = AddParameter(operand);
@@ -546,16 +545,16 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
   }
 }
 
-StatusOr<HloInstruction*>
+HloInstruction*
 IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     int64 split_dim, int64 split_size, HloInstruction* original,
     HloInstruction* part) {
   // create the output init (broadcast off of 0)
   HloInstruction* output_init =
-      original->parent->AddInstruction(HloInstruction::CreateConstant(
+      original->parent()->AddInstruction(HloInstruction::CreateConstant(
           LiteralUtil::Zero(original->shape().element_type())));
   std::vector<int64> broadcast_dims = {};
-  HloInstruction* output_init =
+  output_init =
       original->parent()->AddInstruction(HloInstruction::CreateBroadcast(
           original->shape(), output_init, absl::MakeSpan(broadcast_dims)));
   HloInstruction* output;
@@ -691,13 +690,14 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
         cond_builder.AddInstruction(HloInstruction::CreateCompare(
             cond_offset->shape(), cond_offset, offset_less_than,
             ComparisonDirection::kLt));
-    HloComputation* cond =parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
+    HloComputation* cond =
+        parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
 
     // build the while and replace the original element with a get
     // tuple.
     HloInstruction* init = dot->parent()->AddInstruction(
         HloInstruction::CreateTuple(splitter.parameters()));
-    HloComputation* loop = dot->parent()->AddInstruction(
+    HloInstruction* loop = dot->parent()->AddInstruction(
         HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
     HloInstruction* result = dot->parent()->AddInstruction(
         HloInstruction::CreateGetTupleElement(dot->shape(), loop, 1));
@@ -707,6 +707,9 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
 Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     HloInstruction* reduce) {
+  // TODO
+  CHECK(false);
+  /*
   if (!MatchSupportedReduce(reduce)) return Status::OK();
 
   // MatchSupportedReduce enforces that all inputs are of the
@@ -839,6 +842,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
             reduce->shape(), absl::MakeSpan(calls), reduce_split_dim));
     return ReplaceInstruction(reduce, concat);
   }
+  */
 }
 
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
