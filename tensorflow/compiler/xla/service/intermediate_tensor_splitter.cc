@@ -708,7 +708,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     HloInstruction* reduce) {
   // TODO
-  CHECK(false);
+  return Status::OK();
   /*
   if (!MatchSupportedReduce(reduce)) return Status::OK();
 
