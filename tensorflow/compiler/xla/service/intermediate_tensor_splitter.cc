@@ -79,7 +79,8 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
     explicit Splitter(HloComputation::Builder& builder, HloComputation* parent,
                       absl::Span<HloInstruction*> leafs)
         : builder_(builder), leafs_(leafs) {
-      init_offset = parent->AddInstruction(
+      // Create the offset init (0)
+      HloInstruction* init_offset = parent->AddInstruction(
           HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(0)));
       parameters_.push_back(init_offset);
 
@@ -104,6 +105,28 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
     StatusOr<HloInstruction*> SplitLeafIota(HloInstruction* iota,
                                             int64 split_dim, int64 split_size);
+
+    // Add the parameter and returnd it's index in the tuple. If get_tuple
+    // is passed, it will also create an accessor for the parameter.
+    StatusOr<int64> AddParameter(HloInstruction* inst,
+                                 HloInstruction** get_tuple = nullptr) {
+      int64 idx = parameters_size();
+      parameters_.push_back(inst);
+      param_.mutable_shape().mutable_tuple_shapes().push_back(inst->shape());
+      if (get_tuple != nullptr) {
+        *get_tuple =
+            builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
+                split_op->shape(), param_, idx));
+      }
+      return idx;
+    }
+
+    // Generates the final output tuple from the given root
+    // computation part.
+    StatusOr<HloInstruction*> BuildOutputTuple(int64 split_dim,
+                                               int64 split_size,
+                                               HloInstruction* original,
+                                               HloInstruction* part);
 
     int64 parameters_size() { return parameters_.size(); }
 
@@ -377,19 +400,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafDot(
   }
 
   // add parameters
-  param_.mutable_shape().mutable_tuple_shapes().push_back(split_op->shape());
-  int64 split_op_tuple_idx = parameters_.size();
-  parameters_.push_back(split_op);
-  param_.mutable_shape().mutable_tuple_shapes().push_back(join_op->shape());
-  int64 join_op_tuple_idx = parameters_.size();
-  parameters_.push_back(join_op);
-
-  HloInstruction* split_op_param =
-      builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-          split_op->shape(), param_, split_op_tuple_idx));
-  HloInstruction* join_op_param =
-      builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-          join_op->shape(), param_, join_op_tuple_idx));
+  HloInstruction* split_op_param;
+  int64 split_op_tuple_idx = AddParameter(split_op, &split_op_param);
+  HloInstruction* join_op_param;
+  int64 join_op_tuple_idx = AddParameter(join_op, &join_op_param);
 
   // dynamic slice by index
   Shape split_shape = ShapeUtil::MakeShape(split_op->shape().element_type(),
@@ -461,10 +475,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
       }
     }
 
-    param_.mutable_shape().mutable_tuple_shapes().push_back(operand->shape());
-    parameter_idx = parameters_.size();
-    parameters_.push_back(operand);
-
+    parameter_idx = AddParameter(operand);
     HloInstruction* parameter =
         builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
             parameter_shape, param_, parameter_idx));
@@ -475,9 +486,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
             absl::MakeSpan(parameter_shape.dimensions())));
   } else {
     // This will be a parameter and we just modify the broadcast ...
-    param_.mutable_shape().mutable_tuple_shapes().push_back(operand->shape());
-    parameter_idx = parameters_.size();
-    parameters_.push_back(operand);
+    parameter_idx = AddParameter(operand);
     new_operand = builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
         parameter_shape, param_, parameter_idx));
   }
@@ -537,6 +546,54 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
   }
 }
 
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
+    int64 split_dim, int64 split_size, HloInstruction* original,
+    HloInstruction* part) {
+  // create the output init (broadcast off of 0)
+  HloInstruction* output_init =
+      original->parent->AddInstruction(HloInstruction::CreateConstant(
+          LiteralUtil::Zero(original->shape().element_type())));
+  std::vector<int64> broadcast_dims = {};
+  HloInstruction* output_init =
+      original->parent()->AddInstruction(HloInstruction::CreateBroadcast(
+          original->shape(), output_init, absl::MakeSpan(broadcast_dims)));
+  HloInstruction* output;
+  int64 output_idx = AddParameter(output_init, &output);
+
+  // slice part onto output
+  std::vector<HloInstruction*> start_indices;
+  for (int64 dim = 0; dim < output->shape().dimensions_size(); dim++) {
+    if (dim == split_dim) {
+      start_indices.push_back(offset_);
+    } else {
+      start_indices.push_back(builder_.AddInstruction(
+          HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(0))));
+    }
+  }
+  HloInstruction* updated_output =
+      builder_.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
+          output->shape(), output, part, start_indices));
+
+  // add split size to index
+  HloInstruction* split_size_const = builder_.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(split_size)));
+  HloInstruction* updated_index =
+      builder_.AddInstruction(HloInstruction::CreateBinary(
+          offset_->shape(), HloOpcode::kAdd, offset_, split_size_const));
+
+  // collect idx, output and all parameters into a tuple ..
+  std::vector<HloInstruction*> output_elements = {updated_index,
+                                                  updated_output};
+  for (int64 i = 2; i < param_->shape().tuple_shapes_size(); i++) {
+    HloInstruction* get_tuple =
+        builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
+            param_->shape().tuple_shapes(i), param_, i));
+    output_elements.push_back(get_tuple);
+  }
+  return builder_.AddInstruction(HloInstruction::CreateTuple(output_elements));
+}
+
 Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloInstruction* dot) {
   HloInstruction *lhs, *rhs;
@@ -576,28 +633,18 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     CHECK(split_count * split_size ==
           split_inst->shape().dimensions(split_dim));
 
-    // LOG(INFO) << "SIZES: split_dim = " << split_dim
-    //           << ", split_size = " << split_size
-    //           << ", split_count = " << split_count << "\n";
-    // CHECK(false);
-
-    HloComputation::Builder builder("intermediate_tensor_splitter_dot");
-    Splitter splitter(builder, absl::MakeSpan(split_leafs), split_count);
+    HloComputation::Builder body_builder(
+        "intermediate_tensor_splitter_dot_body");
+    Splitter splitter(body_builder, dot->parent(), absl::MakeSpan(split_leafs));
 
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
         splitter.SplitInstruction(split_inst, split_dim, split_size));
 
     // Add final dot inside of the computation
-    int64 reduce_parameter_idx;
-    for (int64 i = 0; i < splitter.parameters_size(); i++) {
-      reduce_parameter_idx = splitter.parameters(i).size();
-      splitter.parameters(i).push_back(split_is_lhs ? rhs : lhs);
-    }
-    HloInstruction* reduce_param =
-        builder.AddInstruction(HloInstruction::CreateParameter(
-            reduce_parameter_idx, split_is_lhs ? rhs->shape() : lhs->shape(),
-            "reduce_tensor"));
+    HloInstruction* reduce_param;
+    int64 reduce_parameter_idx =
+        splitter.AddParameter(split_is_lhs ? rhs : lhs, &reduce_param);
 
     Shape part_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
                                             dot->shape().dimensions());
@@ -620,24 +667,41 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     } else {
       ops = {reduce_param, comp_root};
     }
-    HloInstruction* comp_dot = builder.AddInstruction(
+    HloInstruction* part = body_builder.AddInstruction(
         dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
 
-    HloComputation* comp =
-        parent_module->AddEmbeddedComputation(builder.Build(comp_dot));
+    HloInstruction* output_tuple =
+        splitter.BuildOutputTuple(dot_split_dim, split_size, dot, part);
+    HloComputation* body =
+        parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
-    std::vector<HloInstruction*> parts;
-    for (auto operands : splitter.parameters()) {
-      HloInstruction* call =
-          dot->parent()->AddInstruction(HloInstruction::CreateCall(
-              comp_dot->shape(), absl::MakeSpan(operands), comp));
-      parts.push_back(call);
-    }
+    // build the condition
+    HloComputation::Builder cond_builder(
+        "intermediate_tensor_splitter_dot_cond");
+    HloInstruction* cond_param =
+        cond_builder.AddInstruction(HloInstruction::CreateParameter(
+            0, output_tuple->shape(), "loop_param"));
+    HloInstruction* cond_offset =
+        cond_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            output_tuple->shape().tuple_shapes(0), cond_param, 0));
+    HloInstruction* offset_less_than =
+        cond_builder.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int64>(split_size * split_count)));
+    HloInstruction* compare =
+        cond_builder.AddInstruction(HloInstruction::CreateCompare(
+            cond_offset->shape(), cond_offset, offset_less_than,
+            ComparisonDirection::kLt));
+    HloComputation* cond =parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
 
-    HloInstruction* concat =
-        dot->parent()->AddInstruction(HloInstruction::CreateConcatenate(
-            dot->shape(), absl::MakeSpan(parts), dot_split_dim));
-    return ReplaceInstruction(dot, concat);
+    // build the while and replace the original element with a get
+    // tuple.
+    HloInstruction* init = dot->parent()->AddInstruction(
+        HloInstruction::CreateTuple(splitter.parameters()));
+    HloComputation* loop = dot->parent()->AddInstruction(
+        HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
+    HloInstruction* result = dot->parent()->AddInstruction(
+        HloInstruction::CreateGetTupleElement(dot->shape(), loop, 1));
+    return ReplaceInstruction(dot, result);
   }
 }
 
