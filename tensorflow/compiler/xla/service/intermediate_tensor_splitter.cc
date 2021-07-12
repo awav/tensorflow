@@ -285,13 +285,17 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
     HloInstruction* inst, int64 split_dim, int64 split_size) {
   if (absl::c_linear_search(leafs_, inst)) {
     if (Match(inst, m::Dot())) {
+      LOG(INFO) << "split leaf dot";
       return SplitLeafDot(inst, split_dim, split_size);
     } else if (Match(inst, m::Broadcast())) {
+      LOG(INFO) << "split leaf broadcast";
       return SplitLeafBroadcast(inst, split_dim, split_size);
     } else if (Match(inst, m::Iota())) {
+      LOG(INFO) << "split leaf iota";
       return SplitLeafIota(inst, split_dim, split_size);
     }
   } else {
+    LOG(INFO) << "split instruction";
     HloInstruction* operand;
     std::vector<HloInstruction*> operands;
 
@@ -307,7 +311,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       return builder_.AddInstruction(inst->CloneWithNewOperands(
           new_operand->shape(), absl::MakeSpan(ops)));
     } else if (MatchSupportedNestedReduce(inst)) {
-      CHECK(false); // TODO ...
+      CHECK(false);  // TODO ...
       /*
       // For a reduce, split the 0th and only operand
       // (the initializer a scalar, so all we need to do
@@ -453,6 +457,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
                                                operand->shape().dimensions());
   HloInstruction* new_operand;
   if (split_on_original_dim) {
+    LOG(INFO) << "split is on original dim";
     // we need to slice the parameter ...
     int64 operand_split_dim;
     for (int64 i = 0; i < broadcast->dimensions().size(); i++) {
@@ -462,7 +467,11 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
       }
     }
 
+    LOG(INFO) << "orig 1";
+
     parameter_shape.set_dimensions(operand_split_dim, split_size);
+
+    LOG(INFO) << "orig 2";
 
     std::vector<HloInstruction*> start_indices;
     for (int64 dim = 0; dim < operand->shape().dimensions_size(); dim++) {
@@ -474,26 +483,32 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
       }
     }
 
-    parameter_idx = AddParameter(operand);
-    HloInstruction* parameter =
-        builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-            parameter_shape, param_, parameter_idx));
+    LOG(INFO) << "orig 3";
+
+    HloInstruction* parameter;
+    parameter_idx = AddParameter(operand, &parameter);
+
+    LOG(INFO) << "orig 4";
 
     HloInstruction* new_operand =
         builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
             parameter_shape, parameter, absl::MakeSpan(start_indices),
             parameter_shape.dimensions()));
   } else {
+    LOG(INFO) << "split is not original dim";
     // This will be a parameter and we just modify the broadcast ...
-    parameter_idx = AddParameter(operand);
-    new_operand = builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-        parameter_shape, param_, parameter_idx));
+    parameter_idx = AddParameter(operand, &new_operand);
   }
+
+  LOG(INFO) << "final ...";
 
   Shape broadcast_shape = ShapeUtil::MakeShape(
       broadcast->shape().element_type(), broadcast->shape().dimensions());
   broadcast_shape.set_dimensions(split_dim, split_size);
   std::vector<HloInstruction*> params = {new_operand};
+
+  LOG(INFO) << "help ???";
+
   return builder_.AddInstruction(
       broadcast->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
 }
@@ -582,13 +597,16 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
           offset_->shape(), HloOpcode::kAdd, offset_, split_size_const));
 
   // collect idx, output and all parameters into a tuple ..
-  std::vector<HloInstruction*> output_elements = {updated_index,
-                                                  updated_output};
-  for (int64 i = 2; i < param_->shape().tuple_shapes_size(); i++) {
-    HloInstruction* get_tuple =
-        builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
-            param_->shape().tuple_shapes(i), param_, i));
-    output_elements.push_back(get_tuple);
+  std::vector<HloInstruction*> output_elements = {updated_index};
+  for (int64 i = 1; i < param_->shape().tuple_shapes_size(); i++) {
+    if (i != output_idx) {
+      HloInstruction* get_tuple =
+          builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
+              param_->shape().tuple_shapes(i), param_, i));
+      output_elements.push_back(get_tuple);
+    } else {
+      output_elements.push_back(updated_output);
+    }
   }
   return builder_.AddInstruction(HloInstruction::CreateTuple(output_elements));
 }
@@ -632,13 +650,19 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     CHECK(split_count * split_size ==
           split_inst->shape().dimensions(split_dim));
 
+    LOG(INFO) << "test 1";
+
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
     Splitter splitter(body_builder, dot->parent(), absl::MakeSpan(split_leafs));
 
+    LOG(INFO) << "test 2";
+
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
         splitter.SplitInstruction(split_inst, split_dim, split_size));
+
+    LOG(INFO) << "test 3";
 
     // Add final dot inside of the computation
     HloInstruction* reduce_param;
@@ -669,10 +693,14 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloInstruction* part = body_builder.AddInstruction(
         dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
 
+    LOG(INFO) << "test 4";
+
     HloInstruction* output_tuple =
         splitter.BuildOutputTuple(dot_split_dim, split_size, dot, part);
     HloComputation* body =
         parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
+
+    LOG(INFO) << "test 5";
 
     // build the condition
     HloComputation::Builder cond_builder(
@@ -688,19 +716,25 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
             LiteralUtil::CreateR0<int64>(split_size * split_count)));
     HloInstruction* compare =
         cond_builder.AddInstruction(HloInstruction::CreateCompare(
-            cond_offset->shape(), cond_offset, offset_less_than,
+            ShapeUtil::MakeShape(PRED, {}), cond_offset, offset_less_than,
             ComparisonDirection::kLt));
     HloComputation* cond =
         parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
 
+    LOG(INFO) << "test 6";
+
     // build the while and replace the original element with a get
     // tuple.
+    int64 output_idx = output_tuple->shape().tuple_shapes().size() - 1;
     HloInstruction* init = dot->parent()->AddInstruction(
         HloInstruction::CreateTuple(splitter.parameters()));
     HloInstruction* loop = dot->parent()->AddInstruction(
         HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
     HloInstruction* result = dot->parent()->AddInstruction(
-        HloInstruction::CreateGetTupleElement(dot->shape(), loop, 1));
+        HloInstruction::CreateGetTupleElement(dot->shape(), loop, output_idx));
+
+    LOG(INFO) << "test 7";
+
     return ReplaceInstruction(dot, result);
   }
 }
