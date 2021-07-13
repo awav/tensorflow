@@ -490,10 +490,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
 
     LOG(INFO) << "orig 4";
 
-    HloInstruction* new_operand =
-        builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
-            parameter_shape, parameter, absl::MakeSpan(start_indices),
-            parameter_shape.dimensions()));
+    new_operand = builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
+        parameter_shape, parameter, absl::MakeSpan(start_indices),
+        parameter_shape.dimensions()));
   } else {
     LOG(INFO) << "split is not original dim";
     // This will be a parameter and we just modify the broadcast ...
@@ -507,10 +506,11 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
   broadcast_shape.set_dimensions(split_dim, split_size);
   std::vector<HloInstruction*> params = {new_operand};
 
-  LOG(INFO) << "help ???";
-
-  return builder_.AddInstruction(
+  LOG(INFO) << "help ??? . ?";
+  HloInstruction* ret = builder_.AddInstruction(
       broadcast->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
+  LOG(INFO) << "huh??";
+  return ret;
 }
 
 StatusOr<HloInstruction*>
