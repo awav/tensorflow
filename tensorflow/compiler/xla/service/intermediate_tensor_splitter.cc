@@ -821,22 +821,30 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   }
 }
 
-static int64 IntermediateTensorSplitter::SplitTensorBytes() {
+bool endsWith(string& str, string pattern) {
+  if (pattern.size() > str.size()) return false;
+  for (int i = 1; i <= pattern.size(); i++) {
+    if (pattern[pattern.size() - i] != str[str.size() - i]) return false;
+  }
+  return true;
+}
+
+int64 IntermediateTensorSplitter::SplitTensorBytes() {
   string config = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
   int64 raw = (int64)atoi(config.c_str());
   if (raw <= 0) return 134217728;  // 1 GiB
 
-  if (config.ends_with("GB") || config.ends_with("gb"))
+  if (endsWith(config, "GB") || endsWith(config, "gb"))
     return raw * 1000000000;  // 1e9
-  else if (config.ends_with("GiB"))
+  else if (endsWith(config, "GiB"))
     return raw * 134217728;
-  else if (config.ends_with("MB") || config.ends_with("mb"))
+  else if (endsWith(config, "MB") || endsWith(config, "mb"))
     return raw * 1000000;  // 1e6
-  else if (config.ends_with("MiB"))
+  else if (endsWith(config, "MiB"))
     return raw * 1048576;
-  else if (config.ends_with("kB") || config.ends_with("kb"))
+  else if (endsWith(config, "kB") || endsWith(config, "kb"))
     return raw * 1000;
-  else if (config.ends_with("kiB"))
+  else if (endsWith(config, "kiB"))
     return raw * 1024;
   else
     return raw;  // interpret as bytes
