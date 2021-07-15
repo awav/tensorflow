@@ -1,6 +1,8 @@
 // License TODO ....
 #include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
 
+#include <stdlib.h>
+
 #include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
@@ -819,9 +821,30 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   }
 }
 
+static int64 IntermediateTensorSplitter::SplitTensorBytes() {
+  string config = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  int64 raw = (int64)atoi(config.c_str());
+  if (raw <= 0) return 134217728;  // 1 GiB
+
+  if (config.ends_with("GB") || config.ends_with("gb"))
+    return raw * 1000000000;  // 1e9
+  else if (config.ends_with("GiB"))
+    return raw * 134217728;
+  else if (config.ends_with("MB") || config.ends_with("mb"))
+    return raw * 1000000;  // 1e6
+  else if (config.ends_with("MiB"))
+    return raw * 1048576;
+  else if (config.ends_with("kB") || config.ends_with("kb"))
+    return raw * 1000;
+  else if (config.ends_with("kiB"))
+    return raw * 1024;
+  else
+    return raw;  // interpret as bytes
+}
+
 StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
-  int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  int64 split_size = SplitTensorBytes();
   IntermediateTensorSplitterRewriteVisitor rewrite(split_size, split_size,
                                                    module);
   return rewrite.RunOnModule(module);

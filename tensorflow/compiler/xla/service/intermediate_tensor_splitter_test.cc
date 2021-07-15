@@ -17,7 +17,7 @@ namespace m = match;
 class IntermediateTensorSplitterTest : public HloTestBase {
  protected:
   const int64 max_size() {
-    return GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+    return IntermediateTensorSplitter::SplitTensorBytes();
   }
 
   const int64 large_dim() { return 2 * max_size() / 10000; }

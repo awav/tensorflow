@@ -315,8 +315,8 @@ message DebugOptions {
   bool xla_gpu_deterministic_ops = 148;
 
   // Try to split intermediate tensors which are larger than the
-  // provided size.
-  int32 xla_try_split_tensor_size = 150;
+  // provided size. E.g. 1GiB
+  string xla_try_split_tensor_size = 150;
 
   // Next id: 151
 
