@@ -253,15 +253,31 @@ const int64 primes[64] = {2,   3,   5,   7,   11,  13,  17,  19,  23,  29,  31,
                           197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257,
                           263, 269, 271, 277, 281, 283, 293, 307, 311};
 
+int64 BestSplitSizeFold(int64 (&factors)[64], int offset, int64 current,
+                        int64 best, int64 min) {
+  if (offset >= 64) {
+    return best;
+  } else {
+    if (factors[offset] > 0) {
+      // use additional factor
+      int64 current_prime = primes[offset] * current;
+      if (current >= min && current < best) {
+        best = current_prime;
+      }
+      factors[offset]--;
+      best = BestSplitSizeFold(factors, offset, current_prime, best, min);
+      factors[offset]++;
+    }
+    // dont use additional factor
+    return BestSplitSizeFold(factors, offset + 1, current, best, min);
+  }
+}
+
 int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
     HloInstruction* inst, int64 split_dim) {
-  int64 split_size = inst->shape().dimensions(split_dim);
-  int64 rest_size = ShapeUtil::ElementsIn(inst->shape()) / split_size;
-  int64 elem_bytes =
-      ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type());
+  // find list of prime factors
   int64 factors[64];
-
-  int64 tmp_size = split_size;
+  int64 tmp_size = inst->shape().dimensions(split_dim);
   for (int i = 0; i < 64; i++) {
     factors[i] = 0;
     while (tmp_size % primes[i] == 0) {
@@ -270,15 +286,16 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
     }
   }
 
-  for (int i = 0; i < 64; i++)
-    while (split_size * rest_size * elem_bytes > target_intermediate_bytes &&
-           factors[i]-- > 0)
-      split_size /= primes[i];
+  int64 size = ShapeUtil::ElementsIn(inst->shape());
+  int64 full_size =
+      ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type()) * size;
+  int64 min_split = full_size / max_intermediate_bytes;
+  int64 best_split = BestSplitSizeFold(factors, 0, 1, size, min_split);
 
-  if (split_size * rest_size * elem_bytes <= max_intermediate_bytes) {
-    return split_size;
-  } else {
+  if (best_split == size) {
     return -1;
+  } else {
+    return best_split;
   }
 }
 
