@@ -286,17 +286,12 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
     }
   }
 
-  int64 size = ShapeUtil::ElementsIn(inst->shape());
-  int64 full_size =
-      ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type()) * size;
-  int64 min_split = full_size / max_intermediate_bytes;
-  int64 best_split = BestSplitSizeFold(factors, 0, 1, size, min_split);
-
-  if (best_split == size) {
-    return -1;
-  } else {
-    return best_split;
-  }
+  int64 size = inst->shape().dimensions(split_dim);
+  int64 full_size_bytes =
+      ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type()) *
+      ShapeUtil::ElementsIn(inst->shape());
+  int64 min_split = full_size_bytes / max_intermediate_bytes;
+  return BestSplitSizeFold(factors, 0, 1, size, min_split);
 }
 
 StatusOr<HloInstruction*>
