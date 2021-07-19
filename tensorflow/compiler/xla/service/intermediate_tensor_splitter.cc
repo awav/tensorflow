@@ -235,13 +235,13 @@ bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedNestedReduce(
 int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
     HloInstruction* inst, absl::Span<const int64> excluded) {
   const Shape& shape = inst->shape();
-  int64 best_dim = -1, best_size = 0;
+  int64 best_dim = -1, best_split = ShapeUtil::ElementsIn(inst->shape());
   for (int64 i = 0; i < shape.dimensions_size(); i++) {
     if (absl::c_linear_search(excluded, i)) continue;
-    if (shape.dimensions(i) > best_size && BestSplitSize(inst, i) != -1) {
-      best_size = shape.dimensions(i);
-      best_dim = i;
-    }
+    int64 split = BestSplitSize(inst, i);
+    if (split == -1 || split >= best_split) continue;
+    best_split = split;
+    best_dim = i;
   }
   return best_dim;
 }
@@ -254,22 +254,22 @@ const int64 primes[64] = {2,   3,   5,   7,   11,  13,  17,  19,  23,  29,  31,
                           263, 269, 271, 277, 281, 283, 293, 307, 311};
 
 int64 BestSplitSizeFold(int64 (&factors)[64], int offset, int64 current,
-                        int64 best, int64 min) {
+                        int64 best, int64 size, int64 max_size) {
   if (offset >= 64) {
     return best;
   } else {
     if (factors[offset] > 0) {
-      // use additional factor
       int64 current_prime = primes[offset] * current;
-      if (current >= min && current < best) {
+      if (size / current_prime <= max_size && current_prime < best) {
         best = current_prime;
       }
       factors[offset]--;
-      best = BestSplitSizeFold(factors, offset, current_prime, best, min);
+      best = BestSplitSizeFold(factors, offset, current_prime, best, size,
+                               max_size);
       factors[offset]++;
     }
-    // dont use additional factor
-    return BestSplitSizeFold(factors, offset + 1, current, best, min);
+    return BestSplitSizeFold(factors, offset + 1, current, best, size,
+                             max_size);
   }
 }
 
@@ -290,8 +290,9 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitSize(
   int64 full_size_bytes =
       ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type()) *
       ShapeUtil::ElementsIn(inst->shape());
-  int64 min_split = full_size_bytes / max_intermediate_bytes;
-  return BestSplitSizeFold(factors, 0, 1, size, min_split);
+  int64 max_size = max_intermediate_bytes * size / full_size_bytes;
+  int64 factor = BestSplitSizeFold(factors, 0, 1, size, size, max_size);
+  return size / factor;
 }
 
 StatusOr<HloInstruction*>

@@ -20,7 +20,7 @@ class IntermediateTensorSplitterTest : public HloTestBase {
     return IntermediateTensorSplitter::SplitTensorBytes();
   }
 
-  const int64 large_dim() { return 2 * max_size() / 10000; }
+  const int64 large_dim() { return max_size() / 32 * 8 / 3; }
 
   const int64 max_op_bytes_in_graph(HloInstruction* inst) {
     int64 max_size = 0;
