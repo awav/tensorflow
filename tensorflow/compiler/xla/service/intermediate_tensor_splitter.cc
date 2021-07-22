@@ -725,8 +725,10 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   //       sections properly ...
   if (OperandShouldBeSplit(reduce)) return Status::OK();
 
-  // TODO: Add support for tuple reduce calls
-  if (reduce->shape().IsTuple()) return Status::OK();
+  // If this is a multi-argument reduce, check if only one
+  // result is used.
+  if (reduce->shape().IsTuple() && reduce->user_count() > 1)
+    return Status::OK();
 
   // MatchSupportedReduce enforces that all initializers are
   // scalars, so we only need to split the operands to the
@@ -783,19 +785,38 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   for (int64 r_dim : reduce->dimensions())
     if (r_dim < split_dim) reduce_split_dim--;
 
-  Shape new_reduce_shape;
+  Shape output_part_shape;
+  HloInstruction *output_part, *old_output;
   if (reduce->shape().IsTuple()) {
-    CHECK(false);  // TODO
+    CHECK(reduce->user_count() == 1);
+    old_output = reduce->users()[0];
+
+    Shape new_reduce_shape = ShapeUtil::MakeTupleShape(
+        absl::MakeSpan(reduce->shape().tuple_shapes()));
+    for (int64 i = 0; i < new_reduce_shape.tuple_shapes_size(); i++) {
+      new_reduce_shape.mutable_tuple_shapes(i)->set_dimensions(reduce_split_dim,
+                                                               split_size);
+    }
+    HloInstruction* new_reduce = body_builder.AddInstruction(
+        reduce->CloneWithNewOperands(new_reduce_shape, operands));
+
+    output_part_shape = ShapeUtil::MakeShape(old_output->shape().element_type(),
+                                             old_output->shape().dimensions());
+    output_part_shape.set_dimensions(reduce_split_dim, split_size);
+    output_part =
+        body_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            output_part_shape, new_reduce, old_output->tuple_index()));
   } else {
-    new_reduce_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
-                                            reduce->shape().dimensions());
-    new_reduce_shape.set_dimensions(reduce_split_dim, split_size);
+    output_part_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
+                                             reduce->shape().dimensions());
+    output_part_shape.set_dimensions(reduce_split_dim, split_size);
+    output_part = body_builder.AddInstruction(
+        reduce->CloneWithNewOperands(output_part_shape, operands));
+    old_output = reduce;
   }
 
-  HloInstruction* new_reduce = body_builder.AddInstruction(
-      reduce->CloneWithNewOperands(new_reduce_shape, operands));
   HloInstruction* output_tuple = splitter.BuildOutputTuple(
-      reduce_split_dim, split_size, reduce, new_reduce);
+      reduce_split_dim, split_size, old_output, output_part);
   HloComputation* body =
       parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
@@ -817,21 +838,17 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   HloComputation* cond =
       parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
 
-  if (new_reduce_shape.IsTuple()) {
-    CHECK(false);  // TODO
-  } else {
-    // build the while and replace the original element with a get
-    // tuple.
-    int64 output_idx = output_tuple->shape().tuple_shapes().size() - 1;
-    HloInstruction* init = reduce->parent()->AddInstruction(
-        HloInstruction::CreateTuple(splitter.parameters()));
-    HloInstruction* loop = reduce->parent()->AddInstruction(
-        HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
-    HloInstruction* result =
-        reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
-            reduce->shape(), loop, output_idx));
-    return ReplaceInstruction(reduce, result);
-  }
+  // build the while and replace the original element with a get
+  // tuple.
+  int64 output_idx = output_tuple->shape().tuple_shapes().size() - 1;
+  HloInstruction* init = reduce->parent()->AddInstruction(
+      HloInstruction::CreateTuple(splitter.parameters()));
+  HloInstruction* loop = reduce->parent()->AddInstruction(
+      HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
+  HloInstruction* result =
+      reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
+          old_output->shape(), loop, output_idx));
+  return ReplaceInstruction(old_output, result);
 }
 
 bool endsWith(string& str, string pattern) {
