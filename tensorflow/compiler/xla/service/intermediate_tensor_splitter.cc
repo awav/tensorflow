@@ -126,13 +126,16 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
     // computation part.
     HloInstruction* BuildOutputTuple(int64 split_dim, int64 split_size,
                                      HloInstruction* original,
-                                     HloInstruction* part);
+                                     HloInstruction* part,
+                                     bool combine_with_sum = false);
 
     int64 parameters_size() { return parameters_.size(); }
 
     HloInstruction* parameters(int64 idx) { return parameters_.at(idx); }
 
     std::vector<HloInstruction*>& parameters() { return parameters_; }
+
+    HloInstruction* offset() { return offset_; }
   };
 };
 
@@ -235,11 +238,14 @@ bool IntermediateTensorSplitterRewriteVisitor::MatchSupportedNestedReduce(
 int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
     HloInstruction* inst, absl::Span<const int64> excluded) {
   const Shape& shape = inst->shape();
-  int64 best_dim = -1, best_split = ShapeUtil::ElementsIn(inst->shape());
+  int64 best_dim = -1, best_split = 0;  // ShapeUtil::ElementsIn(inst->shape());
   for (int64 i = 0; i < shape.dimensions_size(); i++) {
     if (absl::c_linear_search(excluded, i)) continue;
     int64 split = BestSplitSize(inst, i);
-    if (split == -1 || split >= best_split) continue;
+    LOG(INFO) << "best-split-dim-loop i = " << i << "; split = " << split
+              << "; best = " << best_split << "; (best dim = " << best_dim
+              << ")";
+    if (split == -1 || split <= best_split) continue;
     best_split = split;
     best_dim = i;
   }
@@ -550,7 +556,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
 HloInstruction*
 IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     int64 split_dim, int64 split_size, HloInstruction* original,
-    HloInstruction* part) {
+    HloInstruction* part, bool combine_with_sum) {
   // create the output init (broadcast off of 0)
   HloInstruction* output_init =
       original->parent()->AddInstruction(HloInstruction::CreateConstant(
@@ -562,19 +568,28 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
   HloInstruction* output;
   int64 output_idx = AddParameter(output_init, &output);
 
-  // slice part onto output
-  std::vector<HloInstruction*> start_indices;
-  for (int64 dim = 0; dim < output->shape().dimensions_size(); dim++) {
-    if (dim == split_dim) {
-      start_indices.push_back(offset_);
-    } else {
-      start_indices.push_back(builder_.AddInstruction(
-          HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(0))));
+  HloInstruction* updated_output;
+  if (combine_with_sum) {
+    // we're splitting a dot on a dot dimension, this means
+    // all that needs to be done is adding the part onto the
+    // result (which is initialized as 0)
+    updated_output = builder_.AddInstruction(HloInstruction::CreateBinary(
+        output->shape(), HloOpcode::kAdd, output, part));
+  } else {
+    // slice part onto output
+    std::vector<HloInstruction*> start_indices;
+    for (int64 dim = 0; dim < output->shape().dimensions_size(); dim++) {
+      if (dim == split_dim) {
+        start_indices.push_back(offset_);
+      } else {
+        start_indices.push_back(builder_.AddInstruction(
+            HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(0))));
+      }
     }
+    updated_output =
+        builder_.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
+            output->shape(), output, part, start_indices));
   }
-  HloInstruction* updated_output =
-      builder_.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
-          output->shape(), output, part, start_indices));
 
   // add split size to index
   HloInstruction* split_size_const = builder_.AddInstruction(
@@ -622,14 +637,16 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
   if (can_split) {
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
-    int64 split_dim = BestSplitDim(
-        split_inst,
-        absl::MakeSpan(split_is_lhs ? dnums.lhs_contracting_dimensions()
-                                    : dnums.rhs_contracting_dimensions()));
+    int64 split_dim = BestSplitDim(split_inst, {});
     if (split_dim == -1) {
       // Bail, we can't split this tensor into equally sized parts.
       return Status::OK();
     }
+
+    bool combine_parts_with_sum =
+        absl::c_linear_search(split_is_lhs ? dnums.lhs_contracting_dimensions()
+                                           : dnums.rhs_contracting_dimensions(),
+                              split_dim);
 
     int64 split_size = BestSplitSize(split_inst, split_dim);
     int64 split_count = split_inst->shape().dimensions(split_dim) / split_size;
@@ -664,7 +681,36 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       dot_split_dim +=
           lhs->shape().rank() - dnums.lhs_contracting_dimensions_size();
     }
-    part_shape.set_dimensions(dot_split_dim, split_size);
+    if (!combine_parts_with_sum)
+      part_shape.set_dimensions(dot_split_dim, split_size);
+
+    if (combine_parts_with_sum) {
+      Shape sliced_shape =
+          ShapeUtil::MakeShape(reduce_param->shape().element_type(),
+                               reduce_param->shape().dimensions());
+      // FIXME: This assumes dots only contract once (which is currently always
+      // true)
+      int64 param_split_dim = split_is_lhs
+                                  ? dnums.rhs_contracting_dimensions()[0]
+                                  : dnums.lhs_contracting_dimensions()[0];
+      sliced_shape.set_dimensions(param_split_dim, split_size);
+
+      std::vector<HloInstruction*> start_indices;
+      for (int64 dim = 0; dim < reduce_param->shape().dimensions_size();
+           dim++) {
+        if (dim == param_split_dim) {
+          start_indices.push_back(splitter.offset());
+        } else {
+          start_indices.push_back(body_builder.AddInstruction(
+              HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64>(0))));
+        }
+      }
+      reduce_param =
+          body_builder.AddInstruction(HloInstruction::CreateDynamicSlice(
+              sliced_shape, reduce_param, absl::MakeSpan(start_indices),
+              sliced_shape.dimensions()));
+    }
+
     std::vector<HloInstruction*> ops;
     if (split_is_lhs) {
       ops = {comp_root, reduce_param};
@@ -674,8 +720,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloInstruction* part = body_builder.AddInstruction(
         dot->CloneWithNewOperands(part_shape, absl::MakeSpan(ops)));
 
-    HloInstruction* output_tuple =
-        splitter.BuildOutputTuple(dot_split_dim, split_size, dot, part);
+    HloInstruction* output_tuple = splitter.BuildOutputTuple(
+        dot_split_dim, split_size, dot, part, combine_parts_with_sum);
     HloComputation* body =
         parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
