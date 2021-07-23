@@ -186,6 +186,23 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
   } else if (MatchSupportedNestedReduce(inst)) {
     return OperandCanBeSplit(inst->mutable_operand(0), split_leafs,
                              original_dimensions, exclude_dimensions);
+  } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
+    // We can split a triangular solve on some (but not all)
+    // dims
+    if (original_dimensions != nullptr && exclude_dimensions != nullptr) {
+      if (inst->triangular_solve_options().left_side()) {
+        // exclude second to last : Ax = y
+        exclude_dimensions->push_back(
+            (*original_dimensions)[original_dimensions->size() - 2]);
+      } else {
+        // exclude last : xA = y
+        exclude_dimensions->push_back(
+            (*original_dimensions)[original_dimensions->size() - 1]);
+      }
+    }
+    // We can't split the matrix for now, so ignore it
+    return OperandCanBeSplit(inst->mutable_operand(1), split_leafs,
+                             original_dimensions, exclude_dimensions);
   } else if (MatchPointwiseUnary(inst, &next)) {
     // This is a special case seperate from nary,
     // since we can make it tail recursive :)
@@ -367,6 +384,15 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       new_shape.set_dimensions(split_dim, split_size);
       return builder_.AddInstruction(inst->CloneWithNewOperands(
           new_shape, {new_operand, new_init_operand}));
+    } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * new_operand,
+          SplitInstruction(inst->mutable_operand(1), split_dim, split_size));
+      HloInstruction* mat;
+      HloInstruction* split_op_param;
+      AddParameter(inst->mutable_operand(0), &mat);
+      return builder_.AddInstruction(
+          inst->CloneWithNewOperands(new_operand->shape(), {mat, new_operand}));
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
