@@ -34,9 +34,14 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   bool OperandShouldBeSplit(HloInstruction* inst);
 
   // Determine if an operand can be split by traversing it's
-  // inputs until a splittable node is found.
+  // inputs until a splittable node is found. This will also
+  // return a list leafs and a list of dimensions which can
+  // not be split (if an internal op is only partially point-
+  // wise).
   bool OperandCanBeSplit(HloInstruction* inst,
-                         std::vector<HloInstruction*>* split_leafs = nullptr);
+                         std::vector<HloInstruction*>* split_leafs = nullptr,
+                         std::vector<int64>* original_dimensions = nullptr,
+                         std::vector<int64>* exclude_dimensions = nullptr);
 
   // Matches any pointwise unary operator which has no side effects.
   static bool MatchPointwiseUnary(HloInstruction* inst,
@@ -148,7 +153,9 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
 }
 
 bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
-    HloInstruction* inst, std::vector<HloInstruction*>* split_leafs) {
+    HloInstruction* inst, std::vector<HloInstruction*>* split_leafs,
+    std::vector<int64>* original_dimensions,
+    std::vector<int64>* exclude_dimensions) {
   HloInstruction* next;
   std::vector<HloInstruction*> next_vec;
   if (Match(inst, m::Dot(m::Op(), m::Op()))) {
@@ -164,17 +171,29 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     if (split_leafs != nullptr) split_leafs->push_back(inst);
     return true;
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
-    return OperandCanBeSplit(next, split_leafs);
+    // A transpose changes the dimensions, so we need to
+    // update the original_dimensions array.
+    std::vector<int64> old_original_dimensions(original_dimensions->begin(),
+                                               original_dimensions->end());
+    for (int64 i = 0; i < original_dimensions->size(); i++) {
+      (*original_dimensions)[i] = old_original_dimensions[inst->dimensions(i)];
+    }
+    return OperandCanBeSplit(next, split_leafs, original_dimensions,
+                             exclude_dimensions);
   } else if (MatchSupportedNestedReduce(inst)) {
-    return OperandCanBeSplit(inst->mutable_operand(0), split_leafs);
+    return OperandCanBeSplit(inst->mutable_operand(0), split_leafs,
+                             original_dimensions, exclude_dimensions);
   } else if (MatchPointwiseUnary(inst, &next)) {
     // This is a special case seperate from nary,
     // since we can make it tail recursive :)
-    return OperandCanBeSplit(next, split_leafs);
+    return OperandCanBeSplit(next, split_leafs, original_dimensions,
+                             exclude_dimensions);
   } else if (MatchPointwiseNary(inst, &next_vec)) {
     for (HloInstruction* next : next_vec) {
       // this path is not tail recursive :(
-      if (!OperandCanBeSplit(next, split_leafs)) return false;
+      if (!OperandCanBeSplit(next, split_leafs, original_dimensions,
+                             exclude_dimensions))
+        return false;
     }
     return true;
   } else {
@@ -623,18 +642,30 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
   bool split_is_lhs;
   std::vector<HloInstruction*> split_leafs;
 
-  if (OperandShouldBeSplit(lhs) && OperandCanBeSplit(lhs, &split_leafs)) {
+  std::vector<int64> exclude_dims;
+  std::vector<int64> orig_dims;
+  for (int64 i = 0; i < lhs->shape().dimensions_size(); i++)
+    orig_dims.push_back(i);
+
+  if (OperandShouldBeSplit(lhs) &&
+      OperandCanBeSplit(lhs, &split_leafs, &orig_dims, &exclude_dims)) {
     can_split = true;
     split_is_lhs = true;
-  } else if (OperandShouldBeSplit(rhs) &&
-             OperandCanBeSplit(rhs, &split_leafs)) {
-    can_split = true;
-    split_is_lhs = false;
+  } else {
+    exclude_dims.clear();
+    orig_dims.clear();
+    for (int64 i = 0; i < rhs->shape().dimensions_size(); i++)
+      orig_dims.push_back(i);
+    if (OperandShouldBeSplit(rhs) &&
+        OperandCanBeSplit(rhs, &split_leafs, &orig_dims, &exclude_dims)) {
+      can_split = true;
+      split_is_lhs = false;
+    }
   }
 
   if (can_split) {
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
-    int64 split_dim = BestSplitDim(split_inst, {});
+    int64 split_dim = BestSplitDim(split_inst, absl::MakeSpan(exclude_dims));
     if (split_dim == -1) {
       // Bail, we can't split this tensor into equally sized parts.
       return Status::OK();
@@ -778,12 +809,22 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   // reduce itself.
   int64 op_count = reduce->operand_count() / 2;
   std::vector<HloInstruction*> split_leafs;
-  for (int64 i = 0; i < op_count; i++)
-    if (!OperandCanBeSplit(reduce->mutable_operand(i), &split_leafs))
+  std::vector<int64> orig_dims;
+  std::vector<int64> exclude_dims;
+  for (int64 i = 0; i < op_count; i++) {
+    orig_dims.clear();
+    for (int64 i = 0; i < reduce->operand(i)->shape().dimensions_size(); i++)
+      orig_dims.push_back(i);
+    if (!OperandCanBeSplit(reduce->mutable_operand(i), &split_leafs, &orig_dims,
+                           &exclude_dims))
       return Status::OK();
+  }
 
-  int64 split_dim = BestSplitDim(reduce->mutable_operand(0),
-                                 absl::MakeSpan(reduce->dimensions()));
+  for (int64 reduce_dim : reduce->dimensions())
+    exclude_dims.push_back(reduce_dim);
+
+  int64 split_dim =
+      BestSplitDim(reduce->mutable_operand(0), absl::MakeSpan(exclude_dims));
   if (split_dim == -1) {
     // Bail, we can't split this tensor into equally sized parts.
     return Status::OK();
