@@ -17,10 +17,10 @@ namespace m = match;
 class IntermediateTensorSplitterTest : public HloTestBase {
  protected:
   const int64 max_size() {
-    return GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+    return IntermediateTensorSplitter::SplitTensorBytes();
   }
 
-  const int64 large_dim() { return 2 * max_size() / 10000; }
+  const int64 large_dim() { return max_size() / 32 * 8 / 3; }
 
   const int64 max_op_bytes_in_graph(HloInstruction* inst) {
     int64 max_size = 0;
@@ -413,7 +413,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 )";
 
   string module_with_big_dims = replace_all_in_string(
-      module_str, "2000", std::to_string(large_dim() / 100));
+      module_str, "1000", std::to_string(large_dim() / 1000));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));

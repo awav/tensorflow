@@ -14,6 +14,9 @@ class IntermediateTensorSplitter : public HloModulePass {
   absl::string_view name() const override { return "split-intermediate-tensors"; }
 
   StatusOr<bool> Run(HloModule* module) override;
+
+  // Use this to retreive the configured split size in bytes.
+  static int64 SplitTensorBytes();
 };
 
 }  // namespace xla
