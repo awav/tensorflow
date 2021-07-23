@@ -242,9 +242,6 @@ int64 IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
   for (int64 i = 0; i < shape.dimensions_size(); i++) {
     if (absl::c_linear_search(excluded, i)) continue;
     int64 split = BestSplitSize(inst, i);
-    LOG(INFO) << "best-split-dim-loop i = " << i << "; split = " << split
-              << "; best = " << best_split << "; (best dim = " << best_dim
-              << ")";
     if (split == -1 || split <= best_split) continue;
     best_split = split;
     best_dim = i;
