@@ -173,10 +173,13 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
     // A transpose changes the dimensions, so we need to
     // update the original_dimensions array.
-    std::vector<int64> old_original_dimensions(original_dimensions->begin(),
-                                               original_dimensions->end());
-    for (int64 i = 0; i < original_dimensions->size(); i++) {
-      (*original_dimensions)[i] = old_original_dimensions[inst->dimensions(i)];
+    if (original_dimensions != nullptr) {
+      std::vector<int64> old_original_dimensions(original_dimensions->begin(),
+                                                 original_dimensions->end());
+      for (int64 i = 0; i < original_dimensions->size(); i++) {
+        (*original_dimensions)[i] =
+            old_original_dimensions[inst->dimensions(i)];
+      }
     }
     return OperandCanBeSplit(next, split_leafs, original_dimensions,
                              exclude_dimensions);
