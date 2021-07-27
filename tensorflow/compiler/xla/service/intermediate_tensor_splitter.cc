@@ -132,7 +132,8 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
     HloInstruction* BuildOutputTuple(int64 split_dim, int64 split_size,
                                      HloInstruction* original,
                                      HloInstruction* part,
-                                     bool combine_with_sum = false);
+                                     bool combine_with_sum = false,
+                                     bool combine_with_reduce = false);
 
     int64 parameters_size() { return parameters_.size(); }
 
@@ -601,17 +602,25 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
 HloInstruction*
 IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     int64 split_dim, int64 split_size, HloInstruction* original,
-    HloInstruction* part, bool combine_with_sum) {
-  // create the output init (broadcast off of 0)
-  HloInstruction* output_init =
-      original->parent()->AddInstruction(HloInstruction::CreateConstant(
-          LiteralUtil::Zero(original->shape().element_type())));
-  std::vector<int64> broadcast_dims = {};
-  output_init =
-      original->parent()->AddInstruction(HloInstruction::CreateBroadcast(
-          original->shape(), output_init, absl::MakeSpan(broadcast_dims)));
+    HloInstruction* part, bool combine_with_sum, bool combine_with_reduce) {
   HloInstruction* output;
-  int64 output_idx = AddParameter(output_init, &output);
+  int64 output_idx;
+  if (combine_with_reduce) {
+    CHECK(original->opcode() == HloOpcode::kReduce);
+    CHECK(original->operand_count() == 2);
+    // re-use reduce init for output init
+    output_idx = AddParameter(original->mutable_operand(1), &output);
+  } else {
+    // create the output init (broadcast off of 0)
+    HloInstruction* output_init =
+        original->parent()->AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::Zero(original->shape().element_type())));
+    std::vector<int64> broadcast_dims = {};
+    output_init =
+        original->parent()->AddInstruction(HloInstruction::CreateBroadcast(
+            original->shape(), output_init, absl::MakeSpan(broadcast_dims)));
+    output_idx = AddParameter(output_init, &output);
+  }
 
   HloInstruction* updated_output;
   if (combine_with_sum) {
@@ -620,6 +629,13 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     // result (which is initialized as 0)
     updated_output = builder_.AddInstruction(HloInstruction::CreateBinary(
         output->shape(), HloOpcode::kAdd, output, part));
+  } else if (combine_with_reduce) {
+    // FIXME ... TODO
+    CHECK(original->opcode() == HloOpcode::kReduce);
+    CHECK(original->operand_count() == 2);
+    HloComputation* reduce_fn = original->called_computations()[0];
+    updated_output = builder_.AddInstruction(HloInstruction::CreateCall(
+        original->shape(), {output, part}, reduce_fn));
   } else {
     // slice part onto output
     std::vector<HloInstruction*> start_indices;
@@ -849,8 +865,11 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       return Status::OK();
   }
 
-  for (int64 reduce_dim : reduce->dimensions())
-    exclude_dims.push_back(reduce_dim);
+  if (reduce->shape().IsTuple() ||
+      reduce->mutable_operand(0)->shape().dimensions_size() >
+          reduce->dimensions().size())
+    for (int64 reduce_dim : reduce->dimensions())
+      exclude_dims.push_back(reduce_dim);
 
   int64 split_dim =
       BestSplitDim(reduce->mutable_operand(0), absl::MakeSpan(exclude_dims));
@@ -859,6 +878,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     return Status::OK();
   }
 
+  bool split_along_reduce_dim =
+      absl::c_linear_search(reduce->dimensions(), split_dim);
   int64 split_size = BestSplitSize(reduce->mutable_operand(0), split_dim);
   int64 split_count =
       reduce->mutable_operand(0)->shape().dimensions(split_dim) / split_size;
@@ -906,30 +927,35 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
     Shape new_reduce_shape = ShapeUtil::MakeTupleShape(
         absl::MakeSpan(reduce->shape().tuple_shapes()));
-    for (int64 i = 0; i < new_reduce_shape.tuple_shapes_size(); i++) {
-      new_reduce_shape.mutable_tuple_shapes(i)->set_dimensions(reduce_split_dim,
-                                                               split_size);
+    if (!split_along_reduce_dim) {
+      for (int64 i = 0; i < new_reduce_shape.tuple_shapes_size(); i++) {
+        new_reduce_shape.mutable_tuple_shapes(i)->set_dimensions(
+            reduce_split_dim, split_size);
+      }
     }
     HloInstruction* new_reduce = body_builder.AddInstruction(
         reduce->CloneWithNewOperands(new_reduce_shape, operands));
 
     output_part_shape = ShapeUtil::MakeShape(old_output->shape().element_type(),
                                              old_output->shape().dimensions());
-    output_part_shape.set_dimensions(reduce_split_dim, split_size);
+    if (!split_along_reduce_dim)
+      output_part_shape.set_dimensions(reduce_split_dim, split_size);
     output_part =
         body_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
             output_part_shape, new_reduce, old_output->tuple_index()));
   } else {
     output_part_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
                                              reduce->shape().dimensions());
-    output_part_shape.set_dimensions(reduce_split_dim, split_size);
+    if (!split_along_reduce_dim)
+      output_part_shape.set_dimensions(reduce_split_dim, split_size);
     output_part = body_builder.AddInstruction(
         reduce->CloneWithNewOperands(output_part_shape, operands));
     old_output = reduce;
   }
 
-  HloInstruction* output_tuple = splitter.BuildOutputTuple(
-      reduce_split_dim, split_size, old_output, output_part);
+  HloInstruction* output_tuple =
+      splitter.BuildOutputTuple(reduce_split_dim, split_size, old_output,
+                                output_part, false, split_along_reduce_dim);
   HloComputation* body =
       parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
