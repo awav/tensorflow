@@ -140,6 +140,49 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 }
 
+// Self dot: outer-product -> inner-product
+TEST_F(IntermediateTensorSplitterTest, BasicSelfDot) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {1000, 2});
+  HloInstruction* a =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
+  HloInstruction* b =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, b_shape, "b"));
+
+  DotDimensionNumbers dnums_ab;
+  dnums_ab.add_lhs_contracting_dimensions(1);
+  dnums_ab.add_rhs_contracting_dimensions(1);
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(),1000});
+  HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
+      ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
+
+  HloInstruction* exp_ab = builder.AddInstruction(
+      HloInstruction::CreateUnary(ab_shape, HloOpcode::kExp, ab));
+
+  DotDimensionNumbers dnums_final;
+  dnums_final.add_lhs_contracting_dimensions(0);
+  dnums_final.add_rhs_contracting_dimensions(0);
+  Shape final_shape = ShapeUtil::MakeShape(F32, {1000, 1000});
+  builder.AddInstruction(HloInstruction::CreateDot(
+      final_shape, exp_ab, exp_ab, dnums_final, DefaultPrecisionConfig(2)));
+
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Match(computation->root_instruction(),
+                    m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))),
+                           m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
+
+  IntermediateTensorSplitter optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
+}
+
 // Test the case where the to split dimension lies on the
 // rhs of the source dot
 TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
