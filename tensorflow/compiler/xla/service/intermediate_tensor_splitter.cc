@@ -390,7 +390,6 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
           HloInstruction * new_operand,
           SplitInstruction(inst->mutable_operand(1), split_dim, split_size));
       HloInstruction* mat;
-      HloInstruction* split_op_param;
       AddParameter(inst->mutable_operand(0), &mat);
       return builder_.AddInstruction(
           inst->CloneWithNewOperands(new_operand->shape(), {mat, new_operand}));
@@ -680,6 +679,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
   auto& dnums = dot->dot_dimension_numbers();
 
+  if (OperandShouldBeSplit(dot)) return Status::OK();
+
   // TODO: Handle the case where both operands can be
   //       split in a better way.
 
@@ -925,8 +926,9 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   std::vector<int64> exclude_dims;
   for (int64 i = 0; i < op_count; i++) {
     orig_dims.clear();
-    for (int64 i = 0; i < reduce->operand(i)->shape().dimensions_size(); i++)
-      orig_dims.push_back(i);
+    for (int64 j = 0; j < reduce->operand(i)->shape().dimensions_size(); j++)
+      orig_dims.push_back(j);
+
     if (!OperandCanBeSplit(reduce->mutable_operand(i), &split_leafs, &orig_dims,
                            &exclude_dims))
       return Status::OK();
