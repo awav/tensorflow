@@ -727,43 +727,50 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
   // 1. lhs can split
   // 2. rhs can split
   // 3. lhs = rhs + can split
+  // 3.1 lhs + rhs can split on respective contracted dim
 
   bool can_split = false;
   bool rhs_is_lhs = lhs == rhs;
-  bool split_is_lhs;
-  std::vector<HloInstruction*> split_leafs;
 
-  std::vector<int64> exclude_dims;
+  std::vector<HloInstruction*> split_leafs_lhs;
+  std::vector<HloInstruction*> split_leafs_rhs;
+  std::vector<int64> exclude_dims_lhs;
+  std::vector<int64> exclude_dims_rhs;
+
   std::vector<int64> orig_dims;
   for (int64 i = 0; i < lhs->shape().dimensions_size(); i++)
     orig_dims.push_back(i);
+  bool can_split_lhs =
+      OperandShouldBeSplit(lhs) &&
+      OperandCanBeSplit(lhs, &split_leafs_lhs, &orig_dims, &exclude_dims_lhs);
 
-  if (OperandShouldBeSplit(lhs) &&
-      OperandCanBeSplit(lhs, &split_leafs, &orig_dims, &exclude_dims)) {
-    can_split = true;
-    split_is_lhs = true;
+  bool can_split_rhs;
+  if (rhs_is_lhs) {
+    can_split_rhs = can_split_lhs;
   } else {
-    exclude_dims.clear();
     orig_dims.clear();
     for (int64 i = 0; i < rhs->shape().dimensions_size(); i++)
       orig_dims.push_back(i);
-    if (OperandShouldBeSplit(rhs) &&
-        OperandCanBeSplit(rhs, &split_leafs, &orig_dims, &exclude_dims)) {
-      can_split = true;
-      split_is_lhs = false;
-    }
+    can_split_rhs =
+        OperandShouldBeSplit(rhs) &&
+        OperandCanBeSplit(rhs, &split_leafs_rhs, &orig_dims, &exclude_dims_rhs);
   }
 
-  if (can_split && rhs_is_lhs) {
-    // we specifically need the dot to use the same
-    // dim for both operands
+  if (can_split_lhs && rhs_is_lhs) {
+    //
+    // Case :: Self dot
+    //
     CHECK(dnums.lhs_contracting_dimensions().size() == 1);
     if (dnums.lhs_contracting_dimensions()[0] !=
         dnums.rhs_contracting_dimensions()[0])
       return Status::OK();
 
     int64 split_dim = dnums.lhs_contracting_dimensions()[0];
-    if (absl::c_linear_search(exclude_dims, split_dim)) return Status::OK();
+    if (absl::c_linear_search(exclude_dims_lhs, split_dim)) {
+      LOG(WARNING) << "failed to split self dot " << dot->name()
+                   << "as contracted dimension is excluded.";
+      return Status::OK();
+    }
 
     int64 split_size = BestSplitSize(lhs, split_dim);
     int64 split_count = lhs->shape().dimensions(split_dim) / split_size;
@@ -772,7 +779,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
-    Splitter splitter(body_builder, dot->parent(), absl::MakeSpan(split_leafs));
+    Splitter splitter(body_builder, dot->parent(),
+                      absl::MakeSpan(split_leafs_lhs));
 
     TF_ASSIGN_OR_RETURN(HloInstruction * split_lhs,
                         splitter.SplitInstruction(lhs, split_dim, split_size));
@@ -815,9 +823,94 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
         HloInstruction::CreateGetTupleElement(dot->shape(), loop, output_idx));
 
     return ReplaceInstruction(dot, result);
-  } else if (can_split && !rhs_is_lhs) {
+  } else if (!rhs_is_lhs && can_split_lhs && can_split_rhs) {
+    //
+    // CASE :: both lhs and rhs need split
+    //
+    CHECK(dnums.lhs_contracting_dimensions().size() == 1);
+
+    int64 split_dim_lhs = dnums.lhs_contracting_dimensions()[0];
+    if (absl::c_linear_search(exclude_dims_lhs, split_dim_lhs)) {
+      LOG(WARNING) << "failed to split both sides of dot " << dot->name()
+                   << "as lhs contracted dimension is excluded.";
+      return Status::OK();
+    }
+    int64 split_dim_rhs = dnums.rhs_contracting_dimensions()[0];
+    if (absl::c_linear_search(exclude_dims_rhs, split_dim_rhs)) {
+      LOG(WARNING) << "failed to split both sides of dot " << dot->name()
+                   << "as rhs contracted dimension is excluded.";
+      return Status::OK();
+    }
+
+    CHECK(lhs->shape().dimensions(split_dim_lhs) ==
+          rhs->shape().dimensions(split_dim_rhs));
+    int64 split_size = BestSplitSize(lhs, split_dim_lhs);
+    int64 split_count = lhs->shape().dimensions(split_dim_lhs) / split_size;
+    CHECK(split_size != -1);
+    CHECK(split_count * split_size == lhs->shape().dimensions(split_dim_lhs));
+
+    HloComputation::Builder body_builder(
+        "intermediate_tensor_splitter_dot_body");
+    for (HloInstruction* leaf : split_leafs_rhs)
+      split_leafs_lhs.push_back(leaf);
+    Splitter splitter(body_builder, dot->parent(),
+                      absl::MakeSpan(split_leafs_lhs));
+
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * split_lhs,
+        splitter.SplitInstruction(lhs, split_dim_lhs, split_size));
+    TF_ASSIGN_OR_RETURN(
+        HloInstruction * split_rhs,
+        splitter.SplitInstruction(rhs, split_dim_rhs, split_size));
+
+    HloInstruction* part = body_builder.AddInstruction(
+        dot->CloneWithNewOperands(dot->shape(), {split_lhs, split_rhs}));
+
+    HloInstruction* output_tuple = splitter.BuildOutputTuple(
+        -1, split_size, dot, part, /*combine_with_sum =*/true);
+    HloComputation* body =
+        parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
+
+    // build the condition
+    HloComputation::Builder cond_builder(
+        "intermediate_tensor_splitter_dot_cond");
+    HloInstruction* cond_param =
+        cond_builder.AddInstruction(HloInstruction::CreateParameter(
+            0, output_tuple->shape(), "loop_param"));
+    HloInstruction* cond_offset =
+        cond_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            output_tuple->shape().tuple_shapes(0), cond_param, 0));
+    HloInstruction* offset_less_than =
+        cond_builder.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int64>(split_size * split_count)));
+    HloInstruction* compare =
+        cond_builder.AddInstruction(HloInstruction::CreateCompare(
+            ShapeUtil::MakeShape(PRED, {}), cond_offset, offset_less_than,
+            ComparisonDirection::kLt));
+    HloComputation* cond =
+        parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
+
+    // build the while and replace the original element with a get
+    // tuple.
+    int64 output_idx = output_tuple->shape().tuple_shapes().size() - 1;
+    HloInstruction* init = dot->parent()->AddInstruction(
+        HloInstruction::CreateTuple(splitter.parameters()));
+    HloInstruction* loop = dot->parent()->AddInstruction(
+        HloInstruction::CreateWhile(output_tuple->shape(), cond, body, init));
+    HloInstruction* result = dot->parent()->AddInstruction(
+        HloInstruction::CreateGetTupleElement(dot->shape(), loop, output_idx));
+
+    return ReplaceInstruction(dot, result);
+  } else if ((can_split_lhs && !can_split_rhs) ||
+             (!can_split_lhs && can_split_rhs)) {
+    //
+    // CASE :: one of lhs / rhs is split
+    //
+    bool split_is_lhs = can_split_lhs;
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
-    int64 split_dim = BestSplitDim(split_inst, absl::MakeSpan(exclude_dims));
+    int64 split_dim = BestSplitDim(
+        split_inst,
+        absl::MakeSpan(split_is_lhs ? exclude_dims_lhs : exclude_dims_rhs));
     if (split_dim == -1) {
       // Bail, we can't split this tensor into equally sized parts.
       return Status::OK();
@@ -836,7 +929,9 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
-    Splitter splitter(body_builder, dot->parent(), absl::MakeSpan(split_leafs));
+    Splitter splitter(
+        body_builder, dot->parent(),
+        absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs));
 
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
@@ -946,6 +1041,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   // same shape, and that there is at least one operand!
   if (!OperandShouldBeSplit(reduce->mutable_operand(0))) return Status::OK();
 
+  // LOG(INFO) << "reduce " << reduce->name() << " should be split";
+
   // TODO: This is a hack, I need to more seriously rethink the
   //       two pass system, to mark elements in a first pass and combine
   //       sections properly ...
@@ -985,6 +1082,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     // Bail, we can't split this tensor into equally sized parts.
     return Status::OK();
   }
+
+  // LOG(INFO) << "reduce " << reduce->name() << " will be split";
 
   bool split_along_reduce_dim =
       absl::c_linear_search(reduce->dimensions(), split_dim);
