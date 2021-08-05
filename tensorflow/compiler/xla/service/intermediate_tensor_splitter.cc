@@ -157,12 +157,66 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs,
     std::vector<int64>* original_dimensions,
     std::vector<int64>* exclude_dimensions) {
-  HloInstruction* next;
+  HloInstruction *next, *lhs, *rhs;
   std::vector<HloInstruction*> next_vec;
-  if (Match(inst, m::Dot(m::Op(), m::Op()))) {
-    // Base case: A Dot produces this large intermediate tensor
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
-    return true;
+  if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
+    if (OperandShouldBeSplit(lhs) && OperandShouldBeSplit(rhs)) {
+      // We can only split one dimension, so this is impossible
+      return false;
+    } else if (OperandShouldBeSplit(lhs)) {
+      // Exclude all rhs dims from split
+      for (int64 i = lhs->shape().dimensions_size() - 1;
+           i < original_dimensions->size(); i++) {
+        exclude_dimensions->push_back((*original_dimensions)[i]);
+      }
+      // Make a dimensions which is only for the lhs
+      std::vector<int64> lhs_original_dims;
+      int64 lhs_cdim =
+          inst->dot_dimension_numbers().lhs_contracting_dimensions(0);
+      for (int64 i = 0; i < lhs->shape().dimensions_size(); i++) {
+        if (i == lhs_cdim) {
+          lhs_original_dims.push_back(-1);  // this has no original dim...
+        } else if (i < lhs_cdim) {
+          lhs_original_dims.push_back((*original_dimensions)[i]);
+        } else if (i > lhs_cdim) {
+          lhs_original_dims.push_back((*original_dimensions)[i - 1]);
+        }
+      }
+      // Check if can split
+      bool can_split = OperandCanBeSplit(lhs, split_leafs, &lhs_original_dims,
+                                         exclude_dimensions);
+      lhs_original_dims.clear();
+      return can_split;  // not tail recursive to keep fresh orig dims
+    } else if (OperandShouldBeSplit(rhs)) {
+      // Exclude all lhs dims from split
+      for (int64 i = 0; i < lhs->shape().dimensions_size() - 1; i++) {
+        exclude_dimensions->push_back((*original_dimensions)[i]);
+      }
+      // Make a dimensions which is only for the rhs
+      std::vector<int64> rhs_original_dims;
+      int64 rhs_cdim =
+          inst->dot_dimension_numbers().rhs_contracting_dimensions(0);
+      int64 rhs_start = lhs->shape().dimensions_size() - 1;
+      for (int64 i = 0; i < rhs->shape().dimensions_size(); i++) {
+        if (i == rhs_cdim) {
+          rhs_original_dims.push_back(-1);  // this has no original dim...
+        } else if (i < rhs_cdim) {
+          rhs_original_dims.push_back((*original_dimensions)[rhs_start + i]);
+        } else if (i > rhs_cdim) {
+          rhs_original_dims.push_back(
+              (*original_dimensions)[rhs_start + i - 1]);
+        }
+      }
+      // Check if can split
+      bool can_split = OperandCanBeSplit(rhs, split_leafs, &rhs_original_dims,
+                                         exclude_dimensions);
+      rhs_original_dims.clear();
+      return can_split;  // not tail recursive to keep fresh orig dims
+    } else {
+      // Base case: A Dot produces this large intermediate tensor
+      if (split_leafs != nullptr) split_leafs->push_back(inst);
+      return true;
+    }
   } else if (Match(inst, m::Broadcast(m::Op()))) {
     // Base case: A broadcast can be split
     if (split_leafs != nullptr) split_leafs->push_back(inst);
@@ -389,7 +443,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       return SplitLeafIota(inst, split_dim, split_size);
     }
   } else {
-    HloInstruction* operand;
+    HloInstruction *operand, *lhs, *rhs;
     std::vector<HloInstruction*> operands;
 
     if (Match(inst, m::Transpose(m::Op(&operand)))) {
@@ -432,6 +486,53 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       AddParameter(inst->mutable_operand(0), &mat);
       return builder_.AddInstruction(
           inst->CloneWithNewOperands(new_operand->shape(), {mat, new_operand}));
+    } else if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
+      // For an intermediate dot, split the correct operand and assemble
+      // a new dot.
+      bool split_lhs = ShapeUtil::ElementsIn(lhs->shape()) >
+                       ShapeUtil::ElementsIn(
+                           rhs->shape());  // this works, since only one of the
+                                           // operands needs to be split
+      // LOG(INFO) << "splitting inter dot " << inst->name()
+      //           << " split_dim=" << split_dim
+      //           << "; is_lhs=" << (split_lhs ? "yes" : "no");
+      if (split_lhs) {
+        CHECK(split_dim < lhs->shape().dimensions_size() - 1);
+        int64 lhs_contr_dim =
+            inst->dot_dimension_numbers().lhs_contracting_dimensions(0);
+        int64 lhs_split_dim =
+            split_dim >= lhs_contr_dim ? split_dim + 1 : split_dim;
+
+        TF_ASSIGN_OR_RETURN(HloInstruction * new_lhs,
+                            SplitInstruction(lhs, lhs_split_dim, split_size));
+        HloInstruction* param_rhs;
+        AddParameter(rhs, &param_rhs);
+
+        Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                               inst->shape().dimensions());
+        new_shape.set_dimensions(split_dim, split_size);
+        return builder_.AddInstruction(
+            inst->CloneWithNewOperands(new_shape, {new_lhs, param_rhs}));
+      } else {
+        int64 rhs_start = lhs->shape().dimensions_size() - 1;
+        CHECK(split_dim >= rhs_start);
+        int64 rhs_contr_dim =
+            inst->dot_dimension_numbers().rhs_contracting_dimensions(0);
+        int64 rhs_split_dim = split_dim - rhs_start >= rhs_contr_dim
+                                  ? split_dim + 1 - rhs_start
+                                  : split_dim - rhs_start;
+
+        TF_ASSIGN_OR_RETURN(HloInstruction * new_rhs,
+                            SplitInstruction(rhs, rhs_split_dim, split_size));
+        Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                               inst->shape().dimensions());
+        HloInstruction* param_lhs;
+        AddParameter(lhs, &param_lhs);
+
+        new_shape.set_dimensions(split_dim, split_size);
+        return builder_.AddInstruction(
+            inst->CloneWithNewOperands(new_shape, {param_lhs, new_rhs}));
+      }
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
@@ -755,19 +856,14 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       OperandShouldBeSplit(lhs) &&
       OperandCanBeSplit(lhs, &split_leafs_lhs, &orig_dims, &exclude_dims_lhs);
 
-  bool can_split_rhs;
-  if (rhs_is_lhs) {
-    can_split_rhs = can_split_lhs;
-  } else {
-    orig_dims.clear();
-    for (int64 i = 0; i < rhs->shape().dimensions_size(); i++)
-      orig_dims.push_back(i);
-    can_split_rhs =
-        OperandShouldBeSplit(rhs) &&
-        OperandCanBeSplit(rhs, &split_leafs_rhs, &orig_dims, &exclude_dims_rhs);
-  }
+  orig_dims.clear();
+  for (int64 i = 0; i < rhs->shape().dimensions_size(); i++)
+    orig_dims.push_back(i);
+  bool can_split_rhs =
+      OperandShouldBeSplit(rhs) &&
+      OperandCanBeSplit(rhs, &split_leafs_rhs, &orig_dims, &exclude_dims_rhs);
 
-  if (can_split_lhs && rhs_is_lhs) {
+  if (can_split_lhs && can_split_rhs && rhs_is_lhs) {
     //
     // Case :: Self dot
     //
