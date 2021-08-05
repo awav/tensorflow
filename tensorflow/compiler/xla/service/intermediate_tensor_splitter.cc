@@ -647,16 +647,20 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     CHECK(original->opcode() == HloOpcode::kReduce);
     CHECK(original->operand_count() == 2);
     // re-use reduce init for output init
-    output_idx = AddParameter(original->mutable_operand(1), &output);
+    HloInstruction* output_init = original->mutable_operand(1);
+    if (!ShapeUtil::IsScalar(original->shape())) {
+      CHECK(ShapeUtil::IsScalar(output_init->shape()));
+      output_init = original->parent()->AddInstruction(
+          HloInstruction::CreateBroadcast(original->shape(), output_init, {}));
+    }
+    output_idx = AddParameter(output_init, &output);
   } else {
     // create the output init (broadcast off of 0)
     HloInstruction* output_init =
         original->parent()->AddInstruction(HloInstruction::CreateConstant(
             LiteralUtil::Zero(original->shape().element_type())));
-    std::vector<int64> broadcast_dims = {};
-    output_init =
-        original->parent()->AddInstruction(HloInstruction::CreateBroadcast(
-            original->shape(), output_init, absl::MakeSpan(broadcast_dims)));
+    output_init = original->parent()->AddInstruction(
+        HloInstruction::CreateBroadcast(original->shape(), output_init, {}));
     output_idx = AddParameter(output_init, &output);
   }
 
@@ -668,12 +672,19 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::BuildOutputTuple(
     updated_output = builder_.AddInstruction(HloInstruction::CreateBinary(
         output->shape(), HloOpcode::kAdd, output, part));
   } else if (combine_with_reduce) {
-    // FIXME ... TODO
+    // we're splitting on a reduced dimension
     CHECK(original->opcode() == HloOpcode::kReduce);
     CHECK(original->operand_count() == 2);
     HloComputation* reduce_fn = original->called_computations()[0];
-    updated_output = builder_.AddInstruction(HloInstruction::CreateCall(
-        original->shape(), {output, part}, reduce_fn));
+    if (ShapeUtil::IsScalar(output->shape())) {
+      // we can call the function directly
+      updated_output = builder_.AddInstruction(HloInstruction::CreateCall(
+          original->shape(), {output, part}, reduce_fn));
+    } else {
+      // we have to call the function through map
+      updated_output = builder_.AddInstruction(HloInstruction::CreateMap(
+          original->shape(), {output, part}, reduce_fn));
+    }
   } else {
     // slice part onto output
     std::vector<HloInstruction*> start_indices;
@@ -1070,9 +1081,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       return Status::OK();
   }
 
-  if (reduce->shape().IsTuple() ||
-      reduce->mutable_operand(0)->shape().dimensions_size() >
-          reduce->dimensions().size())
+  // relax this restriction ...
+  if (reduce->shape().IsTuple())
     for (int64 reduce_dim : reduce->dimensions())
       exclude_dims.push_back(reduce_dim);
 
