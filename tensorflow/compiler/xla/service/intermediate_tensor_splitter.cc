@@ -884,6 +884,10 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     CHECK(split_size != -1);
     CHECK(split_count * split_size == lhs->shape().dimensions(split_dim));
 
+    LOG(INFO) << "self dot " << dot->name()
+              << " operand will be split at dimension " << split_dim
+              << " with split size " << split_size;
+
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
     Splitter splitter(body_builder, dot->parent(),
@@ -955,6 +959,11 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     int64 split_count = lhs->shape().dimensions(split_dim_lhs) / split_size;
     CHECK(split_size != -1);
     CHECK(split_count * split_size == lhs->shape().dimensions(split_dim_lhs));
+
+    LOG(INFO)
+        << "dot " << dot->name()
+        << " lhs and rhs will be split on contracted dimension with split size "
+        << split_size;
 
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
@@ -1033,6 +1042,11 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     CHECK(split_size != -1);
     CHECK(split_count * split_size ==
           split_inst->shape().dimensions(split_dim));
+
+    LOG(INFO)
+        << "dot " << dot->name()
+        << " lhs and rhs will be split on contracted dimension with split size "
+        << split_size;
 
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
@@ -1177,7 +1191,6 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       return Status::OK();
   }
 
-  // relax this restriction ...
   if (reduce->shape().IsTuple())
     for (int64 reduce_dim : reduce->dimensions())
       exclude_dims.push_back(reduce_dim);
@@ -1189,8 +1202,6 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     return Status::OK();
   }
 
-  // LOG(INFO) << "reduce " << reduce->name() << " will be split";
-
   bool split_along_reduce_dim =
       absl::c_linear_search(reduce->dimensions(), split_dim);
   int64 split_size = BestSplitSize(reduce->mutable_operand(0), split_dim);
@@ -1199,6 +1210,10 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   CHECK(split_size != -1);
   CHECK(split_count * split_size ==
         reduce->mutable_operand(0)->shape().dimensions(split_dim));
+
+  LOG(INFO) << "reduce " << reduce->name()
+            << " operands will be split at dimension " << split_dim
+            << " with split size " << split_size;
 
   HloComputation::Builder body_builder(
       "intermediate_tensor_splitter_reduce_body");
