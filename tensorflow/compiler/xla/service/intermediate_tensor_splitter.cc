@@ -487,9 +487,11 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       TF_ASSIGN_OR_RETURN(
           HloInstruction * new_operand,
           SplitInstruction(operand, operand_split_dim, split_size));
-      std::vector<HloInstruction*> ops = {new_operand};
-      return builder_.AddInstruction(inst->CloneWithNewOperands(
-          new_operand->shape(), absl::MakeSpan(ops)));
+      Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
+                                             inst->shape().dimensions());
+      new_shape.set_dimensions(split_dim, split_size);
+      return builder_.AddInstruction(
+          inst->CloneWithNewOperands(new_shape, {new_operand}));
     } else if (MatchSupportedNestedReduce(inst)) {
       // For a reduce, split the 0th and only operand
       // (the initializer a scalar, so all we need to do
