@@ -1021,15 +1021,17 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     CHECK(lhs->shape().dimensions(split_dim_lhs) ==
           rhs->shape().dimensions(split_dim_rhs));
-    int64 split_size = BestEvenSplitSize(lhs, split_dim_lhs);
-    int64 split_count = lhs->shape().dimensions(split_dim_lhs) / split_size;
-    CHECK(split_size != -1);
-    CHECK(split_count * split_size == lhs->shape().dimensions(split_dim_lhs));
+
+    int64 split_size, split_count, split_rest;
+    DetermineSplitSize(lhs, split_dim_lhs, &split_size, &split_count,
+                       &split_rest);
+    CHECK(split_count * split_size + split_rest ==
+          lhs->shape().dimensions(split_dim_lhs));
 
     LOG(INFO)
         << "dot " << dot->name()
         << " lhs and rhs will be split on contracted dimension with split size "
-        << split_size;
+        << split_size << " and split rest " << split_rest;
 
     HloComputation::Builder body_builder(
         "intermediate_tensor_splitter_dot_body");
@@ -1082,7 +1084,40 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloInstruction* result = dot->parent()->AddInstruction(
         HloInstruction::CreateGetTupleElement(dot->shape(), loop, output_idx));
 
-    return ReplaceInstruction(dot, result);
+    if (split_rest == 0) {
+      return ReplaceInstruction(dot, result);
+    } else {
+      HloComputation::Builder rest_builder(
+          "intermediate_tensor_splitter_dot_rest");
+      Splitter splitter(rest_builder, dot->parent(),
+                        absl::MakeSpan(split_leafs_lhs));
+
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * rest_lhs,
+          splitter.SplitInstruction(lhs, split_dim_lhs, split_size));
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * rest_rhs,
+          splitter.SplitInstruction(rhs, split_dim_rhs, split_size));
+
+      HloInstruction* rest_part = rest_builder.AddInstruction(
+          dot->CloneWithNewOperands(dot->shape(), {rest_lhs, rest_rhs}));
+
+      HloComputation* rest_body =
+          parent_module->AddEmbeddedComputation(rest_builder.Build(rest_part));
+
+      splitter.parameters()[0] =
+          dot->parent()->AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<int64>(split_size * split_count)));
+      HloInstruction* args = dot->parent()->AddInstruction(
+          HloInstruction::CreateTuple(splitter.parameters()));
+      HloInstruction* rest_result = dot->parent()->AddInstruction(
+          HloInstruction::CreateCall(part->shape(), {args}, rest_body));
+
+      HloInstruction* full_result =
+          dot->parent()->AddInstruction(HloInstruction::CreateBinary(
+              result->shape(), HloOpcode::kAdd, result, rest_result));
+      return ReplaceInstruction(dot, full_result);
+    }
   } else if ((can_split_lhs && !can_split_rhs) ||
              (!can_split_lhs && can_split_rhs)) {
     //
