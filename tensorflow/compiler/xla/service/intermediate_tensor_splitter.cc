@@ -1416,16 +1416,17 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
   bool split_along_reduce_dim =
       absl::c_linear_search(reduce->dimensions(), split_dim);
-  int64 split_size = BestEvenSplitSize(reduce->mutable_operand(0), split_dim);
-  int64 split_count =
-      reduce->mutable_operand(0)->shape().dimensions(split_dim) / split_size;
-  CHECK(split_size != -1);
-  CHECK(split_count * split_size ==
+
+  int64 split_size, split_count, split_rest;
+  DetermineSplitSize(reduce->mutable_operand(0), split_dim, &split_size,
+                     &split_count, &split_rest);
+  CHECK(split_count * split_size + split_rest ==
         reduce->mutable_operand(0)->shape().dimensions(split_dim));
 
   LOG(INFO) << "reduce " << reduce->name()
             << " operands will be split at dimension " << split_dim
-            << " with split size " << split_size;
+            << " with split size " << split_size << " and rest size "
+            << split_rest;
 
   HloComputation::Builder body_builder(
       "intermediate_tensor_splitter_reduce_body");
@@ -1527,6 +1528,153 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
   HloInstruction* result =
       reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
           old_output->shape(), loop, output_idx));
+
+  if (split_rest > 0) {
+    HloComputation::Builder rest_builder(
+        "intermediate_tensor_splitter_reduce_rest");
+    Splitter rest_splitter(rest_builder, reduce->parent(),
+                           absl::MakeSpan(split_leafs));
+
+    std::vector<HloInstruction*> operands;
+    for (int64 i = 0; i < op_count; i++) {
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * split_op,
+          rest_splitter.SplitInstruction(reduce->mutable_operand(i), split_dim,
+                                         split_rest));
+      operands.push_back(split_op);
+    }
+
+    // Add init parameters to computation
+    for (int64 i = 0; i < op_count; i++) {
+      HloInstruction* init_op;
+      rest_splitter.AddParameter(reduce->mutable_operand(i + op_count),
+                                 &init_op);
+      operands.push_back(init_op);
+    }
+
+    int64 reduce_split_dim = split_dim;
+    for (int64 r_dim : reduce->dimensions())
+      if (r_dim < split_dim) reduce_split_dim--;
+
+    Shape output_part_shape;
+    HloInstruction *output_part, *old_output;
+    if (reduce->shape().IsTuple()) {
+      CHECK(reduce->user_count() == 1);
+      old_output = reduce->users()[0];
+
+      Shape new_reduce_shape = ShapeUtil::MakeTupleShape(
+          absl::MakeSpan(reduce->shape().tuple_shapes()));
+      if (!split_along_reduce_dim) {
+        for (int64 i = 0; i < new_reduce_shape.tuple_shapes_size(); i++) {
+          new_reduce_shape.mutable_tuple_shapes(i)->set_dimensions(
+              reduce_split_dim, split_rest);
+        }
+      }
+      HloInstruction* new_reduce = rest_builder.AddInstruction(
+          reduce->CloneWithNewOperands(new_reduce_shape, operands));
+
+      output_part_shape = ShapeUtil::MakeShape(
+          old_output->shape().element_type(), old_output->shape().dimensions());
+      if (!split_along_reduce_dim)
+        output_part_shape.set_dimensions(reduce_split_dim, split_rest);
+      output_part =
+          rest_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+              output_part_shape, new_reduce, old_output->tuple_index()));
+    } else {
+      output_part_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
+                                               reduce->shape().dimensions());
+      if (!split_along_reduce_dim)
+        output_part_shape.set_dimensions(reduce_split_dim, split_rest);
+      output_part = rest_builder.AddInstruction(
+          reduce->CloneWithNewOperands(output_part_shape, operands));
+      old_output = reduce;
+    }
+
+    // LOG(INFO) << "TEST1";
+
+    HloInstruction* output_tuple = rest_splitter.BuildOutputTuple(
+        reduce_split_dim, split_rest, old_output, output_part, false,
+        split_along_reduce_dim);
+    HloComputation* rest =
+        parent_module->AddEmbeddedComputation(rest_builder.Build(output_tuple));
+
+    // LOG(INFO) << "TEST2";
+
+    int64 output_idx = output_tuple->shape().tuple_shapes().size() - 1;
+    HloInstruction* init = reduce->parent()->AddInstruction(
+        HloInstruction::CreateTuple(rest_splitter.parameters()));
+    HloInstruction* call = reduce->parent()->AddInstruction(
+        HloInstruction::CreateCall(output_tuple->shape(), {init}, rest));
+    HloInstruction* result_rest =
+        reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
+            old_output->shape(), call, output_idx));
+
+    // LOG(INFO) << "TEST3";
+
+    if (split_along_reduce_dim) {
+      // we're splitting on a reduced dimension
+      CHECK(reduce->opcode() == HloOpcode::kReduce);
+      CHECK(reduce->operand_count() == 2);
+      HloComputation* reduce_fn = reduce->called_computations()[0];
+      if (ShapeUtil::IsScalar(result_rest->shape())) {
+        // we can call the function directly
+        result = reduce->parent()->AddInstruction(HloInstruction::CreateCall(
+            reduce->shape(), {result, result_rest}, reduce_fn));
+      } else {
+        // we have to call the function through map
+        result = reduce->parent()->AddInstruction(HloInstruction::CreateMap(
+            reduce->shape(), {result, result_rest}, reduce_fn));
+      }
+    } else {
+      Shape slice_shape = ShapeUtil::MakeShape(result->shape().element_type(),
+                                               result->shape().dimensions());
+      slice_shape.set_dimensions(reduce_split_dim, split_size * split_count);
+      std::vector<int64> starts;
+      std::vector<int64> limits;
+      std::vector<int64> strides;
+      for (int64 d = 0; d < old_output->shape().dimensions_size(); d++) {
+        starts.push_back(0);
+        if (d == reduce_split_dim) {
+          limits.push_back(split_size * split_count);
+        } else {
+          limits.push_back(old_output->shape().dimensions(d));
+        }
+        strides.push_back(1);
+      }
+      HloInstruction* result_slice =
+          reduce->parent()->AddInstruction(HloInstruction::CreateSlice(
+              slice_shape, result, absl::MakeSpan(starts),
+              absl::MakeSpan(limits), absl::MakeSpan(strides)));
+
+      Shape slice_shape_rest =
+          ShapeUtil::MakeShape(result_rest->shape().element_type(),
+                               result_rest->shape().dimensions());
+      slice_shape_rest.set_dimensions(reduce_split_dim, split_rest);
+      std::vector<int64> starts_rest;
+      std::vector<int64> limits_rest;
+      std::vector<int64> strides_rest;
+      for (int64 d = 0; d < old_output->shape().dimensions_size(); d++) {
+        starts_rest.push_back(0);
+        if (d == reduce_split_dim) {
+          limits_rest.push_back(split_rest);
+        } else {
+          limits_rest.push_back(old_output->shape().dimensions(d));
+        }
+        strides_rest.push_back(1);
+      }
+      HloInstruction* result_rest_slice =
+          reduce->parent()->AddInstruction(HloInstruction::CreateSlice(
+              slice_shape_rest, result_rest, absl::MakeSpan(starts_rest),
+              absl::MakeSpan(limits_rest), absl::MakeSpan(strides_rest)));
+
+      result =
+          reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
+              reduce->shape(), {result_slice, result_rest_slice},
+              reduce_split_dim));
+    }
+
+    // LOG(INFO) << "TEST10";
+  }
   return ReplaceInstruction(old_output, result);
 }
 
@@ -1564,6 +1712,7 @@ StatusOr<bool> IntermediateTensorSplitter::Run(HloModule* module) {
   int64 split_size = SplitTensorBytes();
   IntermediateTensorSplitterRewriteVisitor rewrite(split_size, split_size,
                                                    module);
+  LOG(INFO) << "running intermediate splitter ...";
   return rewrite.RunOnModule(module);
 }
 
