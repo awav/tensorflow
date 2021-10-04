@@ -61,14 +61,14 @@ TEST(Status, Assign) {
 TEST(Status, Move) {
   Status a(errors::InvalidArgument("Invalid"));
   Status b(std::move(a));
-  ASSERT_EQ("Invalid argument: Invalid", b.ToString());
+  ASSERT_EQ("INVALID_ARGUMENT: Invalid", b.ToString());
 }
 
 TEST(Status, MoveAssign) {
   Status a(errors::InvalidArgument("Invalid"));
   Status b;
   b = std::move(a);
-  ASSERT_EQ("Invalid argument: Invalid", b.ToString());
+  ASSERT_EQ("INVALID_ARGUMENT: Invalid", b.ToString());
 }
 
 TEST(Status, Update) {
@@ -178,7 +178,7 @@ TEST(StatusGroup, AggregateWithMultipleErrorStatus) {
 TEST(Status, InvalidPayloadGetsIgnored) {
   Status s = Status();
   s.SetPayload("Invalid", "Invalid Val");
-  ASSERT_EQ(s.GetPayload("Invalid"), tensorflow::StringPiece());
+  ASSERT_FALSE(s.GetPayload("Invalid").has_value());
   bool is_err_erased = s.ErasePayload("Invalid");
   ASSERT_EQ(is_err_erased, false);
 }
@@ -199,7 +199,7 @@ TEST(Status, ErasePayloadRemovesIt) {
   ASSERT_EQ(is_err_erased, true);
   is_err_erased = s.ErasePayload("Error key");
   ASSERT_EQ(is_err_erased, false);
-  ASSERT_EQ(s.GetPayload("Error key"), tensorflow::StringPiece());
+  ASSERT_FALSE(s.GetPayload("Error key").has_value());
 }
 
 static void BM_TF_CHECK_OK(::testing::benchmark::State& state) {

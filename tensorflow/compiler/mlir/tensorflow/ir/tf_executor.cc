@@ -203,17 +203,19 @@ LogicalResult Verify(GraphOp graph) {
     if (i >= num_results)
       return fetch.emitOpError()
              << "operand #" << i << " does not have a graph results to bind";
-    if (graph.getResult(i).getType() != operand.getType())
+    if (graph.getResult(i).getType() != operand.getType()) {
       return fetch.emitOpError()
-             << "operand #" << i << " type mismatch graph results";
+             << "operand #" << i << " type mismatch graph results ("
+             << graph.getResult(i).getType() << " != " << operand.getType()
+             << ")";
+    }
   }
   return success();
 }
 
 void Print(GraphOp graph, OpAsmPrinter &p) {
-  p << graph.getOperationName();
   p.printRegion(graph.getOperation()->getRegion(0));
-  p.printOptionalAttrDict(graph.getAttrs());
+  p.printOptionalAttrDict(graph->getAttrs());
 }
 
 ParseResult ParseGraphOp(OpAsmParser &parser, OperationState &result) {
@@ -310,7 +312,6 @@ LogicalResult Verify(IslandOp island) {
 }
 
 void Print(IslandOp op, OpAsmPrinter &p) {
-  p << op.getOperationName();
   if (op.getNumOperands()) {
     // These are always control operand, no explicit type needed.
     p << '(';
@@ -321,7 +322,7 @@ void Print(IslandOp op, OpAsmPrinter &p) {
   // Check if we can print the short "wraps" form: that is if the island
   // contains a single operation and the result of this operation are perfectly
   // forwarded to the yield.
-  if (op.getAttrs().empty() && op.WrapsSingleOp()) {
+  if (op->getAttrs().empty() && op.WrapsSingleOp()) {
     Operation &wrapped_op = op.GetBody().front();
     YieldOp yield_op = op.GetYield();
     // The "wraps" syntax only encodes a single location.
@@ -335,7 +336,7 @@ void Print(IslandOp op, OpAsmPrinter &p) {
     }
   }
   p.printRegion(op.getOperation()->getRegion(0));
-  p.printOptionalAttrDict(op.getAttrs());
+  p.printOptionalAttrDict(op->getAttrs());
 }
 
 ParseResult ParseIslandOp(OpAsmParser &parser, OperationState &result) {
@@ -436,7 +437,7 @@ ParseResult ParseSwitchOp(OpAsmParser &parser, OperationState &result) {
 }
 
 void Print(SwitchOp switch_op, OpAsmPrinter &p) {
-  p << switch_op.getOperationName() << ' ';
+  p << ' ';
   p.printOperands(switch_op.getOperands());
   Type data_operand_ty = switch_op.data().getType();
   // If the types aren't perfectly matching, print the functional type syntax
@@ -449,7 +450,7 @@ void Print(SwitchOp switch_op, OpAsmPrinter &p) {
   } else {
     p << switch_op.getType(0);
   }
-  p.printOptionalAttrDict(switch_op.getAttrs());
+  p.printOptionalAttrDict(switch_op->getAttrs());
 }
 
 }  // anonymous namespace
@@ -492,16 +493,16 @@ LogicalResult Verify(SwitchNOp switchn) {
     // the same ref type. However, if the output type is a non-ref type T, then
     // the operand can be tensor of type T or T_REF.
     bool is_output_ref =
-        output_tensor_type.getElementType().isa<TF::TensorFlowRefType>();
-    if (is_output_ref &&
-        !operand0_tensor_type.getElementType().isa<TF::TensorFlowRefType>()) {
+        output_tensor_type.getElementType().isa<tf_type::TensorFlowRefType>();
+    if (is_output_ref && !operand0_tensor_type.getElementType()
+                              .isa<tf_type::TensorFlowRefType>()) {
       return switchn.emitOpError()
              << "expects same operand and output element type but got "
              << operand0_tensor_type << " vs " << output_tensor_type;
     }
     Type broadcasted_type = OpTrait::util::getBroadcastedType(
-        TF::DropRefAndSubTypes(operand0_tensor_type),
-        TF::DropRefAndSubTypes(output_tensor_type));
+        tf_type::DropRefAndSubTypes(operand0_tensor_type),
+        tf_type::DropRefAndSubTypes(output_tensor_type));
     if (!broadcasted_type) {
       return switchn.emitOpError()
              << "expects data operand to be broadcastable with all output types"
@@ -513,7 +514,7 @@ LogicalResult Verify(SwitchNOp switchn) {
 }
 
 void Print(SwitchNOp switchn, OpAsmPrinter &p) {
-  p << switchn.getOperationName() << ' ';
+  p << ' ';
   auto operands = switchn.getOperands();
   // Print the 2 data operands.
   p.printOperands(operands.begin(), std::next(operands.begin(), 2));
@@ -525,7 +526,7 @@ void Print(SwitchNOp switchn, OpAsmPrinter &p) {
     p << ")";
   }
   p << " : " << switchn.getType(0);
-  p.printOptionalAttrDict(switchn.getAttrs(), {"num_outs"});
+  p.printOptionalAttrDict(switchn->getAttrs(), {"num_outs"});
 }
 
 ParseResult ParseSwitchNOp(OpAsmParser &parser, OperationState &result) {
@@ -595,7 +596,7 @@ LogicalResult Verify(MergeOp merge) {
            << "expects output to have tensor type but got " << output_type;
   }
   bool is_output_ref =
-      output_tensor_ty.getElementType().isa<TF::TensorFlowRefType>();
+      output_tensor_ty.getElementType().isa<tf_type::TensorFlowRefType>();
   for (Type operand_type : merge.getOperandTypes()) {
     if (operand_type.isa<ControlType>()) break;
 
@@ -611,14 +612,14 @@ LogicalResult Verify(MergeOp merge) {
     // same ref type. However, if the output type is a non-ref type T, operands
     // can be tensor of type T or T_REF.
     if (is_output_ref &&
-        !operand_tensor_ty.getElementType().isa<TF::TensorFlowRefType>()) {
+        !operand_tensor_ty.getElementType().isa<tf_type::TensorFlowRefType>()) {
       return merge.emitOpError()
              << "expects same operand and output element type but got "
              << operand_tensor_ty << " vs " << output_tensor_ty;
     }
     Type broadcasted_type = OpTrait::util::getBroadcastedType(
-        TF::DropRefAndSubTypes(output_tensor_ty),
-        TF::DropRefAndSubTypes(operand_tensor_ty));
+        tf_type::DropRefAndSubTypes(output_tensor_ty),
+        tf_type::DropRefAndSubTypes(operand_tensor_ty));
     if (!broadcasted_type)
       return merge.emitOpError()
              << "expects all operands to be broadcastable with output type"
@@ -644,7 +645,7 @@ void Print(MergeOp merge, OpAsmPrinter &p) {
     }
   }
 
-  p << merge.getOperationName() << ' ';
+  p << ' ';
   p.printOperands(merge.getOperands());
 
   // Print the type signature of the operation.
@@ -655,7 +656,7 @@ void Print(MergeOp merge, OpAsmPrinter &p) {
     p << output_type;
   }
 
-  p.printOptionalAttrDict(merge.getAttrs());
+  p.printOptionalAttrDict(merge->getAttrs());
 }
 
 ParseResult ParseMergeOp(OpAsmParser &parser, OperationState &result) {
@@ -704,7 +705,7 @@ namespace {
 constexpr int kDefaultParallelIterations = 10;
 
 void Print(EnterOp enter, OpAsmPrinter &p) {
-  p << enter.getOperationName() << ' ';
+  p << ' ';
   p.printOperands(enter.getOperands());
 
   p << " frame \"";
@@ -723,7 +724,7 @@ void Print(EnterOp enter, OpAsmPrinter &p) {
     p << enter.getType(0);
   }
 
-  p.printOptionalAttrDict(enter.getAttrs(),
+  p.printOptionalAttrDict(enter->getAttrs(),
                           {"frame_name", "parallel_iterations", "is_constant"});
 }
 
@@ -840,10 +841,10 @@ NextIterationSourceOp NextIterationSinkOp::GetSource() {
 namespace {
 
 void Print(ExitOp exit, OpAsmPrinter &p) {
-  p << exit.getOperationName() << ' ';
+  p << ' ';
   p.printOperands(exit.getOperands());
   p << " : " << exit.getType(0);
-  p.printOptionalAttrDict(exit.getAttrs());
+  p.printOptionalAttrDict(exit->getAttrs());
 }
 
 ParseResult ParseExitOp(OpAsmParser &parser, OperationState &result) {
@@ -876,7 +877,7 @@ ParseResult ParseExitOp(OpAsmParser &parser, OperationState &result) {
 namespace {
 
 void Print(LoopCondOp loop_cond, OpAsmPrinter &p) {
-  p << loop_cond.getOperationName() << ' ';
+  p << ' ';
   p.printOperands(loop_cond.getOperands());
 
   // If the types aren't matching (broadcast), print the functional type syntax.
@@ -887,7 +888,7 @@ void Print(LoopCondOp loop_cond, OpAsmPrinter &p) {
     p << " : " << loop_cond.input().getType();
   }
 
-  p.printOptionalAttrDict(loop_cond.getAttrs());
+  p.printOptionalAttrDict(loop_cond->getAttrs());
 }
 
 ParseResult ParseLoopCondOp(OpAsmParser &parser, OperationState &result) {

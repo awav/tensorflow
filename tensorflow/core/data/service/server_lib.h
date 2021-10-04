@@ -59,6 +59,7 @@ class GrpcDataServerBase {
   // Starts the service. This will be called after building the service, so
   // bound_port() will return the actual bound port.
   virtual Status StartServiceInternal() = 0;
+  virtual void StopServiceInternal() {}
 
   int bound_port() { return bound_port_; }
 
@@ -83,6 +84,8 @@ class DispatchGrpcDataServer : public GrpcDataServerBase {
 
   // Returns the number of workers registerd with the dispatcher.
   Status NumWorkers(int* num_workers);
+  // Returns the number of active (non-finished) jobs running on the dispatcher.
+  size_t NumActiveJobs();
 
  protected:
   void AddDataServiceToBuilder(::grpc::ServerBuilder& builder) override;
@@ -105,6 +108,7 @@ class WorkerGrpcDataServer : public GrpcDataServerBase {
  protected:
   void AddDataServiceToBuilder(::grpc::ServerBuilder& builder) override;
   Status StartServiceInternal() override;
+  void StopServiceInternal() override;
 
  private:
   const experimental::WorkerConfig config_;

@@ -41,7 +41,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/collection_ops_util.h"
-#include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
+#include "tensorflow/compiler/mlir/tensorflow/transforms/passes_detail.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_tensor.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/mangling_util.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -51,7 +51,6 @@ limitations under the License.
 #include "tensorflow/core/platform/types.h"
 
 namespace mlir {
-
 namespace {
 
 namespace cutil = TF::collection_ops_util;
@@ -68,8 +67,8 @@ using std::string;
 // shape.
 //
 struct TensorArrayOpsDecompositionPass
-    : public PassWrapper<TensorArrayOpsDecompositionPass,
-                         OperationPass<ModuleOp>> {
+    : public TF::TensorArrayOpsDecompositionPassBase<
+          TensorArrayOpsDecompositionPass> {
   void runOnOperation() override;
 };
 
@@ -311,7 +310,7 @@ LogicalResult HandleTensorArrayConcatV3Op(
   tensorflow::Tensor lengths_tensor(tensorflow::DT_INT64,
                                     {buffer_type.getDimSize(0)});
   for (int64_t i = 0; i < buffer_type.getDimSize(0); ++i) {
-    lengths_tensor.vec<tensorflow::int64>()(i) = buffer_type.getDimSize(1);
+    lengths_tensor.vec<int64_t>()(i) = buffer_type.getDimSize(1);
   }
   concat.lengths().replaceAllUsesWith(builder.create<TF::ConstOp>(
       concat.getLoc(),
@@ -625,7 +624,7 @@ LogicalResult HandleWhileOp(TF::WhileOp while_op, ModuleOp module,
   OpBuilder builder(while_op);
   auto new_while =
       builder.create<TF::WhileOp>(while_op.getLoc(), body.getType().getInputs(),
-                                  operands, while_op.getAttrs());
+                                  operands, while_op->getAttrs());
   for (int64_t i = 0; i < while_op.getNumOperands(); ++i) {
     if (ta_arg_buffer_type(i)) {
       while_op.getResult(i).replaceAllUsesWith(while_op.getOperand(i));
@@ -692,7 +691,7 @@ LogicalResult HandleIfOp(TF::IfOp if_op, ModuleOp module,
   OpBuilder builder(if_op);
   auto new_if = builder.create<TF::IfOp>(if_op.getLoc(),
                                          then_branch.getType().getResults(),
-                                         operands, if_op.getAttrs());
+                                         operands, if_op->getAttrs());
   auto ret_forwards_input = [](FuncOp f, int64_t ret_ind) -> int64_t {
     auto retval = f.front().getTerminator()->getOperand(ret_ind);
     auto arg = retval.dyn_cast<BlockArgument>();
@@ -751,9 +750,10 @@ LogicalResult HandlePartitionedCallOp(
     OpBuilder builder(call);
     auto new_call = builder.create<CallOp>(
         call.getLoc(), info.decomposed_callee.getType().getResults(),
-        new_operands, call.getAttrs());
+        new_operands, call->getAttrs());
     new_call->setAttr(
-        "f", builder.getSymbolRefAttr(
+        "f", SymbolRefAttr::get(
+                 builder.getContext(),
                  const_cast<FuncOp&>(info.decomposed_callee).getName()));
     for (const auto& entry : info.ret_forward_input) {
       call.getResult(entry.first)
@@ -813,12 +813,14 @@ LogicalResult HandlePartitionedCallOp(
   if (lowered_callee != callee) {
     if (!info.signature_change) {
       // Signature is not modified. We do not need to keep two copies.
-      lowered_callee.setName(callee.getName());
+      lowered_callee.setName(
+          StringAttr::get(callee->getContext(), callee.getName()));
       callee.erase();
     } else {
       // Add the clone with a new name.
-      lowered_callee.setName(
-          llvm::formatv("{0}_tensorarray_decomposed", callee.getName()).str());
+      lowered_callee.setName(StringAttr::get(
+          callee->getContext(),
+          llvm::formatv("{0}_tensorarray_decomposed", callee.getName()).str()));
     }
     SymbolTable(module).insert(lowered_callee);
   }
@@ -944,13 +946,10 @@ void TensorArrayOpsDecompositionPass::runOnOperation() {
   }
 }
 
-static PassRegistration<TensorArrayOpsDecompositionPass> pass(
-    "tf-tensor-array-ops-decomposition",
-    "Decompose tensor array operations into local variable operations.");
-
 }  // namespace
 
 namespace TF {
+
 std::unique_ptr<OperationPass<ModuleOp>>
 CreateTensorArrayOpsDecompositionPass() {
   return std::make_unique<TensorArrayOpsDecompositionPass>();

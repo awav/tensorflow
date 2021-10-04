@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.linalg.linalg_impl.matrix_exponential."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 import numpy as np
@@ -149,7 +145,7 @@ class ExponentialOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testDynamic(self):
-    with self.session(use_gpu=True) as sess:
+    with self.session() as sess:
       inp = array_ops.placeholder(ops.dtypes.float32)
       expm = linalg_impl.matrix_exponential(inp)
       matrix = np.array([[1., 2.], [3., 4.]])
@@ -157,7 +153,7 @@ class ExponentialOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testConcurrentExecutesWithoutError(self):
-    with self.session(use_gpu=True) as sess:
+    with self.session():
       matrix1 = random_ops.random_normal([5, 5], seed=42)
       matrix2 = random_ops.random_normal([5, 5], seed=42)
       expm1 = linalg_impl.matrix_exponential(matrix1)

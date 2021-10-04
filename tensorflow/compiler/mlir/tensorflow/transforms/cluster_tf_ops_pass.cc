@@ -152,7 +152,7 @@ llvm::Optional<llvm::StringMap<FunctionMetadata>> GetFunctionMetadatas(
 
       // If the value is used as an operand of the terminator op, adds it to
       // the result list of function that defines this op.
-      if (op->isKnownTerminator()) {
+      if (op->hasTrait<OpTrait::IsTerminator>()) {
         if (llvm::find(defining_func_metadata.results, value) ==
             defining_func_metadata.results.end()) {
           defining_func_metadata.results.push_back(value);
@@ -299,6 +299,13 @@ void CreateRemoteRunCalls(MLIRContext *context,
 
 class ClusterTFOpsByHostPass
     : public PassWrapper<ClusterTFOpsByHostPass, OperationPass<ModuleOp>> {
+  StringRef getArgument() const final { return "cluster-tf-ops-by-host"; }
+
+  StringRef getDescription() const final {
+    return "Cluster the TensorFlow ops by host so that each function only "
+           "contains ops placed on the same host";
+  }
+
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp module_op = getOperation();
@@ -339,10 +346,7 @@ std::unique_ptr<OperationPass<mlir::ModuleOp>> CreateClusterTFOpsByHostPass() {
   return std::make_unique<ClusterTFOpsByHostPass>();
 }
 
-static PassRegistration<ClusterTFOpsByHostPass> pass(
-    "cluster-tf-ops-by-host",
-    "Cluster the TensorFlow ops by host so that each function only contains "
-    "ops placed on the same host");
+static PassRegistration<ClusterTFOpsByHostPass> pass;
 
 }  // namespace TF
 }  // namespace mlir

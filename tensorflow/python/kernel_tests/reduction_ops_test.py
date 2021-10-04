@@ -14,10 +14,6 @@
 # ==============================================================================
 """Functional tests for reduction ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 import numbers
 
@@ -156,7 +152,7 @@ class BaseReductionTest(test.TestCase):
 
   def _compare(self, x, reduction_axes, keepdims, feed_dict=None):
     np_ans = self._np_reduce(x, reduction_axes, keepdims)
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       tf_ans = self._tf_reduce(x, reduction_axes, keepdims)
       out = sess.run(tf_ans, feed_dict)
     self.assertAllClose(np_ans, out)
@@ -178,7 +174,7 @@ class BaseReductionTest(test.TestCase):
     if reduction_axes is not None and np.shape(reduction_axes) == (1,):
       # Test scalar reduction_axes argument
       self._compareGradient(x, reduction_axes[0], rtol=rtol, atol=atol)
-    with self.cached_session(use_gpu=True):
+    with self.cached_session():
       t = ops.convert_to_tensor(x)
       su = self._tf_reduce(t, reduction_axes, False)
       jacob_t, jacob_n = gradient_checker.compute_gradient(
@@ -208,7 +204,7 @@ class SumReductionTest(BaseReductionTest):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True) as sess:
+      with self.cached_session():
         v = math_ops.reduce_sum([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
@@ -403,7 +399,7 @@ class SumReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testEmptyGradients(self):
-    with self.session(use_gpu=True):
+    with self.session():
       x = array_ops.zeros([0, 3])
       y = math_ops.reduce_sum(x, [1])
       error = gradient_checker.compute_gradient_error(x, [0, 3], y, [0])
@@ -411,7 +407,7 @@ class SumReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testDegenerate(self):
-    with self.session(use_gpu=True):
+    with self.session():
       for dtype in (dtypes.float16, dtypes.float32, dtypes.float64,
                     dtypes.complex64, dtypes.complex128):
         # A large number is needed to get Eigen to die
@@ -446,7 +442,7 @@ class MeanReductionTest(BaseReductionTest):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True) as sess:
+      with self.cached_session():
         v = math_ops.reduce_mean([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
@@ -525,7 +521,7 @@ class MeanReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testEmptyGradients(self):
-    with self.session(use_gpu=True):
+    with self.session():
       x = array_ops.zeros([0, 3])
       y = math_ops.reduce_mean(x, [1])
       error = gradient_checker.compute_gradient_error(x, [0, 3], y, [0])
@@ -533,7 +529,7 @@ class MeanReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testDegenerate(self):
-    with self.session(use_gpu=True):
+    with self.session():
       for dtype in (dtypes.float16, dtypes.float32, dtypes.float64):
         # A large number is needed to get Eigen to die
         x = array_ops.zeros((0, 9938), dtype=dtype)
@@ -560,7 +556,7 @@ class EuclideanNormReductionTest(BaseReductionTest):
   @test_util.run_deprecated_v1
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True):
+      with self.cached_session():
         v = math_ops.reduce_mean([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
@@ -609,7 +605,7 @@ class EuclideanNormReductionTest(BaseReductionTest):
       np_arr = self._makeIncremental((2,) * rank, dtypes.complex128)
       self._compareAllAxes(np_arr)
 
-    with self.session(use_gpu=True):
+    with self.session():
       for dtype in (dtypes.float16, dtypes.float32, dtypes.float64):
         # A large number is needed to get Eigen to die
         x = array_ops.zeros((0, 9938), dtype=dtype)
@@ -640,7 +636,7 @@ class ProdReductionTest(BaseReductionTest):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True) as sess:
+      with self.cached_session():
         v = math_ops.reduce_prod([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
@@ -657,9 +653,16 @@ class ProdReductionTest(BaseReductionTest):
   def testInt32(self):
     # Numpy automatically upgrades the type of np.prod from int32 to int64, so
     # Numpy does not overflow an int32 np.prod while TensorFlow does. To avoid
-    # overflow, divide the incremental int32 array by 2.
-    for rank in range(1, _MAX_RANK + 1):
-      np_arr = self._makeIncremental((2,) * rank, dtypes.int32) / 2
+    # overflow, limit array values.
+    for rank in range(1, _MAX_RANK):
+      np_arr = self._makeIncremental((2,) * rank, dtypes.int32) % 5 + 1
+      self._compareAllAxes(np_arr)
+
+  @test_util.run_deprecated_v1
+  def testInt64(self):
+    for rank in range(1, _MAX_RANK):
+      # Avoid overflow by limiting array values.
+      np_arr = self._makeIncremental((2,) * rank, dtypes.int64) % 11 + 1
       self._compareAllAxes(np_arr)
 
   @test_util.run_deprecated_v1
@@ -711,7 +714,7 @@ class ProdReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testEmptyGradients(self):
-    with self.session(use_gpu=True):
+    with self.session():
       x = array_ops.zeros([0, 3])
       y = math_ops.reduce_prod(x, [1])
       error = gradient_checker.compute_gradient_error(x, [0, 3], y, [0])
@@ -719,7 +722,7 @@ class ProdReductionTest(BaseReductionTest):
 
   @test_util.run_deprecated_v1
   def testDegenerate(self):
-    with self.session(use_gpu=True):
+    with self.session():
       for dtype in (dtypes.float16, dtypes.float32, dtypes.float64):
         # A large number is needed to get Eigen to die
         x = array_ops.zeros((0, 9938), dtype=dtype)
@@ -750,11 +753,12 @@ class MinReductionTest(test.TestCase):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True) as sess:
+      with self.cached_session():
         v = math_ops.reduce_min([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
 
+  @test_util.disable_xla("b/168718272")  # XLA handling of NaN is inconsistent
   def testSpecialValues(self):
     for dtype in [np.float32, np.float64]:
       for size in range(1, 4):
@@ -866,11 +870,12 @@ class MaxReductionTest(test.TestCase):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.cached_session(use_gpu=True) as sess:
+      with self.cached_session():
         v = math_ops.reduce_max([0, 0], constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
       self.assertAllEqual(tf_v, 0)
 
+  @test_util.disable_xla("b/168718272")  # XLA handling of NaN is inconsistent
   def testSpecialValues(self):
     for dtype in [np.float32, np.float64]:
       for size in range(1, 4):
@@ -998,7 +1003,7 @@ class AllReductionTest(test.TestCase):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.session(use_gpu=True) as sess:
+      with self.session():
         v = math_ops.reduce_all([True, True],
                                 constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
@@ -1047,7 +1052,7 @@ class AnyReductionTest(test.TestCase):
 
   def testAxesType(self):
     for dtype in [dtypes.int64, dtypes.int32]:
-      with self.session(use_gpu=True) as sess:
+      with self.session():
         v = math_ops.reduce_any([True, True],
                                 constant_op.constant(0, dtype=dtype))
         tf_v = self.evaluate(v)
@@ -1157,12 +1162,12 @@ class CountNonzeroReductionTest(test.TestCase):
   def testStringReduce1D(self):
     # Create a 1D array of strings
     x = np.asarray(["", "", "a", "", "", "b"])
-    self._compare(x, None, keepdims=False, zero=np.str(""))
-    self._compare(x, [], keepdims=False, zero=np.str(""))
-    self._compare(x, [0], keepdims=False, zero=np.str(""))
-    self._compare(x, None, keepdims=True, zero=np.str(""))
-    self._compare(x, [], keepdims=True, zero=np.str(""))
-    self._compare(x, [0], keepdims=True, zero=np.str(""))
+    self._compare(x, None, keepdims=False, zero=np.str_(""))
+    self._compare(x, [], keepdims=False, zero=np.str_(""))
+    self._compare(x, [0], keepdims=False, zero=np.str_(""))
+    self._compare(x, None, keepdims=True, zero=np.str_(""))
+    self._compare(x, [], keepdims=True, zero=np.str_(""))
+    self._compare(x, [0], keepdims=True, zero=np.str_(""))
 
   @test_util.run_deprecated_v1
   def testStringReduce2D(self):
@@ -1170,15 +1175,15 @@ class CountNonzeroReductionTest(test.TestCase):
     x = np.asarray([["", "", "a", "", "", "b"],
                     ["", "c", "", "d", "", ""],
                     ["e", "", "f", "", "", ""]])
-    self._compare(x, None, keepdims=False, zero=np.str(""))
-    self._compare(x, [], keepdims=False, zero=np.str(""))
-    self._compare(x, [0], keepdims=False, zero=np.str(""))
-    self._compare(x, [1], keepdims=False, zero=np.str(""))
-    self._compare(x, [0, 1], keepdims=False, zero=np.str(""))
-    self._compare(x, None, keepdims=True, zero=np.str(""))
-    self._compare(x, [], keepdims=True, zero=np.str(""))
-    self._compare(x, [0], keepdims=True, zero=np.str(""))
-    self._compare(x, [0, 1], keepdims=True, zero=np.str(""))
+    self._compare(x, None, keepdims=False, zero=np.str_(""))
+    self._compare(x, [], keepdims=False, zero=np.str_(""))
+    self._compare(x, [0], keepdims=False, zero=np.str_(""))
+    self._compare(x, [1], keepdims=False, zero=np.str_(""))
+    self._compare(x, [0, 1], keepdims=False, zero=np.str_(""))
+    self._compare(x, None, keepdims=True, zero=np.str_(""))
+    self._compare(x, [], keepdims=True, zero=np.str_(""))
+    self._compare(x, [0], keepdims=True, zero=np.str_(""))
+    self._compare(x, [0, 1], keepdims=True, zero=np.str_(""))
 
 
 if __name__ == "__main__":

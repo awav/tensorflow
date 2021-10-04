@@ -32,7 +32,7 @@ class FusionQueue {
 
   // Dequeues the next fusion candidates: a consumer and the list of producers
   // as operand indices.
-  virtual std::pair<HloInstruction*, std::vector<int64>>
+  virtual std::pair<HloInstruction*, std::vector<int64_t>>
   DequeueNextInstructionAndOperandsToFuseInOrder() = 0;
 
   // A callback passed to the queue implementation right before the producer is
@@ -44,6 +44,11 @@ class FusionQueue {
   virtual void OnFusingInstruction(HloInstruction* fusion,
                                    HloInstruction* original_producer,
                                    HloInstruction* original_consumer) {}
+
+  // A callback passed to the queue implementation when a proposed fusion does
+  // not happen.
+  virtual void NotFusingInstruction(HloInstruction* producer,
+                                    HloInstruction* consumer) {}
 
   // A callback passed to the queue implementation to notify the removal of an
   // instruction.

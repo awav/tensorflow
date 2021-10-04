@@ -81,17 +81,15 @@ IrEmitter::IrEmitter(const HloModuleConfig& hlo_module_config,
     : ir_emitter_context_(ir_emitter_context),
       module_(ir_emitter_context->llvm_module()),
       b_(module_->getContext()),
-      bindings_(ir_emitter_context->hlo_module(),
-                &ir_emitter_context->buffer_assignment(), &b_, module_,
-                is_nested),
-      hlo_module_config_(hlo_module_config) {
-}
+      bindings_(&b_, module_, is_nested),
+      hlo_module_config_(hlo_module_config) {}
 
 Status IrEmitter::DefaultAction(HloInstruction* hlo) {
   ElementalIrEmitter::HloToElementGeneratorMap operand_to_generator;
   for (const HloInstruction* operand : hlo->operands()) {
     operand_to_generator[operand] = [=](const llvm_ir::IrArray::Index& index) {
-      return GetIrArray(*operand, *hlo).EmitReadArrayElement(index, &b_);
+      return GetIrArray(*operand, *hlo)
+          .EmitReadArrayElement(index, &b_, operand->name());
     };
   }
   return EmitTargetElementLoop(
@@ -100,8 +98,7 @@ Status IrEmitter::DefaultAction(HloInstruction* hlo) {
                 .MakeElementGenerator(hlo, operand_to_generator));
 }
 
-Status IrEmitter::EmitConstants(const HloComputation& computation,
-                                bool lookup_indices) {
+Status IrEmitter::EmitConstants(const HloComputation& computation) {
   for (HloInstruction* instr : computation.instructions()) {
     if (instr->opcode() != HloOpcode::kConstant) {
       continue;
@@ -127,9 +124,6 @@ Status IrEmitter::EmitConstants(const HloComputation& computation,
     //
     // We may have to be more clever here in the future if we notice that we're
     // keeping around too many globals because of their linkage.
-    unsigned global_address_space = llvm_ir::GetGlobalMemoryAddressSpace(
-        *ir_emitter_context_->llvm_module());
-
     std::string global_name = llvm_ir::ConstantHloToGlobalName(*instr);
 
     llvm::GlobalVariable* global_for_const = new llvm::GlobalVariable(
@@ -137,7 +131,7 @@ Status IrEmitter::EmitConstants(const HloComputation& computation,
         llvm::GlobalValue::ExternalLinkage,
         /*Initializer=*/initializer, global_name,
         /*TLMode=*/llvm::GlobalValue::NotThreadLocal,
-        /*AddressSpace=*/global_address_space,
+        /*AddressSpace=*/0,
         /*isExternallyInitialized=*/false);
     global_for_const->setAlignment(llvm::Align(kConstantBufferAlignBytes));
     ir_emitter_context_->llvm_module()->getGlobalList().push_back(
@@ -150,31 +144,12 @@ Status IrEmitter::EmitConstants(const HloComputation& computation,
       auto base = static_cast<const uint8*>(literal.untyped_data());
       info.content.assign(base, base + literal.size_bytes());
     }
-    if (lookup_indices) {
-      auto maybe_slice =
-          ir_emitter_context_->buffer_assignment().GetUniqueSlice(instr, {});
-      if (maybe_slice.ok()) {
-        info.allocation_index = maybe_slice.ValueOrDie().index();
-      }
-    }
     ir_emitter_context_->constants().push_back(std::move(info));
   }
   return Status::OK();
 }
 
 Status IrEmitter::HandleConstant(HloInstruction* constant) {
-  return Status::OK();
-}
-
-Status IrEmitter::HandleBitcast(HloInstruction* bitcast) {
-  VLOG(2) << "HandleBitcast: " << bitcast->ToString();
-  const HloInstruction* operand = bitcast->operand(0);
-  // Bitcast is a no-op, but we still want to bind it to an llvm::Value
-  // sometimes, e.g., when it's operand is a constant or a bitcast of a
-  // constant.
-  if (bindings_.BoundToIrValue(*operand)) {
-    bindings_.BindHloToIrValue(*bitcast, GetBasePointer(*operand));
-  }
   return Status::OK();
 }
 
@@ -303,13 +278,13 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
       // "atom.add.f64 requires sm_60 or higher."
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-atom
       bool f64_atomic_add_supported =
-          ir_emitter_context_->cuda_compute_capability()->cc_major >= 6;
-
+          ir_emitter_context_->cuda_compute_capability().IsAtLeast(6);
       bool atomic_add_supported =
           element_type == F32 ||
           (f64_atomic_add_supported && element_type == F64);
       if (atomic_add_supported) {
         AtomicRMW(llvm::AtomicRMWInst::FAdd, output_address, source,
+                  llvm::MaybeAlign(),
                   llvm::AtomicOrdering::SequentiallyConsistent);
         return true;
       }
@@ -318,6 +293,7 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
     if (is_atomic_integral) {
       // integral + integral
       AtomicRMW(llvm::AtomicRMWInst::Add, output_address, source,
+                llvm::MaybeAlign(),
                 llvm::AtomicOrdering::SequentiallyConsistent);
       return true;
     }
@@ -329,7 +305,7 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
     auto opcode = primitive_util::IsSignedIntegralType(element_type)
                       ? llvm::AtomicRMWInst::Max
                       : llvm::AtomicRMWInst::UMax;
-    AtomicRMW(opcode, output_address, source,
+    AtomicRMW(opcode, output_address, source, llvm::MaybeAlign(),
               llvm::AtomicOrdering::SequentiallyConsistent);
     return true;
   }
@@ -339,7 +315,7 @@ bool IrEmitter::MaybeEmitDirectAtomicOperation(
     auto opcode = primitive_util::IsSignedIntegralType(element_type)
                       ? llvm::AtomicRMWInst::Min
                       : llvm::AtomicRMWInst::UMin;
-    AtomicRMW(opcode, output_address, source,
+    AtomicRMW(opcode, output_address, source, llvm::MaybeAlign(),
               llvm::AtomicOrdering::SequentiallyConsistent);
     return true;
   }
@@ -484,13 +460,21 @@ Status IrEmitter::EmitAtomicOperationUsingCAS(const HloComputation& computation,
 
   llvm::Value* cas_new_output = Load(cas_new_output_address, "cas_new_output");
 
+  // If cas_new_output == cas_old_output, we're not asking for anything to
+  // change, so we're done here!
+  llvm::Value* old_eq_new = ICmpEQ(cas_old_output, cas_new_output);
+  llvm::BasicBlock* loop_cas_bb = llvm::BasicBlock::Create(
+      b_.getContext(), "atomic_op_loop_cas", b_.GetInsertBlock()->getParent());
+  CondBr(old_eq_new, loop_exit_bb, loop_cas_bb);
+  b_.SetInsertPoint(loop_cas_bb);
+
   // Emit code to perform the atomicCAS operation
   // (cas_old_output, success) = atomicCAS(memory_address, cas_old_output,
   //                                       cas_new_output);
-  llvm::Value* ret_value =
-      AtomicCmpXchg(atomic_memory_address, cas_old_output, cas_new_output,
-                    llvm::AtomicOrdering::SequentiallyConsistent,
-                    llvm::AtomicOrdering::SequentiallyConsistent);
+  llvm::Value* ret_value = AtomicCmpXchg(
+      atomic_memory_address, cas_old_output, cas_new_output, llvm::MaybeAlign(),
+      llvm::AtomicOrdering::SequentiallyConsistent,
+      llvm::AtomicOrdering::SequentiallyConsistent);
 
   // Extract the memory value returned from atomicCAS and store it as
   // cas_old_output.
@@ -646,15 +630,22 @@ Status IrEmitter::HandleBatchNormGrad(HloInstruction*) {
 StatusOr<std::vector<llvm::Value*>> IrEmitter::ComputeNestedElement(
     const HloComputation& computation,
     absl::Span<llvm::Value* const> parameter_elements) {
-  const Shape& return_shape = computation.root_instruction()->shape();
-  llvm::Value* return_buffer = llvm_ir::EmitAllocaAtFunctionEntry(
-      llvm_ir::ShapeToIrType(return_shape, module_), "return_buffer", &b_);
   std::vector<llvm::Value*> parameter_buffers;
   for (llvm::Value* parameter_element : parameter_elements) {
     parameter_buffers.push_back(llvm_ir::EmitAllocaAtFunctionEntry(
         parameter_element->getType(), "parameter_buffer", &b_));
     Store(parameter_element, parameter_buffers.back());
   }
+
+  return ComputeNestedElementFromAddrs(computation, parameter_buffers);
+}
+
+StatusOr<std::vector<llvm::Value*>> IrEmitter::ComputeNestedElementFromAddrs(
+    const HloComputation& computation,
+    absl::Span<llvm::Value* const> parameter_elements_addrs) {
+  const Shape& return_shape = computation.root_instruction()->shape();
+  llvm::Value* return_buffer = llvm_ir::EmitAllocaAtFunctionEntry(
+      llvm_ir::ShapeToIrType(return_shape, module_), "return_buffer", &b_);
 
   std::vector<llvm::Value*> allocas_for_returned_scalars;
   if (!return_shape.IsTuple()) {
@@ -667,8 +658,8 @@ StatusOr<std::vector<llvm::Value*>> IrEmitter::ComputeNestedElement(
     EmitTuple(tuple_array, allocas_for_returned_scalars, &b_);
   }
 
-  TF_RETURN_IF_ERROR(EmitCallToNestedComputation(computation, parameter_buffers,
-                                                 return_buffer));
+  TF_RETURN_IF_ERROR(EmitCallToNestedComputation(
+      computation, parameter_elements_addrs, return_buffer));
 
   std::vector<llvm::Value*> returned_scalars;
   returned_scalars.reserve(allocas_for_returned_scalars.size());
@@ -682,9 +673,9 @@ std::vector<llvm_ir::IrArray> IrEmitter::ConstructIrArrayForOutputs(
     const HloInstruction& hlo) {
   std::vector<llvm_ir::IrArray> output_arrays;
   if (hlo.shape().IsTuple()) {
-    int64 num_outputs = ShapeUtil::TupleElementCount(hlo.shape());
+    int64_t num_outputs = ShapeUtil::TupleElementCount(hlo.shape());
     output_arrays.reserve(num_outputs);
-    for (int64 i = 0; i < num_outputs; ++i) {
+    for (int64_t i = 0; i < num_outputs; ++i) {
       output_arrays.push_back(GetIrArray(hlo, hlo, {i}));
     }
   } else {
@@ -700,7 +691,8 @@ void IrEmitter::BindFusionArguments(const HloInstruction* fusion,
     fused_emitter->BindGenerator(
         fusion->fused_parameter(i),
         [this, operand, fusion](llvm_ir::IrArray::Index index) {
-          return GetIrArray(*operand, *fusion).EmitReadArrayElement(index, &b_);
+          return GetIrArray(*operand, *fusion)
+              .EmitReadArrayElement(index, &b_, operand->name());
         });
   }
 }

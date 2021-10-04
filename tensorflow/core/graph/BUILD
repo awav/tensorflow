@@ -9,7 +9,7 @@ package(
     default_visibility = [
         "//tensorflow/core:__subpackages__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 # TODO(bmzhao): This target a holdover from tensorflow/core/BUILD. We
@@ -18,6 +18,7 @@ package(
 cc_library(
     name = "mkl_graph_util",
     hdrs = ["mkl_graph_util.h"],
+    deps = ["@com_google_absl//absl/container:flat_hash_map"],
 )
 
 tf_cc_test(

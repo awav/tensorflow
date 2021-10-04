@@ -14,10 +14,6 @@
 # ==============================================================================
 """Functional tests for basic component wise operations using a GPU device."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 import threading
 
@@ -40,13 +36,13 @@ from tensorflow.python.platform import test
 class GPUBinaryOpsTest(test.TestCase):
 
   def _compareGPU(self, x, y, np_func, tf_func):
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session():
       inx = ops.convert_to_tensor(x)
       iny = ops.convert_to_tensor(y)
       out = tf_func(inx, iny)
       tf_gpu = self.evaluate(out)
 
-    with self.cached_session(use_gpu=False) as sess:
+    with self.cached_session(use_gpu=False):
       inx = ops.convert_to_tensor(x)
       iny = ops.convert_to_tensor(y)
       out = tf_func(inx, iny)
@@ -55,8 +51,8 @@ class GPUBinaryOpsTest(test.TestCase):
     self.assertAllClose(tf_cpu, tf_gpu)
 
   def testFloatBasic(self):
-    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float32)
-    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float32)
+    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
+    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
     self._compareGPU(x, y, np.add, math_ops.add)
     self._compareGPU(x, y, np.subtract, math_ops.subtract)
     self._compareGPU(x, y, np.multiply, math_ops.multiply)
@@ -66,15 +62,15 @@ class GPUBinaryOpsTest(test.TestCase):
 
   def testFloatWithBCast(self):
     x = np.linspace(-5, 20, 15).reshape(3, 5).astype(np.float32)
-    y = np.linspace(20, -5, 30).reshape(2, 3, 5).astype(np.float32)
+    y = np.linspace(20, -5, 30).reshape(2, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
     self._compareGPU(x, y, np.add, math_ops.add)
     self._compareGPU(x, y, np.subtract, math_ops.subtract)
     self._compareGPU(x, y, np.multiply, math_ops.multiply)
     self._compareGPU(x, y + 0.1, np.true_divide, math_ops.truediv)
 
   def testDoubleBasic(self):
-    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float64)
-    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float64)
+    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float64)  # pylint: disable=too-many-function-args
+    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float64)  # pylint: disable=too-many-function-args
     self._compareGPU(x, y, np.add, math_ops.add)
     self._compareGPU(x, y, np.subtract, math_ops.subtract)
     self._compareGPU(x, y, np.multiply, math_ops.multiply)
@@ -82,7 +78,7 @@ class GPUBinaryOpsTest(test.TestCase):
 
   def testDoubleWithBCast(self):
     x = np.linspace(-5, 20, 15).reshape(3, 5).astype(np.float64)
-    y = np.linspace(20, -5, 30).reshape(2, 3, 5).astype(np.float64)
+    y = np.linspace(20, -5, 30).reshape(2, 3, 5).astype(np.float64)  # pylint: disable=too-many-function-args
     self._compareGPU(x, y, np.add, math_ops.add)
     self._compareGPU(x, y, np.subtract, math_ops.subtract)
     self._compareGPU(x, y, np.multiply, math_ops.multiply)
@@ -143,7 +139,7 @@ class MathBuiltinUnaryTest(test.TestCase):
 
     np_out = np.floor_divide(x, y + 0.1)
 
-    with self.session(use_gpu=True) as sess:
+    with self.session():
       inx = ops.convert_to_tensor(x)
       iny = ops.convert_to_tensor(y + 0.1)
       ofunc = inx / iny
@@ -167,7 +163,7 @@ class BroadcastSimpleTest(test.TestCase):
 
   def _compareGpu(self, x, y, np_func, tf_func):
     np_ans = np_func(x, y)
-    with self.cached_session(use_gpu=True):
+    with self.cached_session():
       inx = ops.convert_to_tensor(x)
       iny = ops.convert_to_tensor(y)
       out = tf_func(inx, iny)

@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for tf.data placement within tf.functions."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.data.experimental.ops import prefetching_ops
@@ -66,7 +62,6 @@ class PlacementTest(test_base.DatasetTestBase, parameterized.TestCase):
 
   @combinations.generate(test_base.eager_only_combinations())
   def testWhile(self):
-    self.skipTest("b/166625126")
 
     @def_function.function
     def f():
@@ -121,7 +116,6 @@ class PlacementTest(test_base.DatasetTestBase, parameterized.TestCase):
 
   @combinations.generate(test_base.eager_only_combinations())
   def testCond(self):
-    self.skipTest("b/166625126")
     # Ideally, placer should avoid cross-device copies even when the cond op
     # has no placement constraints.
     @def_function.function
@@ -141,7 +135,6 @@ class PlacementTest(test_base.DatasetTestBase, parameterized.TestCase):
 
   @combinations.generate(test_base.eager_only_combinations())
   def testId(self):
-    self.skipTest("b/166625126")
     # Ideally, placer should know that Identity(dataset) should be on the same
     # device as the dataset.
     @def_function.function
@@ -248,6 +241,23 @@ class PlacementTest(test_base.DatasetTestBase, parameterized.TestCase):
     with ops.device("/gpu:0"):
       result = comp()
     self.assertEqual(result.numpy(), 45)
+
+  @combinations.generate(test_base.eager_only_combinations())
+  def testFunctionInliningColocation(self):
+    if not test_util.is_gpu_available():
+      self.skipTest("No GPU available")
+
+    @def_function.function
+    def f(ds):
+      return next(iter(ds))
+
+    @def_function.function
+    def g():
+      dataset = dataset_ops.Dataset.range(10)
+      return f(dataset)
+
+    with ops.device("/gpu:0"):
+      self.assertEqual(self.evaluate(g()), 0)
 
 
 if __name__ == "__main__":

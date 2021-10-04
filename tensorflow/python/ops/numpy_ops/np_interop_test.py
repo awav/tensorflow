@@ -14,14 +14,11 @@
 # ==============================================================================
 """Tests for interop between TF ops, numpy_ops, and numpy methods."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as onp
 import tensorflow.compat.v2 as tf
 
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import numpy_ops as np
 from tensorflow.python.ops.numpy_ops import np_math_ops
 
@@ -229,6 +226,7 @@ class InteropTest(tf.test.TestCase):
     # self.assertIsInstance(reduced, np.ndarray)
     self.assertAllClose(reduced, 15)
 
+  @test_util.disable_tfrt('b/180469928')
   def testPyFuncInterop(self):
     def py_func_fn(a, b):
       return a + b

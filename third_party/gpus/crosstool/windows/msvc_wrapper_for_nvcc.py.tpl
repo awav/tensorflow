@@ -20,14 +20,11 @@ DESCRIPTION:
   This script is the Windows version of //third_party/gpus/crosstool/crosstool_wrapper_is_not_gcc
 """
 
-from __future__ import print_function
-
 from argparse import ArgumentParser
 import os
 import subprocess
 import re
 import sys
-import pipes
 import tempfile
 
 # Template values set by cuda_autoconf.
@@ -153,6 +150,13 @@ def InvokeNvcc(argv, log=False):
     ]
   _, argv = GetOptionValue(argv, '--no-cuda-include-ptx')
 
+  # nvcc doesn't respect the INCLUDE and LIB env vars from MSVC,
+  # so we explicity specify the system include paths and library search paths.
+  if 'INCLUDE' in os.environ:
+    nvccopts += [('--system-include="%s"' % p) for p in os.environ['INCLUDE'].split(";")]
+  if 'LIB' in os.environ:
+    nvccopts += [('--library-path="%s"' % p) for p in os.environ['LIB'].split(";")]
+
   nvccopts += nvcc_compiler_options
   nvccopts += undefines
   nvccopts += defines
@@ -195,7 +199,6 @@ def main():
 
   if args.x and args.x[0] == 'cuda':
     if args.cuda_log: Log('-x cuda')
-    leftover = [pipes.quote(s) for s in leftover]
     if args.cuda_log: Log('using nvcc')
     return InvokeNvcc(leftover, log=args.cuda_log)
 

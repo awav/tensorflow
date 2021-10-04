@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for Bijector."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 
 import numpy as np
@@ -36,9 +32,10 @@ class BaseBijectorTest(test.TestCase):
   """Tests properties of the Bijector base-class."""
 
   def testIsAbstract(self):
+    # In Python 3.9, "abstract methods" become "abstract method"
     with self.assertRaisesRegex(TypeError,
                                 ("Can't instantiate abstract class Bijector "
-                                 "with abstract methods __init__")):
+                                 "with abstract methods? __init__")):
       bijector.Bijector()  # pylint: disable=abstract-class-instantiated
 
   def testDefaults(self):

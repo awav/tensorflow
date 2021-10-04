@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for aggregate_ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.core.framework import tensor_pb2
@@ -58,7 +54,7 @@ class AddNTest(test.TestCase):
 
   def testAddN(self):
     np.random.seed(12345)
-    with self.session(use_gpu=True) as sess:
+    with self.session():
       for dtype in self._supported_types():
         for count in range(1, self._MAX_N + 1):
           data = [self._buildData((2, 2), dtype) for _ in range(count)]
@@ -71,7 +67,7 @@ class AddNTest(test.TestCase):
   @test_util.run_deprecated_v1
   def testUnknownShapes(self):
     np.random.seed(12345)
-    with self.session(use_gpu=True) as sess:
+    with self.session() as sess:
       for dtype in self._supported_types():
         data = self._buildData((2, 2), dtype)
         for count in range(1, self._MAX_N + 1):

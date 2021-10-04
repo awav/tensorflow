@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.tf.norm."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.framework import constant_op
@@ -68,7 +64,7 @@ def _GetNormOpTest(dtype_, shape_, ord_, axis_, keep_dims_, use_static_shape_):
 
   def _CompareNorm(self, matrix):
     np_norm = np.linalg.norm(matrix, ord=ord_, axis=axis_, keepdims=keep_dims_)
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       if use_static_shape_:
         tf_matrix = constant_op.constant(matrix)
         tf_norm = linalg_ops.norm(

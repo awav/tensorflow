@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for training.moving_averages when using a DistributionStrategy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.distribute import collective_all_reduce_strategy
@@ -41,6 +37,7 @@ all_distributions = [
     strategy_combinations.multi_worker_mirrored_2x1_cpu,
     strategy_combinations.multi_worker_mirrored_2x1_gpu,
     strategy_combinations.multi_worker_mirrored_2x2_gpu,
+    strategy_combinations.multi_worker_mirrored_2x2_gpu_no_merge_call,
     strategy_combinations.multi_worker_mirrored_4x1_cpu,
 ]
 

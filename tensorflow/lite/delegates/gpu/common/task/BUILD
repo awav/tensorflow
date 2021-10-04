@@ -2,7 +2,7 @@ load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
 
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -81,6 +81,15 @@ cc_library(
     hdrs = ["gpu_tensor.h"],
 )
 
+cc_library(
+    name = "profiling_info",
+    srcs = ["profiling_info.cc"],
+    hdrs = ["profiling_info.h"],
+    deps = [
+        "@com_google_absl//absl/time",
+    ],
+)
+
 flatbuffer_cc_library(
     name = "serialization_base_cc_fbs",
     srcs = ["serialization_base.fbs"],
@@ -97,9 +106,11 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:gpu_info",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:util",
         "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
         "//tensorflow/lite/delegates/gpu/common/task:tensor_linear_desc",
+        "@com_google_absl//absl/strings",
     ],
 )
 

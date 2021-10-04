@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/cpu/cpu_runtime.h"
 
+#include <cstdarg>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -24,6 +25,7 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/executable_run_options.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
@@ -115,6 +117,10 @@ extern const char* const kReleaseOutfeedBufferAfterPopulationSymbolName =
     "__xla_cpu_runtime_ReleaseOutfeedBufferAfterPopulation";
 extern const char* const kParallelForkJoinSymbolName =
     "__xla_cpu_runtime_ParallelForkJoin";
+extern const char* const kPrintfToStderrSymbolName =
+    "__xla_cpu_runtime_PrintfToStderr";
+extern const char* const kStatusIsSuccessSymbolName =
+    "__xla_cpu_runtime_StatusIsSuccess";
 extern const char* const kKeyValueSortSymbolName =
     "__xla_cpu_runtime_KeyValueSort";
 extern const char* const kTopKF32SymbolName = "__xla_cpu_runtime_TopKF32";
@@ -136,31 +142,39 @@ namespace {
 
 struct CollectivePermuteParticipantData : xla::ParticipantData {
   CollectivePermuteParticipantData(const xla::RendezvousKey& rendezvous_key_p,
-                                   xla::int64 device_ordinal_p,
+                                   int64_t device_ordinal_p,
                                    se::Stream* stream_p)
-      : ParticipantData(rendezvous_key_p, device_ordinal_p, stream_p) {}
+      : ParticipantData(rendezvous_key_p),
+        device_ordinal(device_ordinal_p),
+        stream(stream_p) {}
 
+  int64_t device_ordinal;
+  se::Stream* stream;
   int replica_id;
   se::DeviceMemoryBase source_data;
   se::DeviceMemoryBase destination_data;
-  xla::int64 byte_size;
+  int64_t byte_size;
   std::vector<int> replica_ids_to_copy_to;
 
   std::string ToString() const override {
     return absl::StrFormat(
         "CollectivePermuteParticipantData{replica_id=%d, "
         "source_data=%p, destination_data=%p, byte_size=%d, "
-        "replica_ids_to_copy_to=[%s]}",
+        "replica_ids_to_copy_to=[%s], device_ordinal=%d, stream=%p}",
         replica_id, source_data.opaque(), destination_data.opaque(), byte_size,
-        absl::StrJoin(replica_ids_to_copy_to, ", "));
+        absl::StrJoin(replica_ids_to_copy_to, ", "), device_ordinal, stream);
   }
 };
 
 struct AllToAllParticipantData : xla::ParticipantData {
   AllToAllParticipantData(const xla::RendezvousKey& rendezvous_key_p,
-                          xla::int64 device_ordinal_p, se::Stream* stream_p)
-      : ParticipantData(rendezvous_key_p, device_ordinal_p, stream_p) {}
+                          int64_t device_ordinal_p, se::Stream* stream_p)
+      : ParticipantData(rendezvous_key_p),
+        device_ordinal(device_ordinal_p),
+        stream(stream_p) {}
 
+  int64_t device_ordinal;
+  se::Stream* stream;
   std::vector<se::DeviceMemoryBase> source_buffers;
   std::vector<se::DeviceMemoryBase> destination_buffers;
   int replica_id;
@@ -177,10 +191,11 @@ struct AllToAllParticipantData : xla::ParticipantData {
     return absl::StrFormat(
         "AllToAllParticipantData{replica_id=%d, "
         "replica_ids_to_copy_to=[%s], source_buffers=[%s], "
-        "destination_buffers=[%s]}",
+        "destination_buffers=[%s], device_ordinal=%d, stream=%p}",
         replica_id, absl::StrJoin(replica_ids_to_copy_to, ", "),
         absl::StrJoin(source_buffers, ", ", addr_formatter),
-        absl::StrJoin(destination_buffers, ", ", addr_formatter));
+        absl::StrJoin(destination_buffers, ", ", addr_formatter),
+        device_ordinal, stream);
   }
 };
 
@@ -208,11 +223,32 @@ tensorflow::string ShapeString(const void* shape_ptr, xla::int32 shape_length) {
   return "<invalid shape>";
 }
 
+// TODO(zhangqiaorjc): Prefer to make callers set and use device_ordinal
+// directly since callers may not have a Stream*.
+int GetDeviceOrdinal(const xla::ExecutableRunOptions* run_options) {
+  if (!run_options) {
+    return 0;
+  } else if (run_options->device_ordinal() != -1) {
+    return run_options->device_ordinal();
+  }
+  return run_options->stream()->parent()->device_ordinal();
+}
+
 }  // namespace
 
 extern "C" {
 
-TF_ATTRIBUTE_NO_SANITIZE_MEMORY xla::int64 __xla_cpu_runtime_TracingStart(
+TF_ATTRIBUTE_NO_SANITIZE_MEMORY int __xla_cpu_runtime_PrintfToStderr(
+    const char* format, ...) {
+  VLOG(3) << "__xla_cpu_runtime_PrintfToStderr " << format;
+  va_list args;
+  va_start(args, format);
+  int result = vfprintf(stderr, format, args);
+  va_end(args);
+  return result;
+}
+
+TF_ATTRIBUTE_NO_SANITIZE_MEMORY int64_t __xla_cpu_runtime_TracingStart(
     const void* /* xla::ExecutableRunOptions* */ run_options_ptr,
     const char* name) {
   VLOG(3) << "TracingStart " << name;
@@ -220,8 +256,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY xla::int64 __xla_cpu_runtime_TracingStart(
 }
 
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_TracingEnd(
-    const void* /* xla::ExecutableRunOptions* */ run_options_ptr,
-    xla::int64 id) {
+    const void* /* xla::ExecutableRunOptions* */ run_options_ptr, int64_t id) {
   VLOG(3) << "TracingEnd " << id;
   tensorflow::profiler::TraceMe::ActivityEnd(id);
 }
@@ -232,8 +267,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void*
 __xla_cpu_runtime_AcquireInfeedBufferForDequeue(
     const xla::ExecutableRunOptions* run_options, xla::int32 buffer_length,
     const void* shape, xla::int32 shape_length) {
-  int device_ordinal =
-      run_options ? run_options->stream()->parent()->device_ordinal() : 0;
+  int device_ordinal = GetDeviceOrdinal(run_options);
 
   VLOG(2) << "AcquireInfeedBufferForDequeue: "
           << ShapeString(shape, shape_length) << " on stream executor "
@@ -256,8 +290,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void
 __xla_cpu_runtime_ReleaseInfeedBufferAfterDequeue(
     const xla::ExecutableRunOptions* run_options, xla::int32 buffer_length,
     void* buffer_ptr, const void* shape_ptr, xla::int32 shape_length) {
-  int device_ordinal =
-      run_options ? run_options->stream()->parent()->device_ordinal() : 0;
+  int device_ordinal = GetDeviceOrdinal(run_options);
 
   VLOG(2) << "ReleaseInfeedBufferAfterDeque: "
           << ShapeString(shape_ptr, shape_length) << " on stream executor "
@@ -275,8 +308,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void*
 __xla_cpu_runtime_AcquireOutfeedBufferForPopulation(
     const xla::ExecutableRunOptions* run_options, xla::int32 buffer_length,
     const void* shape_ptr, xla::int32 shape_length) {
-  int device_ordinal =
-      run_options ? run_options->stream()->parent()->device_ordinal() : 0;
+  int device_ordinal = GetDeviceOrdinal(run_options);
 
   VLOG(2) << "AcquireOutfeedBufferForPopulation: "
           << ShapeString(shape_ptr, shape_length) << " on stream executor "
@@ -299,8 +331,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void
 __xla_cpu_runtime_ReleaseOutfeedBufferAfterPopulation(
     const xla::ExecutableRunOptions* run_options, xla::int32 buffer_length,
     void* buffer_ptr, const void* shape_ptr, xla::int32 shape_length) {
-  int device_ordinal =
-      run_options ? run_options->stream()->parent()->device_ordinal() : 0;
+  int device_ordinal = GetDeviceOrdinal(run_options);
 
   VLOG(2) << "ReleaseOutfeedBufferAfterPopulation: "
           << ShapeString(shape_ptr, shape_length) << " on stream executor "
@@ -584,18 +615,10 @@ GlobalAllToAllRendezvousMap() {
   return m;
 }
 
-int GetDeviceOrdinal(const xla::ExecutableRunOptions* run_options) {
-  if (run_options->stream()) {
-    return run_options->stream()->parent()->device_ordinal();
-  } else {
-    return run_options->device_ordinal();
-  }
-}
-
 xla::RendezvousKey GetRendezvousKey(
     const xla::ExecutableRunOptions* run_options,
     std::vector<xla::ReplicaGroup> group, xla::int32 channel_id_present,
-    xla::int64 op_id) {
+    int64_t op_id) {
   const xla::DeviceAssignment& device_assignment =
       *run_options->device_assignment();
   int device_ordinal = GetDeviceOrdinal(run_options);
@@ -604,8 +627,8 @@ xla::RendezvousKey GetRendezvousKey(
                          : xla::RendezvousKey::kCrossReplica;
   std::vector<xla::GlobalDeviceId> participating_devices =
       xla::GetParticipatingDevices(xla::GlobalDeviceId(device_ordinal),
-                                   device_assignment,
-                                   device_assignment.replica_count(), group)
+                                   device_assignment, group,
+                                   xla::CollectiveOpGroupMode::kCrossReplica)
           .ValueOrDie();
   int num_local_participants = participating_devices.size();
   return xla::RendezvousKey{run_options->run_id(),
@@ -617,9 +640,9 @@ xla::RendezvousKey GetRendezvousKey(
 
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_AllToAll(
     const xla::ExecutableRunOptions* run_options, xla::int32 channel_id_present,
-    xla::int64 op_id, const void* replica_groups_str,
+    int64_t op_id, const void* replica_groups_str,
     xla::int32 replica_groups_str_size, xla::int32 num_buffers,
-    xla::int64 buffer_size, void** source_buffers, void** destination_buffers) {
+    int64_t buffer_size, void** source_buffers, void** destination_buffers) {
   int device_ordinal = GetDeviceOrdinal(run_options);
   xla::int32 replica_id =
       run_options->device_assignment()
@@ -636,7 +659,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_AllToAll(
                                       run_options->stream());
   participant.replica_id = replica_id;
   participant.replica_ids_to_copy_to =
-      xla::GetParticipatingReplicas(
+      xla::GetParticipatingIDs(
           replica_id, run_options->device_assignment()->replica_count(), group)
           .ValueOrDie();
   for (int i = 0; i < num_buffers; i++) {
@@ -659,7 +682,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_AllToAll(
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_AllReduce(
     const xla::ExecutableRunOptions* run_options,
     const void* replica_groups_str, xla::int32 replica_groups_str_size,
-    xla::int32 channel_id_present, xla::int64 op_id, xla::int32 reduction_kind,
+    xla::int32 channel_id_present, int64_t op_id, xla::int32 reduction_kind,
     const void* shape_ptr, xla::int32 shape_length, xla::int32 num_buffers,
     void** input_buffers, void** output_buffers) {
   int device_ordinal = GetDeviceOrdinal(run_options);
@@ -718,7 +741,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_ReplicaId(
 
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_CollectivePermute(
     const xla::ExecutableRunOptions* run_options, xla::int32 channel_id_present,
-    xla::int64 op_id, xla::int32 byte_size, void* input_buffer,
+    int64_t op_id, xla::int32 byte_size, void* input_buffer,
     void* output_buffer, const void* source_target_pairs,
     xla::int32 source_target_pairs_size) {
   int device_ordinal = GetDeviceOrdinal(run_options);

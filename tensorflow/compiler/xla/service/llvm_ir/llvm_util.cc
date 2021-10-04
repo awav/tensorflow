@@ -22,6 +22,8 @@ limitations under the License.
 #include "absl/base/casts.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -36,6 +38,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/service/cpu/cpu_options.h"
 #include "tensorflow/compiler/xla/service/dump.h"
+#include "tensorflow/compiler/xla/service/llvm_ir/llvm_type_conversion_util.h"
 #include "tensorflow/compiler/xla/service/name_uniquer.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/types.h"
@@ -83,36 +86,39 @@ string DumpModuleToString(const llvm::Module& module) {
 
 llvm::CallInst* EmitCallToIntrinsic(
     llvm::Intrinsic::ID intrinsic_id, absl::Span<llvm::Value* const> operands,
-    absl::Span<llvm::Type* const> overloaded_types, llvm::IRBuilder<>* b) {
+    absl::Span<llvm::Type* const> overloaded_types, llvm::IRBuilder<>* b,
+    absl::string_view name) {
   llvm::Module* module = ModuleFromIRBuilder(b);
   llvm::Function* intrinsic = llvm::Intrinsic::getDeclaration(
       module, intrinsic_id, AsArrayRef(overloaded_types));
-  return b->CreateCall(intrinsic, AsArrayRef(operands));
+  return b->CreateCall(intrinsic, AsArrayRef(operands), name.data());
 }
 
 llvm::Value* EmitFloatMax(llvm::Value* lhs_value, llvm::Value* rhs_value,
-                          llvm::IRBuilder<>* b, bool enable_fast_min_max) {
+                          llvm::IRBuilder<>* b, bool enable_fast_min_max,
+                          absl::string_view name) {
   if (b->getFastMathFlags().noNaNs() || enable_fast_min_max) {
     auto cmp = b->CreateFCmpUGE(lhs_value, rhs_value);
-    return b->CreateSelect(cmp, lhs_value, rhs_value);
+    return b->CreateSelect(cmp, lhs_value, rhs_value, name.data());
   } else {
     auto cmp_ge = b->CreateFCmpOGE(lhs_value, rhs_value);
     auto lhs_is_nan = b->CreateFCmpUNE(lhs_value, lhs_value);
     auto sel_lhs = b->CreateOr(cmp_ge, lhs_is_nan);
-    return b->CreateSelect(sel_lhs, lhs_value, rhs_value);
+    return b->CreateSelect(sel_lhs, lhs_value, rhs_value, name.data());
   }
 }
 
 llvm::Value* EmitFloatMin(llvm::Value* lhs_value, llvm::Value* rhs_value,
-                          llvm::IRBuilder<>* b, bool enable_fast_min_max) {
+                          llvm::IRBuilder<>* b, bool enable_fast_min_max,
+                          absl::string_view name) {
   if (b->getFastMathFlags().noNaNs() || enable_fast_min_max) {
     auto cmp = b->CreateFCmpULE(lhs_value, rhs_value);
-    return b->CreateSelect(cmp, lhs_value, rhs_value);
+    return b->CreateSelect(cmp, lhs_value, rhs_value, name.data());
   } else {
     auto cmp_le = b->CreateFCmpOLE(lhs_value, rhs_value);
     auto lhs_is_nan = b->CreateFCmpUNE(lhs_value, lhs_value);
     auto sel_lhs = b->CreateOr(cmp_le, lhs_is_nan);
-    return b->CreateSelect(sel_lhs, lhs_value, rhs_value);
+    return b->CreateSelect(sel_lhs, lhs_value, rhs_value, name.data());
   }
 }
 
@@ -134,7 +140,7 @@ llvm::Value* EmitBufferIndexingGEP(llvm::Value* array, llvm::Value* index,
           : index);
 }
 
-llvm::Value* EmitBufferIndexingGEP(llvm::Value* array, int64 index,
+llvm::Value* EmitBufferIndexingGEP(llvm::Value* array, int64_t index,
                                    llvm::IRBuilder<>* b) {
   return EmitBufferIndexingGEP(array, b->getInt64(index), b);
 }
@@ -231,7 +237,7 @@ llvm::Type* ShapeToIrType(const Shape& shape, llvm::Module* module) {
     // A tuple buffer is an array of pointers.
     result_type = llvm::ArrayType::get(result_type, shape.tuple_shapes_size());
   } else if (shape.IsArray()) {
-    for (int64 dimension : LayoutUtil::MinorToMajor(shape)) {
+    for (int64_t dimension : LayoutUtil::MinorToMajor(shape)) {
       result_type =
           llvm::ArrayType::get(result_type, shape.dimensions(dimension));
     }
@@ -351,12 +357,14 @@ LlvmIfData EmitIfThenElse(llvm::Value* condition, absl::string_view name,
 
 llvm::Value* EmitComparison(llvm::CmpInst::Predicate predicate,
                             llvm::Value* lhs_value, llvm::Value* rhs_value,
-                            llvm::IRBuilder<>* b) {
+                            llvm::IRBuilder<>* b, absl::string_view name) {
   llvm::Value* comparison_result;
   if (lhs_value->getType()->isIntegerTy()) {
-    comparison_result = b->CreateICmp(predicate, lhs_value, rhs_value);
+    comparison_result =
+        b->CreateICmp(predicate, lhs_value, rhs_value, name.data());
   } else {
-    comparison_result = b->CreateFCmp(predicate, lhs_value, rhs_value);
+    comparison_result =
+        b->CreateFCmp(predicate, lhs_value, rhs_value, name.data());
   }
   // comparison_result is i1, but the NVPTX codegen incorrectly lowers i1
   // arrays. So we extend it to i8 so that it's addressable.
@@ -364,9 +372,9 @@ llvm::Value* EmitComparison(llvm::CmpInst::Predicate predicate,
                                               PRED, ModuleFromIRBuilder(b)));
 }
 
-// Internal helper that is called from emitted code to log an int64 value with a
-// tag.
-static void LogS64(const char* tag, int64 value) {
+// Internal helper that is called from emitted code to log an int64_t value with
+// a tag.
+static void LogS64(const char* tag, int64_t value) {
   LOG(INFO) << tag << " (int64): " << value;
 }
 
@@ -374,9 +382,9 @@ void EmitLogging(const char* tag, llvm::Value* value, llvm::IRBuilder<>* b) {
   llvm::FunctionType* log_function_type = llvm::FunctionType::get(
       b->getVoidTy(), {b->getInt64Ty(), b->getInt64Ty()}, /*isVarArg=*/false);
   b->CreateCall(log_function_type,
-                b->CreateIntToPtr(b->getInt64(absl::bit_cast<int64>(&LogS64)),
+                b->CreateIntToPtr(b->getInt64(absl::bit_cast<int64_t>(&LogS64)),
                                   log_function_type->getPointerTo()),
-                {b->getInt64(absl::bit_cast<int64>(tag)), value});
+                {b->getInt64(absl::bit_cast<int64_t>(tag)), value});
 }
 
 void SetAlignmentMetadataForLoad(llvm::LoadInst* load, uint64_t alignment) {
@@ -404,7 +412,7 @@ void SetDereferenceableMetadataForLoad(llvm::LoadInst* load,
                     llvm::MDNode::get(context, dereferenceable_bytes_metadata));
 }
 
-llvm::Instruction* AddRangeMetadata(int64 lower, int64 upper,
+llvm::Instruction* AddRangeMetadata(int64_t lower, int64_t upper,
                                     llvm::Instruction* inst) {
   llvm::LLVMContext& context = inst->getParent()->getContext();
   llvm::IntegerType* i32 = llvm::Type::getInt32Ty(context);
@@ -493,7 +501,7 @@ llvm::Value* CreateRor(llvm::Value* rotand, llvm::Value* rotor,
       builder->CreateLShr(rotand, mod(rotor)));
 }
 
-int64 ByteSizeOf(const Shape& shape, const llvm::DataLayout& data_layout) {
+int64_t ByteSizeOf(const Shape& shape, const llvm::DataLayout& data_layout) {
   unsigned pointer_size = data_layout.getPointerSize();
   return ShapeUtil::ByteSizeOf(shape, pointer_size);
 }
@@ -585,12 +593,11 @@ void DumpIrIfEnabled(const HloModule& hlo_module,
   // We can end up compiling different modules with the same name when using
   // XlaJitCompiledCpuFunction::Compile.  Avoid overwriting IR files previously
   // dumped from the same process in such cases.
-  string suffix = absl::StrCat("ir-", optimized ? "with" : "no", "-opt");
-  DumpToFileInDirOrStdout(
-      hlo_module, "",
-      absl::StrCat(suffix, filename_suffix.empty() ? "" : ".", filename_suffix,
-                   ".ll"),
-      DumpModuleToString(llvm_module));
+  string suffix =
+      absl::StrCat("ir-", optimized ? "with" : "no", "-opt",
+                   filename_suffix.empty() ? "" : ".", filename_suffix);
+  DumpToFileInDirOrStdout(hlo_module, "", absl::StrCat(suffix, ".ll"),
+                          DumpModuleToString(llvm_module));
 
   // For some models the embedded constants can be huge, so also dump the module
   // with the constants stripped to get IR that is easier to manipulate.  Skip
@@ -600,6 +607,23 @@ void DumpIrIfEnabled(const HloModule& hlo_module,
     DumpToFileInDir(hlo_module, "", absl::StrCat(suffix, "-noconst.ll"),
                     DumpModuleToString(*DropConstantInitializers(llvm_module)));
   }
+}
+
+void DumpIrIfEnabled(mlir::ModuleOp mlir_module, int unique_id,
+                     const DebugOptions& debug_options) {
+  absl::optional<absl::string_view> module_name;
+  if (llvm::Optional<llvm::StringRef> mlir_module_name =
+          mlir_module.getName()) {
+    module_name = AsStringView(*mlir_module_name);
+  }
+  if (!DumpingEnabledForHloModule(module_name.value_or("<unnamed>"),
+                                  debug_options)) {
+    return;
+  }
+
+  DumpToFileInDirOrStdout(debug_options, unique_id, module_name.value_or(""),
+                          /*file_prefix=*/"",
+                          /*file_suffix=*/"lmhlo", DumpToString(mlir_module));
 }
 
 llvm::Function* CreateCpuFunction(llvm::FunctionType* function_type,
@@ -631,32 +655,6 @@ llvm::Function* CreateCpuFunction(llvm::FunctionType* function_type,
   return function;
 }
 
-void InitializeLLVMCommandLineOptions(const HloModuleConfig& config) {
-  auto options = config.debug_options().xla_backend_extra_options();
-  if (!options.empty()) {
-    std::vector<string> fake_argv_storage;
-    fake_argv_storage.push_back("");
-    for (const auto& it : options) {
-      // Skip options the XLA backend itself consumes.
-      if (!absl::StartsWith(it.first, "xla_")) {
-        if (it.second.empty()) {
-          fake_argv_storage.push_back(it.first);
-        } else {
-          fake_argv_storage.push_back(it.first + "=" + it.second);
-        }
-      }
-    }
-
-    VLOG(2) << "Passing argv to LLVM:";
-    std::vector<const char*> fake_argv;
-    for (const auto& s : fake_argv_storage) {
-      fake_argv.push_back(s.c_str());
-      VLOG(2) << s;
-    }
-    llvm::cl::ParseCommandLineOptions(fake_argv.size(), &fake_argv[0]);
-  }
-}
-
 std::pair<llvm::Value*, llvm::Value*> UMulLowHigh32(llvm::IRBuilder<>* b,
                                                     llvm::Value* src0,
                                                     llvm::Value* src1) {
@@ -678,15 +676,7 @@ std::pair<llvm::Value*, llvm::Value*> SplitInt64ToInt32s(
   return std::make_pair(low_32bits, high_32bits);
 }
 
-unsigned GetGlobalMemoryAddressSpace(const llvm::Module& module) {
-  const unsigned kAMDGPUGlobalMemoryAddrSpace = 1;
-  llvm::Triple target_triple = llvm::Triple(module.getTargetTriple());
-  if (target_triple.getArch() == llvm::Triple::amdgcn) {
-    // AMDGPU uses 1 for global memory address space.
-    return kAMDGPUGlobalMemoryAddrSpace;
-  }
-  return 0;
-}
+unsigned GetGlobalMemoryAddressSpace() { return 1; }
 
 llvm::GlobalVariable* GetOrCreateVariableForRngState(llvm::Module* module,
                                                      llvm::IRBuilder<>* b) {
@@ -694,7 +684,6 @@ llvm::GlobalVariable* GetOrCreateVariableForRngState(llvm::Module* module,
   llvm::GlobalVariable* state_ptr =
       module->getNamedGlobal(kRngStateVariableName);
   if (!state_ptr) {
-    unsigned global_address_space = GetGlobalMemoryAddressSpace(*module);
     llvm::Type* state_type = b->getInt128Ty();
     // Use a non-zero initial value as zero state can cause the result of the
     // first random number generation not passing the chi-square test. The
@@ -709,7 +698,7 @@ llvm::GlobalVariable* GetOrCreateVariableForRngState(llvm::Module* module,
         /*Name=*/kRngStateVariableName,
         /*InsertBefore=*/nullptr,
         /*TLMode=*/llvm::GlobalValue::NotThreadLocal,
-        /*AddressSpace=*/global_address_space,
+        /*AddressSpace=*/GetGlobalMemoryAddressSpace(),
         /*isExternallyInitialized=*/false);
   }
   return state_ptr;

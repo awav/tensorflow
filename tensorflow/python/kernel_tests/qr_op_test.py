@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.math_ops.matrix_inverse."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.eager import backprop
@@ -145,7 +141,7 @@ def _GetQrOpTest(dtype_, shape_, full_matrices_, use_static_shape_):
       if use_static_shape_:
         q_tf_val, r_tf_val = self.evaluate([q_tf, r_tf])
       else:
-        with self.session(use_gpu=True) as sess:
+        with self.session() as sess:
           q_tf_val, r_tf_val = sess.run([q_tf, r_tf], feed_dict={x_tf: x_np})
 
       q_dims = q_tf_val.shape

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Utilities for multi-worker distribution strategies."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.core.protobuf import cluster_pb2
 from tensorflow.python.distribute import distribute_coordinator_context as dc_context
 from tensorflow.python.training import server_lib
@@ -82,7 +78,7 @@ def _validate_cluster_spec(cluster_spec,
 
   cluster_spec = normalize_cluster_spec(cluster_spec)
 
-  if any([job not in allowed_task_types for job in cluster_spec.jobs]):
+  if any(job not in allowed_task_types for job in cluster_spec.jobs):
     raise ValueError("Disallowed task type found in cluster spec. Allowed "
                      "types are {} and the cluster spec is {}.".format(
                          allowed_task_types, cluster_spec))

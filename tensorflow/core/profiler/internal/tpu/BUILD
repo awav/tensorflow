@@ -4,7 +4,7 @@ load("//tensorflow:tensorflow.bzl", "if_with_tpu_support")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -23,6 +23,7 @@ cc_library(
         "//tensorflow/core/profiler/utils:xplane_utils",
         "//tensorflow/core/tpu:tpu_api",
         "//tensorflow/core/tpu:tpu_api_dlsym_initializer",
+        "//tensorflow/core/tpu:tpu_initializer_helper",
         "//tensorflow/core/tpu:tpu_ops_c_api_hdrs",
         "//tensorflow/stream_executor/tpu:status_helper",
         "@com_google_absl//absl/strings",

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for rnn module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import time
 import timeit
@@ -212,7 +208,7 @@ class RNNTest(test.TestCase):
     else:
       inputs = array_ops.placeholder(dtypes.float32, shape=(1, 4, 1))
 
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       outputs, state = rnn.dynamic_rnn(
           cell, inputs, dtype=dtypes.float32, sequence_length=[4])
       if not in_eager_mode:
@@ -232,7 +228,7 @@ class RNNTest(test.TestCase):
     else:
       inputs = array_ops.placeholder(dtypes.float32, shape=(1, 4, 1))
 
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       outputs, state = rnn.dynamic_rnn(
           cell, inputs, dtype=dtypes.float32, sequence_length=[4])
       if not in_eager_mode:
@@ -262,7 +258,7 @@ class RNNTest(test.TestCase):
     else:
       inputs = array_ops.placeholder(dtypes.float32, shape=(1, 4, 1))
 
-    with self.cached_session(use_gpu=True) as sess:
+    with self.cached_session() as sess:
       outputs, state = rnn.dynamic_rnn(
           cell, inputs, dtype=dtypes.float32, sequence_length=[4])
       state = (state[0], state[1].stack())

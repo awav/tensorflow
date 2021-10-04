@@ -14,10 +14,6 @@
 # ==============================================================================
 
 """MetaGraph and related functions."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 from distutils import version as distutils_version  # pylint: disable=g-bad-import-order
 import os.path
@@ -119,7 +115,8 @@ def _read_file(filename):
   if not file_io.file_exists(filename):
     raise IOError("File %s does not exist." % filename)
   # First try to read it as a binary file.
-  file_content = file_io.FileIO(filename, "rb").read()
+  with file_io.FileIO(filename, "rb") as f:
+    file_content = f.read()
   try:
     graph_def.ParseFromString(file_content)
     return graph_def
@@ -629,7 +626,8 @@ def read_meta_graph_file(filename):
   if not file_io.file_exists(filename):
     raise IOError("File %s does not exist." % filename)
   # First try to read it as a binary file.
-  file_content = file_io.FileIO(filename, "rb").read()
+  with file_io.FileIO(filename, "rb") as f:
+    file_content = f.read()
   try:
     meta_graph_def.ParseFromString(file_content)
     return meta_graph_def

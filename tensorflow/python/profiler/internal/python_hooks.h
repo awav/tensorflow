@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/memory/memory.h"
 #include "pybind11/cast.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/pytypes.h"
@@ -44,34 +45,57 @@ struct PythonHooksOptions {
 };
 
 struct PythonTraceEntry {
-  PythonTraceEntry(uint64 start, uint64 end, PyCodeObject* code,
-                   PyCFunctionObject* func)
+  // Capture the source/line information for a PyCodeObject object.
+  // In eager mode, keeping a reference to PyCodeObject leaks device memory.
+  PythonTraceEntry(uint64 start, uint64 end, PyCodeObject* py_code_object)
       : start_time_ns(start),
         end_time_ns(end),
-        code_object(code),
-        function_object(func) {
-    Py_XINCREF(code_object);
-    Py_XINCREF(function_object);
+        co_filename(py_code_object->co_filename),
+        co_name(py_code_object->co_name),
+        co_firstlineno(py_code_object->co_firstlineno) {
+    Py_XINCREF(co_filename);
+    Py_XINCREF(co_name);
   }
+  // Capture the source/line information for a PyCFunctionObject object.
+  // In eager mode, keeping a reference to PyCFunctionObject leaks device
+  // memory.
+  PythonTraceEntry(uint64 start, uint64 end, PyCFunctionObject* py_c_function)
+      : start_time_ns(start),
+        end_time_ns(end),
+        method_def(py_c_function->m_ml),
+        m_module(py_c_function->m_module) {
+    Py_XINCREF(m_module);
+  }
+
   ~PythonTraceEntry() {
-    Py_XDECREF(code_object);
-    Py_XDECREF(function_object);
+    Py_XDECREF(co_filename);
+    Py_XDECREF(co_name);
+    Py_XDECREF(m_module);
   }
+
   PythonTraceEntry(PythonTraceEntry&& other) {
     start_time_ns = other.start_time_ns;
     end_time_ns = other.end_time_ns;
-    code_object = other.code_object;
-    function_object = other.function_object;
-    other.code_object = nullptr;
-    other.function_object = nullptr;
+    co_firstlineno = other.co_firstlineno;
+    co_filename = other.co_filename;
+    co_name = other.co_name;
+    method_def = other.method_def;
+    m_module = other.m_module;
+    other.co_filename = nullptr;
+    other.co_name = nullptr;
+    other.method_def = nullptr;
+    other.m_module = nullptr;
   }
 
   std::string Name() const;
 
   uint64 start_time_ns;
   uint64 end_time_ns;
-  PyCodeObject* code_object;
-  PyCFunctionObject* function_object;
+  PyObject* co_filename = nullptr;
+  PyObject* co_name = nullptr;
+  int co_firstlineno = 0;
+  PyMethodDef* method_def = nullptr;
+  PyObject* m_module = nullptr;
 
   PythonTraceEntry(const PythonTraceEntry& other) = delete;
   void operator=(const PythonTraceEntry&) = delete;
@@ -83,33 +107,85 @@ struct PerThreadEvents {
   std::stack<PythonTraceEntry> active;
 };
 
+class PythonHooks;
+
+class PythonHookContext {
+ public:
+  void Finalize(XSpace* space);
+
+  friend class ::tensorflow::profiler::PythonHooks;
+
+ private:
+  void Start(const PythonHooksOptions& option);
+  void Stop();
+  void ProfileFast(PyFrameObject* frame, int what, PyObject* arg);
+  void CollectData(XPlane* raw_plane);
+  static void EnableTraceMe(bool enable);
+
+  static void SetProfilerInAllThreads();
+  static void ClearProfilerInAllThreads();
+
+  void operator=(const PythonHookContext&) = delete;
+  void operator=(PythonHookContext&&) = delete;
+
+  absl::flat_hash_map<int64_t, PerThreadEvents> entries_;
+  uint64 start_timestamp_ns_;
+  PythonHooksOptions options_;
+  // In end to end mode, Python get uninitialized before Stop()/Finalize(), we
+  // need to buffer the result.
+  absl::optional<XPlane> end_to_end_xplane_;
+};
+
 // Singleton for tracing python function calls.
 class PythonHooks {
  public:
   static PythonHooks* GetSingleton();
 
-  void Start(const PythonHooksOptions& option);
-  void Stop();
-  void Finalize(XSpace* space);
-  void ProfileSlow(const py::object& frame, const string& event,
-                   const py::object& arg);
-  void ProfileFast(PyFrameObject* frame, int what, PyObject* arg);
+  void Start(const PythonHooksOptions& option) {
+    if (active_context_) return;
+    active_context_ = std::make_unique<PythonHookContext>();
+    active_context_->Start(option);
+  }
+
+  std::unique_ptr<PythonHookContext> Stop() {
+    if (e2e_context_) {
+      auto* e2e_context = e2e_context_;
+      e2e_context_ = nullptr;
+      return absl::WrapUnique(e2e_context);
+    }
+
+    if (!active_context_) return nullptr;
+    active_context_->Stop();
+    std::unique_ptr<PythonHookContext> output = std::move(active_context_);
+    active_context_.reset();
+    return output;
+  }
+
+  friend class ::tensorflow::profiler::PythonHookContext;
 
  private:
-  void EnableTraceMe(bool enable);
-  void CollectData(XPlane* raw_plane);
+  void ProfileSlow(const py::object& frame, const string& event,
+                   const py::object& arg);
 
-  void SetProfilerInAllThreads();
-  void ClearProfilerInAllThreads();
+  void ProfileFast(PyFrameObject* frame, int what, PyObject* arg) {
+    if (TF_PREDICT_TRUE(active_context_)) {
+      active_context_->ProfileFast(frame, what, arg);
+    }
+  }
 
-  // entries_ are accessed when GIL is held, therefore no race conditions.
-  absl::flat_hash_map<int64, PerThreadEvents> entries_;
-  uint64 start_timestamp_ns_;
-  bool active_session_ = false;
-  PythonHooksOptions options_;
-  // In end to end mode, Python get uninitialized before Stop()/Finalize(), we
-  // need to buffer the result.
-  absl::optional<XPlane> end_to_end_xplane_;
+  static void set_e2e_context(PythonHookContext* e2e_context) {
+    e2e_context_ = e2e_context;
+  }
+
+  static PythonHookContext* e2e_context() { return e2e_context_; }
+
+  static int ProfileFunction(PyObject* obj, PyFrameObject* frame, int what,
+                             PyObject* arg);
+
+  // active_context_ are accessed when GIL is held, therefore no race
+  // conditions.
+  std::unique_ptr<PythonHookContext> active_context_;
+  static PythonHookContext* e2e_context_;
 };
 
 }  // namespace profiler

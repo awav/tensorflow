@@ -22,10 +22,34 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/xla/attribute_exporter.h"
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/service/collective_ops_utils.h"
+#include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/thunk.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/platform/types.h"
+
+// Common place for all collective thunks to source nccl/rccl headers.
+// Also, all the RunNcclCollective() functions for various thunks should
+// use XLA_ENABLE_XCCL to guard use NCCL/RCCL usage (and not use GOOGLE_XCCL).
+#if GOOGLE_XCCL
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#define XLA_ENABLE_XCCL 1
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#endif  // GOOGLE_XCCL
+
+#if XLA_ENABLE_XCCL
+#if GOOGLE_CUDA
+#include "third_party/nccl/nccl.h"
+#elif TENSORFLOW_USE_ROCM
+#include "rocm/include/rccl/rccl.h"
+#else
+#error "Neither CUDA nor ROCm enabled but NCCL/RCCL enabled"
+#endif
+
+// Also include this file required by all collective thunks.
+#include "tensorflow/compiler/xla/service/gpu/nccl_utils.h"
+
+#endif  // XLA_ENABLE_XCCL
 
 struct ncclComm;
 using ncclComm_t = ncclComm*;
@@ -33,7 +57,7 @@ using ncclComm_t = ncclComm*;
 namespace xla {
 namespace gpu {
 
-struct NcclClique;
+class NcclClique;
 
 struct NcclCollectiveConfig {
   NcclCollectiveConfig();
@@ -42,41 +66,48 @@ struct NcclCollectiveConfig {
 
   NcclCollectiveConfig& operator=(NcclCollectiveConfig&&);
 
-  int64 operand_count;
+  int64_t operand_count;
   std::vector<PrimitiveType> operand_element_type;
-  int64 replica_count;
   std::vector<ReplicaGroup> replica_groups;
   RendezvousKey::CollectiveOpKind collective_op_kind;
-  int64 op_id;
+  int64_t op_id;
+  CollectiveOpGroupMode group_mode;
+
+  template <typename OpT>
+  void SetCollectiveOpKindAndID(OpT op);
+  bool IsDegenerate(int64_t replica_count, int64_t partition_count) const;
 };
 
-NcclCollectiveConfig GetNcclCollectiveConfig(const HloInstruction* hlo,
-                                             int64 replica_count);
+template <typename OpT>
+void NcclCollectiveConfig::SetCollectiveOpKindAndID(OpT op) {
+  if (op.channel_id()) {
+    collective_op_kind = RendezvousKey::kCrossModule;
+    op_id = static_cast<int64_t>(op.channel_id()->handle().getInt());
+  } else {
+    collective_op_kind = RendezvousKey::kCrossReplica;
+    mlir::ModuleOp parent = op->template getParentOfType<mlir::ModuleOp>();
+    mlir::IntegerAttr unique_id =
+        parent->getAttrOfType<mlir::IntegerAttr>("hlo.unique_id");
+    op_id = static_cast<int64_t>(unique_id.getInt());
+  }
+}
 
 template <typename OpT>
-NcclCollectiveConfig GetNcclCollectiveConfigForMlir(OpT op,
-                                                    int64 replica_count) {
+NcclCollectiveConfig GetNcclCollectiveConfigForMlir(
+    OpT op, absl::optional<bool> use_global_device_ids) {
   NcclCollectiveConfig config;
   config.operand_count = op.operands().size();
   config.operand_element_type.reserve(config.operand_count);
   for (int i = 0; i < config.operand_count; i++) {
-    const Shape shape = TypeToShape(op.operands()[i].getType());
+    const Shape shape = GetShape(op.operands()[i]);
     config.operand_element_type.push_back(shape.element_type());
   }
-  config.replica_count = replica_count;
   config.replica_groups =
       ConvertReplicaGroups(op.replica_groups()).ValueOrDie();
-
-  if (!op.IsCrossReplica()) {
-    config.collective_op_kind = RendezvousKey::kCrossModule;
-    config.op_id = op.channel_id()->handle().getUInt();
-  } else {
-    config.collective_op_kind = RendezvousKey::kCrossReplica;
-    mlir::ModuleOp parent = op->template getParentOfType<mlir::ModuleOp>();
-    mlir::IntegerAttr unique_id =
-        parent->getAttrOfType<mlir::IntegerAttr>("hlo.unique_id");
-    config.op_id = static_cast<int64>(unique_id.getInt());
-  }
+  config.SetCollectiveOpKindAndID(op);
+  config.group_mode = GetCollectiveOpGroupMode(op.channel_id().hasValue(),
+                                               use_global_device_ids)
+                          .ValueOrDie();
   return config;
 }
 
@@ -86,7 +117,7 @@ class NcclCollectiveThunk : public Thunk {
   using Thunk::Thunk;
 
   struct Buffer {
-    int64 element_count;
+    int64_t element_count;
     BufferAllocation::Slice source_buffer;
     BufferAllocation::Slice destination_buffer;
   };
@@ -105,7 +136,14 @@ class NcclCollectiveThunk : public Thunk {
   virtual Status RunNcclCollective(const ExecuteParams& params,
                                    ncclComm_t comm) = 0;
   virtual const NcclCollectiveConfig& config() const = 0;
+
+  // Logging support.
+  std::string GetDeviceString(const ExecuteParams& params) const;
 };
+
+// Returns if the given data type is supported by NCCL.
+// Note: Keep this in sync with ToNcclDataType().
+bool IsTypeSupportedByNccl(PrimitiveType element_type);
 
 }  // namespace gpu
 }  // namespace xla

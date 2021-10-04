@@ -12,7 +12,7 @@ load(
 
 package(
     default_visibility = ["//visibility:public"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 DEFAULT_COPTS = [
@@ -92,7 +92,7 @@ objc_library(
 ios_unit_test(
     name = "common_test",
     testonly = 1,
-    minimum_os_version = "11.0",
+    minimum_os_version = "11.4",
     runner = tflite_ios_lab_runner("IOS_LATEST"),
     tags = tf_gpu_tests_tags() + [
         "notap",
@@ -159,14 +159,17 @@ objc_library(
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/selectors:operation_selector",
+        "//tensorflow/lite/delegates/gpu/common/selectors:special_selector",
         "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
+        "//tensorflow/lite/delegates/gpu/common/task:profiling_info",
         "//tensorflow/lite/delegates/gpu/common/task:storage_type_util",
         "//tensorflow/lite/delegates/gpu/common/task:tuning_type",
         "//tensorflow/lite/delegates/gpu/common/transformations:add_bias",
         "//tensorflow/lite/delegates/gpu/common/transformations:global_pooling_to_reduce_op",
         "//tensorflow/lite/delegates/gpu/common/transformations:merge_padding_with",
-        "//tensorflow/lite/delegates/gpu/metal/selectors:operation_selector",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -308,7 +311,7 @@ ios_application(
         "iphone",
     ],
     infoplists = ["Info.plist"],
-    minimum_os_version = "11.0",
+    minimum_os_version = "11.4",
     provisioning_profile = "//tensorflow/lite/delegates/gpu/metal:provisioning_profile.mobileprovision",
     tags = tf_gpu_tests_tags() + [
         "local",
@@ -344,7 +347,7 @@ objc_library(
 
 ios_unit_test(
     name = "ComponentsTests",
-    minimum_os_version = "11.0",
+    minimum_os_version = "11.4",
     runner = tflite_ios_lab_runner("IOS_LATEST"),
     tags = tf_gpu_tests_tags() + ["notap"],
     test_host = ":TestApplication",

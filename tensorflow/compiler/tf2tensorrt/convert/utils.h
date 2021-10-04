@@ -16,10 +16,15 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_TF2TENSORRT_CONVERT_UTILS_H_
 #define TENSORFLOW_COMPILER_TF2TENSORRT_CONVERT_UTILS_H_
 
+#include <algorithm>
+#include <iterator>
 #include <memory>
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/types/optional.h"
+#include "tensorflow/compiler/tf2tensorrt/common/utils.h"
+#include "tensorflow/compiler/tf2tensorrt/utils/trt_tensor_proxy.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/graph/graph.h"
@@ -29,7 +34,6 @@ limitations under the License.
 
 #if GOOGLE_CUDA && GOOGLE_TENSORRT
 #include "third_party/tensorrt/NvInfer.h"
-#endif  // GOOGLE_CUDA && GOOGLE_TENSORRT
 
 namespace tensorflow {
 namespace tensorrt {
@@ -66,18 +70,8 @@ struct VectorTensorShapeHasher {
   }
 };
 
-#if GOOGLE_CUDA && GOOGLE_TENSORRT
-
 using absl::StrAppend;
 using absl::StrCat;
-
-#define IS_TRT_VERSION_GE(major, minor, patch, build)           \
-  ((NV_TENSORRT_MAJOR > major) ||                               \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR > minor) || \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR == minor && \
-    NV_TENSORRT_PATCH > patch) ||                               \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR == minor && \
-    NV_TENSORRT_PATCH == patch && NV_TENSORRT_BUILD >= build))
 
 // This utility template converts an arithmetic type to a string. This function
 // is necessary to allow the following function to behave recursively:
@@ -100,16 +94,21 @@ string DebugString(const std::vector<CType>& vector) {
   }
   return StrCat("{", tmp_s.substr(0, tmp_s.length() - 2), "}");
 }
-string DebugString(const nvinfer1::DimensionType type);
 string DebugString(const nvinfer1::Dims& dims);
 string DebugString(const nvinfer1::DataType trt_dtype);
 string DebugString(const TrtPrecisionMode mode);
 string DebugString(const DataType tf_type);
 string DebugString(const nvinfer1::Permutation& permutation, int len);
+string DebugString(const ITensorProxyPtr& tensor);
 string DebugString(const nvinfer1::ITensor& tensor);
 string DebugString(const std::vector<nvinfer1::Dims>& dimvec);
 string DebugString(const std::vector<TensorShape>& shapes);
 string DebugString(const std::vector<PartialTensorShape>& shapes);
+
+template <size_t N>
+string DebugString(const absl::InlinedVector<int64, N>& data) {
+  return absl::StrCat("[", absl::StrJoin(data, ","), "]");
+}
 
 inline bool HasStaticShape(const nvinfer1::Dims& dims) {
   if (dims.nbDims < 0) return false;
@@ -119,7 +118,8 @@ inline bool HasStaticShape(const nvinfer1::Dims& dims) {
   return true;
 }
 
-inline bool HasStaticShape(std::vector<int> dims) {
+template <typename T>
+bool HasStaticShape(const T& dims) {
   return !absl::c_any_of(dims, [](int i) { return i < 0; });
 }
 
@@ -137,20 +137,51 @@ inline bool IsTrtShapeTensorCompatible(const Tensor& tensor) {
          IsTrtShapeTensorCompatible(tensor.shape());
 }
 
-template <typename TensorShapeType>
-inline nvinfer1::Dims TensorShapeToTrtDims(const TensorShapeType& shape,
-                                           bool ignore_first_dim) {
-  nvinfer1::Dims trt_dims;
-  const int offset = (ignore_first_dim ? 1 : 0);
-  for (int i = offset; i < shape.dims(); i++) {
-    trt_dims.d[i - offset] = shape.dim_size(i);
+template <typename Container>
+Status ContainerToTrtDims(const Container& shape, nvinfer1::Dims* trt_dims,
+                          bool ignore_first_dim = false) {
+  if (shape.size() == 0) {
+    // scalar
+    if (ignore_first_dim) {
+      return errors::Internal(
+          "Scalars cannot be represented in implicit batch mode");
+    }
+    *trt_dims = {0, {1}};
+  } else {
+    const int offset = (ignore_first_dim ? 1 : 0);
+    for (int i = offset; i < shape.size(); i++) {
+      trt_dims->d[i - offset] = shape.at(i);
+    }
+    trt_dims->nbDims = shape.size() - offset;
   }
-  trt_dims.nbDims = shape.dims() - offset;
-  return trt_dims;
+  return Status::OK();
+}
+
+template <typename TensorShapeType>
+Status TensorShapeToTrtDims(const TensorShapeType& shape, bool ignore_first_dim,
+                            nvinfer1::Dims* trt_dims) {
+  if (shape.dims() == -1) {
+    trt_dims->nbDims = -1;
+    return Status::OK();
+  }
+  return ContainerToTrtDims(shape.dim_sizes(), trt_dims, ignore_first_dim);
 }
 
 Status GetNetworkInputShapes(const nvinfer1::INetworkDefinition* network,
                              std::vector<PartialTensorShape>* input_shapes);
+
+// Creates PartialTensorShape from nvinfer1::Dims. The "batch_dimension", when
+// provided, is prepended to the shape.
+inline PartialTensorShape TrtDimsToPartialTensorShape(
+    const nvinfer1::Dims& dims,
+    absl::optional<int64> batch_dimension = absl::nullopt) {
+  absl::InlinedVector<int64, 4> dims_vec;
+  if (batch_dimension) {
+    dims_vec.insert(dims_vec.begin(), std::max(int64(-1), *batch_dimension));
+  }
+  std::copy(dims.d, dims.d + dims.nbDims, std::back_inserter(dims_vec));
+  return PartialTensorShape(dims_vec);
+}
 
 Status TrtDimsToTensorShape(const std::vector<int>& trt_dims,
                             TensorShape* shape,
@@ -200,9 +231,19 @@ absl::optional<DeviceNameUtils::ParsedName> MergeIfCompatible(
 absl::optional<DeviceNameUtils::ParsedName> MergeIfCompatible(
     const DeviceNameUtils::ParsedName& a, absl::string_view b);
 
-#endif  // GOOGLE_CUDA && GOOGLE_TENSORRT
+// Optimization profile generation strategies.
+enum class ProfileStrategy {
+  kRange,
+  kOptimal,
+  kRangeOptimal,
+  kImplicitBatchModeCompatible,
+};
+
+string ProfileStrategyToName(const ProfileStrategy strategy);
+Status ProfileStrategyFromName(const string& name, ProfileStrategy* strategy);
 
 }  // namespace tensorrt
 }  // namespace tensorflow
 
+#endif  // GOOGLE_CUDA && GOOGLE_TENSORRT
 #endif  // TENSORFLOW_COMPILER_TF2TENSORRT_CONVERT_UTILS_H_

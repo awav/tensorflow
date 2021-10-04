@@ -14,10 +14,6 @@
 # ==============================================================================
 """A class to store named variables and a scope operator to manage sharing."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 import enum  # pylint: disable=g-bad-import-order
 import functools
@@ -233,6 +229,7 @@ def enable_resource_variables():
   """
   global _DEFAULT_USE_RESOURCE
   _DEFAULT_USE_RESOURCE = True
+  logging.vlog(1, "Enabling resource variables")
   _api_usage_gauge.get_cell().set(True)
 
 
@@ -267,6 +264,7 @@ def disable_resource_variables():
   """
   global _DEFAULT_USE_RESOURCE
   _DEFAULT_USE_RESOURCE = False
+  logging.vlog(1, "Disabling resource variables")
   _api_usage_gauge.get_cell().set(False)
 
 

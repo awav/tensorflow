@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for bincount ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -801,8 +797,7 @@ class TestSparseCountFailureModes(test.TestCase):
         np.array([[3, 0, 1, 0], [0, 0, 0, 0], [5, 0, 4, 4]], dtype=np.int32))
     weights = sparse_ops.from_dense(
         np.array([[3, 1, 1, 0], [0, 0, 0, 0], [5, 0, 4, 4]], dtype=np.int32))
-    with self.assertRaisesRegex(errors.InvalidArgumentError,
-                                "Incompatible shapes"):
+    with self.assertRaisesIncompatibleShapesError():
       self.evaluate(bincount_ops.sparse_bincount(x, weights=weights, axis=-1))
 
   def test_sparse_input_wrong_shape_fails(self):

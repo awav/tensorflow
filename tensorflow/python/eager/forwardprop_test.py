@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import gc
 import weakref
@@ -351,6 +347,20 @@ class ForwardpropTest(test.TestCase, parameterized.TestCase):
       pass
     self.assertIsNone(acc.jvp(v))
     self.assertAllClose([[0.]], acc.jvp(v, unconnected_gradients="zero"))
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly
+  def testFunctionReturnsResource(self):
+    v = variables.Variable([[1.]])
+    x = constant_op.constant(1.)
+    xt = constant_op.constant(2.)
+
+    @def_function.function
+    def f(a):
+      return a, v.handle
+
+    with forwardprop.ForwardAccumulator(x, xt) as acc:
+      y, _ = f(x)
+    self.assertAllClose(2., acc.jvp(y))
 
   @test_util.assert_no_new_pyobjects_executing_eagerly
   def testMultipleWatchesAdd(self):

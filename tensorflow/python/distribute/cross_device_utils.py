@@ -14,10 +14,6 @@
 # ==============================================================================
 """Utilities for cross_device_ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 import threading
 
@@ -237,9 +233,9 @@ class CollectiveKeys(object):
     with self._lock:
       group = self._instance_key_table.get(group_key, None)
       if group is None:
-        raise ValueError('group {} not found'.format(group_key))
+        raise ValueError(f'Group {group_key} is not found.')
       if device not in group:
-        raise ValueError('{} not in group {}'.format(device, group_key))
+        raise ValueError(f'Device {device} is not present in group {group_key}')
       v = group[device]
       group[device] += 1
       return v
@@ -269,11 +265,10 @@ class CollectiveReplicaLauncher(object):
     self._group_size = group_size
     self._collective_keys = collective_keys
     self._device = device
-    if self._use_ordering_token():
-      with ops.init_scope(), ops.device(device):
-        self._ordering_token = resource_variable_ops.ResourceVariable(0.)
-    else:
-      self._ordering_token = None
+    # Created lazily in _get_ordering_token to avoid creating tensors on TPUs
+    # before the user has a chance to call initialize_system.
+    self._ordering_token = None
+    self._ordering_token_init_lock = threading.Lock()
 
   def _control_input(self, control_input):
     if control_input is not None and not self._use_ordering_token():
@@ -324,8 +319,14 @@ class CollectiveReplicaLauncher(object):
                                                     self._device)
 
   def _get_ordering_token(self, communication_hint):
-    if self._use_ordering_token() and communication_hint == 'NCCL':
-      return self._ordering_token.handle
+    if self._use_ordering_token():
+      with self._ordering_token_init_lock:
+        if self._ordering_token is None:
+          with ops.init_scope(), ops.device(self._device):
+            self._ordering_token = resource_variable_ops.ResourceVariable(0.)
+        if communication_hint == 'NCCL':
+          return self._ordering_token.handle
+
     return None
 
   def can_order_nccl(self):
@@ -460,7 +461,7 @@ class CollectiveReplicaLauncher(object):
       RuntimeError: if called in eager mode.
     """
     if context.executing_eagerly():
-      raise RuntimeError('all_gather in eager mode is not supported')
+      raise RuntimeError('all_gather is not supported in eager mode.')
 
     with ops.device(self._device), \
          ops.control_dependencies([array_ops.identity(input_tensor)]):
@@ -523,52 +524,54 @@ class CollectiveReplicaLauncher(object):
     """
     if context.executing_eagerly():
       raise RuntimeError(
-          'all_reduce_indexed_slices in eager mode is not supported')
+          'all_reduce_indexed_slices is not supported in eager mode.')
 
     # Current CollectiveAllGather implementations require input IndexedSlices to
     # have consistent length across the board, we handle the reduction of
     # IndexedSlices as follows:
     #   1. Gather the lengths of IndexedSlices from all participants.
     #   2. If they have consistent length, apply all_gather.
-    #   3. Otherwise convert IndexedSlices to dense tensors and apply
-    #      all_reduce.
+    #   3. Otherwise pad IndexedSlices to be the same length accross all
+    #      participants and apply_gather.
     with ops.device(self._device):
 
-      def all_gather():
-        """Use all_gather to aggregate `IndexedSlices`."""
-        all_values = self._all_gather(
+      def all_gather_indexed_slices(all_gather_fn):
+        """Use all_gather_fn to aggregate `IndexedSlices`."""
+        all_values = all_gather_fn(
             input_slices.values, communication_hint, timeout=timeout)
         # Add control dependency to order the all-gather.
         control = [all_values] if communication_hint == 'NCCL' else []
         with ops.control_dependencies(control):
-          all_indices = self._all_gather(
+          all_indices = all_gather_fn(
               input_slices.indices, communication_hint, timeout=timeout)
         return ops.IndexedSlices(
             values=all_values,
             indices=all_indices,
             dense_shape=input_slices.dense_shape)
 
-      def densify_and_all_reduce():
-        """Use all_reduce to aggregate `IndexedSlices`."""
-        densified = ops.convert_to_tensor(input_slices)
-        reduced = self.all_reduce(
-            densified, communication_hint=communication_hint, timeout=timeout)
-        # We have to convert dense grad to IndexedSlice because all_reduce()
-        # and all_gather() must have the same return type as required by
-        # control_flow_ops.cond.
-        return ops.IndexedSlices(
-            values=reduced,
-            indices=math_ops.range(array_ops.shape(reduced)[0]),
-            dense_shape=input_slices.dense_shape)
-
       length = array_ops.shape(input_slices.indices)
       all_lengths = self._all_gather(
           length, communication_hint, timeout=timeout)
+
+      def all_gather_with_padding(input_tensor, communication_hint, timeout):
+        """all_gather tensors of different sizes using padding."""
+        max_length = math_ops.reduce_max(all_lengths)
+        padded_tensor = _pad_util(input_tensor, max_length)
+        all_padded_tensors = self._all_gather(
+            padded_tensor, communication_hint, timeout=timeout)
+        split_tensors = []
+        for i in range(self._group_size):
+          start_pos = i * max_length
+          split_tensors.append(all_padded_tensors[start_pos:start_pos +
+                                                  all_lengths[i]])
+        return array_ops.concat(split_tensors, 0)
+
       return control_flow_ops.cond(
           math_ops.equal(
               math_ops.reduce_max(all_lengths),
-              math_ops.reduce_min(all_lengths)), all_gather,
-          densify_and_all_reduce)
+              math_ops.reduce_min(all_lengths)),
+          lambda: all_gather_indexed_slices(self._all_gather),
+          lambda: all_gather_indexed_slices(all_gather_with_padding))
 
 
 def aggregate_tensors_or_indexed_slices(values, accumulation_fn=math_ops.add_n):
@@ -589,11 +592,15 @@ def divide_by_n_tensors_or_indexed_slices(value, n):
 
 
 def copy_tensor_or_indexed_slices_to_device(value, device):
+  """Copies a tensor or IndexedSlices to a device."""
   with ops.device(device):
     if isinstance(value, ops.IndexedSlices):
       copied_values = array_ops.identity(value.values)
       copied_indices = array_ops.identity(value.indices)
-      copied_shape = array_ops.identity(value.dense_shape)
+      if value.dense_shape is not None:
+        copied_shape = array_ops.identity(value.dense_shape)
+      else:
+        copied_shape = None
       result = ops.IndexedSlices(copied_values, copied_indices, copied_shape)
     else:
       result = array_ops.identity(value)
@@ -603,8 +610,9 @@ def copy_tensor_or_indexed_slices_to_device(value, device):
 def is_indexed_slices(value):
   if isinstance(value, ops.IndexedSlices):
     return True
-  assert isinstance(value, value_lib.DistributedValues)
-  return all(isinstance(v, ops.IndexedSlices) for v in value.values)
+  if isinstance(value, value_lib.DistributedValues):
+    return all(isinstance(v, ops.IndexedSlices) for v in value.values)
+  return False
 
 
 def split_by_sparsity(values):

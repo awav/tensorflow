@@ -43,6 +43,7 @@ limitations under the License.
 #include "mlir/Dialect/Traits.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/Diagnostics.h"  // from @llvm-project
@@ -95,6 +96,41 @@ void AddOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
 
 OpFoldResult AddNOp::fold(ArrayRef<Attribute> operands) {
   if (operands.size() == 1) return *inputs().begin();
+
+  // Fold if there is only one single non-zero operand or all operands are zero.
+  int non_zero_index = -1;
+  auto IsKnownZero = [](Attribute attr) {
+    if (!attr) return false;
+    auto splat = attr.dyn_cast<SplatElementsAttr>();
+    if (!splat) return false;
+    Type element_ty = splat.getType().getElementType();
+    if (element_ty.isa<FloatType>())
+      return splat.getSplatValue<llvm::APFloat>().isZero();
+    if (element_ty.isa<IntegerType>())
+      return splat.getSplatValue<llvm::APInt>().getSExtValue() == 0;
+    return false;
+  };
+
+  for (auto it : llvm::enumerate(operands)) {
+    if (IsKnownZero(it.value())) continue;
+    if (non_zero_index != -1) {
+      // Don't fold if we find more than 1 non-zero operand.
+      return {};
+    }
+    non_zero_index = it.index();
+  }
+
+  // Only fold when the result shape is fully static.
+  auto result_ty = getType().dyn_cast<ShapedType>();
+  if (!result_ty || !result_ty.hasStaticShape()) return {};
+
+  if (non_zero_index == -1)
+    return SplatElementsAttr::get(
+        result_ty, operands.begin()->cast<DenseElementsAttr>().getSplatValue());
+
+  // Check the non-zero operand's shape matches the result shape.
+  if (result_ty == inputs()[non_zero_index].getType())
+    return inputs()[non_zero_index];
   return {};
 }
 
@@ -319,7 +355,7 @@ static LogicalResult Verify(BatchToSpaceOp op) {
     assert(crops_attr.getNumElements() == 4 &&
            "tf.BatchToSpace crops must have 4 elements");
 
-    auto crops_range = crops_attr.getIntValues();
+    auto crops_range = crops_attr.getValues<APInt>();
     for (const auto &crops_value : crops_range) {
       int64_t crops_value_int = crops_value.getSExtValue();
       if (crops_value_int < 0)
@@ -486,13 +522,6 @@ static LogicalResult Verify(BiasAddOp op) {
   return success();
 }
 
-Optional<ContractionFusion> BiasAddOp::GetContractionFusion() {
-  // Only NHWC in f32 is supported for fusion.
-  if (data_format() != "NHWC" || !T().isF32()) return None;
-
-  return ContractionFusion("BiasAdd", /*additional_arguments=*/{1});
-}
-
 LogicalResult BiasAddOp::UpdateDataFormat(StringRef data_format) {
   return ::mlir::TF::UpdateDataFormat(data_format, this);
 }
@@ -573,11 +602,15 @@ OpFoldResult BroadcastToOp::fold(ArrayRef<Attribute> operands) {
   // Fold broadcast if operand and result types are the same and all dimensions
   // are statically known (no-op broadcast).
   auto result_ty = getType().dyn_cast<ShapedType>();
-  if (result_ty && result_ty.hasStaticShape() && result_ty == input.getType()) {
-    return input;
-  }
+  if (!result_ty || !result_ty.hasStaticShape()) return {};
 
-  return {};
+  if (result_ty == input.getType()) return input;
+
+  DenseIntElementsAttr cst_attr;
+  if (!matchPattern(input, m_Constant(&cst_attr))) return {};
+  if (!cst_attr.isSplat()) return {};
+
+  return DenseElementsAttr::get(result_ty, cst_attr.getSplatValue());
 }
 
 //===----------------------------------------------------------------------===//
@@ -594,8 +627,8 @@ bool ExtractInputConstShape(BroadcastGradientArgsOp op,
   if (!matchPattern(op.s0(), m_Constant(&s0))) return false;
   if (!matchPattern(op.s1(), m_Constant(&s1))) return false;
 
-  for (auto s : s0.getIntValues()) s0_shape.push_back(s.getSExtValue());
-  for (auto s : s1.getIntValues()) s1_shape.push_back(s.getSExtValue());
+  for (auto s : s0.getValues<APInt>()) s0_shape.push_back(s.getSExtValue());
+  for (auto s : s1.getValues<APInt>()) s1_shape.push_back(s.getSExtValue());
 
   return true;
 }
@@ -746,11 +779,9 @@ LogicalResult FoldConstantCaseOp::matchAndRewrite(
 
   auto func = op.branches()[index].cast<SymbolRefAttr>();
   auto empty = rewriter.getStringAttr("");
-  auto call_op = rewriter.create<PartitionedCallOp>(
-      op.getLoc(), op.getResultTypes(), op.getOperands().drop_front(), func,
+  ReplaceTfOpWithNewOp<PartitionedCallOp>(
+      rewriter, op, op.getResultTypes(), op.getOperands().drop_front(), func,
       /*config=*/empty, /*config_proto=*/empty, /*executor_type=*/empty);
-  CopyDeviceAndUnderscoredAttributes(op.getOperation(), call_op);
-  rewriter.replaceOp(op, call_op.getResults());
   return success();
 }
 
@@ -768,10 +799,15 @@ static LogicalResult VerifyCaseOpBase(Operation *op, Value branch_index) {
 }
 
 static LogicalResult VerifyCaseOrIfOpBranchFunctions(
-    Operation *op, ArrayRef<Attribute> branches,
+    SymbolTableCollection &symbol_table, Operation *op,
+    ArrayRef<Attribute> branches,
     llvm::function_ref<std::string(unsigned branch_index)> branch_name) {
   SmallVector<FunctionType, 2> branch_types;
   branch_types.reserve(branches.size());
+
+  if (llvm::any_of(op->getOperands(),
+                   [](Value value) { return value == nullptr; }))
+    return op->emitOpError("operation has null operand");
 
   // Functions have one less operand compared to op as first operand is elided
   // (`cond` of `tf.If` and `branch_index` of `tf.Case`).
@@ -779,7 +815,7 @@ static LogicalResult VerifyCaseOrIfOpBranchFunctions(
   TypeRangeWithDesc result{op->getResultTypes(), "result"};
 
   for (auto branch : llvm::enumerate(branches)) {
-    auto branch_func = SymbolTable::lookupNearestSymbolFrom<FuncOp>(
+    auto branch_func = symbol_table.lookupNearestSymbolFrom<FuncOp>(
         op, branch.value().cast<SymbolRefAttr>());
     if (!branch_func)
       return op->emitOpError()
@@ -823,12 +859,17 @@ static LogicalResult VerifyCaseOrIfOpBranchFunctions(
 }
 
 static LogicalResult Verify(CaseOp op) {
-  if (failed(VerifyCaseOpBase(op, op.branch_index()))) return failure();
+  return VerifyCaseOpBase(op, op.branch_index());
+}
+
+LogicalResult CaseOp::verifySymbolUses(SymbolTableCollection &symbol_table) {
   auto branch_name = [](unsigned index) {
     return llvm::formatv("branch #{0}", index).str();
   };
-  return VerifyCaseOrIfOpBranchFunctions(op, op.branches().getValue(),
-                                         branch_name);
+  // TODO(jpienaar): Remove.
+  if (failed(CaseOpAdaptor(*this).verify(getLoc()))) return failure();
+  return VerifyCaseOrIfOpBranchFunctions(symbol_table, *this,
+                                         branches().getValue(), branch_name);
 }
 
 //===----------------------------------------------------------------------===//
@@ -895,7 +936,7 @@ class CaseOrIfRegionEliminatePassThrough
 
     // Create new case/if region op.
     auto new_op = rewriter.create<CaseOrIfRegionOp>(
-        op.getLoc(), new_result_types, op.getOperand(), op.getAttrs(),
+        op.getLoc(), new_result_types, op.getOperand(), op->getAttrs(),
         op.getNumRegions());
 
     int next_index = 0;
@@ -1039,6 +1080,14 @@ LogicalResult HoistCwiseUnaryOutOfConcat::matchAndRewrite(
 //   %1 = tf.ConcatV2(%rhs0, %rhs1, ..., %rhs_n, %rhs_concat_axis)
 //   %2 = tf.Mul(%0, %1)
 //
+// If a minor fraction of the Concat inputs are not of the same binary op kind
+// (tf.Mul in the above example), we will synthesize the binary ops for those
+// inputs. e.g. if we instead have %1 = %lhs_1, then we would synthesize a
+// tf.Mul op over it and a scalar const tensor 1.0. For now this only applies to
+// float32 tensors.
+// TODO(hongm): Implement this op synthesis optimization for other dtypes if
+// needed.
+//
 // Because coefficient-wise binary operations support implicit broadcasting, we
 // should be very careful with this optimization, and do not accidentally
 // produce incorrect concat operations.
@@ -1057,11 +1106,17 @@ class HoistCwiseBinaryOutOfConcat : public OpRewritePattern<TF::ConcatV2Op> {
     int64_t rhs_axis;
     Type lhs_concat_type;
     Type rhs_concat_type;
+    int scalar_operand_idx;  // can be 0 or 1 for the binary op's operands.
   };
 
   // Returns parameters of a binary op hoisting out of concatenation if all of
   // the operands are in one of the compatible configurations.
-  Optional<HoistParams> GetHoistParams(TF::ConcatV2Op op, int64_t axis) const;
+  // All inputs of `op` should be of the same binary op kind (e.g. tf.Mul),
+  // except from the ones in `exceptions`. In that case, we can synthesize that
+  // binary op kind for the values in `exceptions`.
+  Optional<HoistParams> GetHoistParams(
+      TF::ConcatV2Op op, int64_t axis,
+      const llvm::SmallDenseMap<Value, unsigned, 4> &exceptions) const;
 };
 
 LogicalResult HoistCwiseBinaryOutOfConcat::matchAndRewrite(
@@ -1078,30 +1133,102 @@ LogicalResult HoistCwiseBinaryOutOfConcat::matchAndRewrite(
   // on the channels dim for NCHW layout as axis=-2.
   if (axis < 0) return failure();
 
-  // All concat operands must be defined by ops.
+  // All concat operands must be defined by ops of the same kind (e.g. tf.Mul),
+  // or some other ops that we might convert to using the same op kind above
+  // (e.g. converting op A to tf.Mul(A, 1.0))
+  // TODO(hongm): generalize the code here to support cases where the first arg
+  // has no defining op (e.g. might be a block arg).
   Operation *first_arg_op = op.values().front().getDefiningOp();
   if (first_arg_op == nullptr) return failure();
 
   // All concat operands must be produced by the coeff-wise binary operation.
   if (!first_arg_op->hasTrait<OpTrait::TF::CwiseBinary>()) return failure();
 
-  // All concat operands must be defined by the op of same kind.
-  bool args_same_op = llvm::all_of(op.values(), [&](Value arg) -> bool {
+  // All concat operands must be defined by the op of same kind, except for a
+  // minor portion which we track in `exceptions`.
+  // Map from the operands to operand indices.
+  llvm::SmallDenseMap<Value, unsigned, 4> exceptions;
+  unsigned operand_idx = 0;
+  for (Value arg : op.values()) {
     Operation *arg_op = arg.getDefiningOp();
-    return arg_op && arg_op->getName() == first_arg_op->getName();
-  });
-  if (!args_same_op) return failure();
+    if (arg_op && arg_op->getName() == first_arg_op->getName()) {
+      ++operand_idx;
+      continue;
+    }
+    exceptions[arg] = operand_idx++;
+  }
+  // Recall those inputs to the concat op that are not produced by a binary op
+  // of the `first_arg_op` kind (e.g. tf.Mul) are stored in `exceptions`. If
+  // there are too many exceptions, it might not be cost effective to apply the
+  // concat hoisting optimization here.
+  // Setting the threshold to be 50% as a simple cost model heuristic. e.g. If 1
+  // out of 2 concat inputs is an exception, we don't apply the hoist. If it's 1
+  // out of 3, we do.
+  const float exception_pct_threshold = 0.5;
+  if (static_cast<float>(op.values().size()) * exception_pct_threshold <=
+      exceptions.size())
+    return failure();
 
   // Compute binary operands hoist parameters.
-  auto hoist_params = GetHoistParams(op, axis);
+  auto hoist_params = GetHoistParams(op, axis, exceptions);
   if (!hoist_params.hasValue()) return failure();
 
-  // New lhs and rhs concatenation axis.
-  auto axis_type = mlir::RankedTensorType::get({}, rewriter.getIntegerType(64));
-  auto lhs_axis = rewriter.create<TF::ConstOp>(
-      loc, DenseIntElementsAttr::get(axis_type, hoist_params->lhs_axis));
-  auto rhs_axis = rewriter.create<TF::ConstOp>(
-      loc, DenseIntElementsAttr::get(axis_type, hoist_params->rhs_axis));
+  // Process `exceptions`: For each value there, synthesize a binary op of the
+  // above kind, so that the concat hoisting optimization can still apply.
+  if (!exceptions.empty()) {
+    int identity_val;
+    if (isa<AddOp>(first_arg_op) || isa<SubOp>(first_arg_op))
+      identity_val = 0;
+    else if (isa<MulOp>(first_arg_op) || isa<DivOp>(first_arg_op) ||
+             isa<RealDivOp>(first_arg_op))
+      identity_val = 1;
+    else
+      return failure();
+    DenseElementsAttr const_attr;
+    auto scalar_tensor_type =
+        first_arg_op->getOperand(hoist_params->scalar_operand_idx)
+            .getType()
+            .dyn_cast<ShapedType>();
+    Type scalar_dtype = scalar_tensor_type.getElementType();
+    if (scalar_dtype.isa<FloatType>())
+      const_attr = DenseElementsAttr::get(scalar_tensor_type,
+                                          static_cast<float>(identity_val));
+    else
+      return failure();
+
+    // All checks are passes, and we now prepare for rewrite.
+    auto identity_const = rewriter.create<TF::ConstOp>(loc, const_attr);
+    for (const auto &kv : exceptions) {
+      assert(!hoist_params->lhs_args[kv.second]);
+      assert(!hoist_params->rhs_args[kv.second]);
+
+      if (hoist_params->scalar_operand_idx == 1) {
+        hoist_params->lhs_args[kv.second] = kv.first;
+        hoist_params->rhs_args[kv.second] = identity_const;
+      } else {
+        assert(hoist_params->scalar_operand_idx == 0);
+        hoist_params->lhs_args[kv.second] = identity_const;
+        hoist_params->rhs_args[kv.second] = kv.first;
+      }
+    }
+  }
+
+  // New lhs and rhs concatenation axis
+  auto axis_type =
+      mlir::RankedTensorType::get({}, mlir::getElementTypeOrSelf(axis_attr));
+  DenseIntElementsAttr lhs_attr, rhs_attr;
+  if (axis_type.getElementType().isInteger(32)) {
+    lhs_attr = DenseIntElementsAttr::get(
+        axis_type, static_cast<int32_t>(hoist_params->lhs_axis));
+    rhs_attr = DenseIntElementsAttr::get(
+        axis_type, static_cast<int32_t>(hoist_params->rhs_axis));
+  } else {
+    assert(axis_type.getElementType().isInteger(64));
+    lhs_attr = DenseIntElementsAttr::get(axis_type, hoist_params->lhs_axis);
+    rhs_attr = DenseIntElementsAttr::get(axis_type, hoist_params->rhs_axis);
+  }
+  auto lhs_axis = rewriter.create<TF::ConstOp>(loc, lhs_attr);
+  auto rhs_axis = rewriter.create<TF::ConstOp>(loc, rhs_attr);
 
   // Concatenate binary ops operands on the new axis.
   auto lhs_concat = rewriter.create<ConcatV2Op>(
@@ -1122,12 +1249,14 @@ LogicalResult HoistCwiseBinaryOutOfConcat::matchAndRewrite(
 }
 
 Optional<HoistCwiseBinaryOutOfConcat::HoistParams>
-HoistCwiseBinaryOutOfConcat::GetHoistParams(TF::ConcatV2Op op,
-                                            int64_t axis) const {
+HoistCwiseBinaryOutOfConcat::GetHoistParams(
+    TF::ConcatV2Op op, int64_t axis,
+    const llvm::SmallDenseMap<Value, unsigned, 4> &exceptions) const {
   assert(axis >= 0);
   // Collects lhs or rhs arguments of concat op operands.
   auto args = [&](int operand_idx) -> SmallVector<Value, 8> {
     auto range = llvm::map_range(op.values(), [&](Value arg) {
+      if (exceptions.count(arg)) return Value();
       return arg.getDefiningOp()->getOperand(operand_idx);
     });
     return {range.begin(), range.end()};
@@ -1137,7 +1266,15 @@ HoistCwiseBinaryOutOfConcat::GetHoistParams(TF::ConcatV2Op op,
   // of `axis + 1` rank and axis dim has size `1`.
   auto is_all_tensors = [&](int operand_idx, int axis) -> bool {
     return llvm::all_of(op.values(), [&](Value arg) -> bool {
-      auto operand = arg.getDefiningOp()->getOperand(operand_idx);
+      mlir::Value operand;
+      if (exceptions.count(arg)) {
+        // For exceptions, since we are going to synthesize a binary op that
+        // produce the identity value, it is also required that it is a ranked
+        // tensor with rank = `axis + 1` and axis dim has size `1`.
+        operand = arg;
+      } else {
+        operand = arg.getDefiningOp()->getOperand(operand_idx);
+      }
       auto ranked = operand.getType().dyn_cast<RankedTensorType>();
       return ranked && ranked.getRank() == (axis + 1) &&
              ranked.getShape()[axis] == 1;
@@ -1147,6 +1284,7 @@ HoistCwiseBinaryOutOfConcat::GetHoistParams(TF::ConcatV2Op op,
   // Returns true if all binary ops operands at `operand_idx` index are scalars.
   auto is_all_scalars = [&](int operand_idx) -> bool {
     return llvm::all_of(op.values(), [&](Value arg) -> bool {
+      if (exceptions.count(arg)) return true;
       auto operand = arg.getDefiningOp()->getOperand(operand_idx);
       auto ranked = operand.getType().dyn_cast<RankedTensorType>();
       return ranked && ranked.hasRank() && ranked.getRank() == 0;
@@ -1168,13 +1306,24 @@ HoistCwiseBinaryOutOfConcat::GetHoistParams(TF::ConcatV2Op op,
   if (is_all_tensors(0, axis) && is_all_scalars(1)) {
     std::array<int64_t, 1> rhs_dims{static_cast<int64_t>(op.values().size())};
     auto rhs_type = RankedTensorType::get(rhs_dims, ranked.getElementType());
-    return HoistParams{args(0), args(1), axis, 0, op.getType(), rhs_type};
+    return HoistParams{args(0),
+                       args(1),
+                       axis,
+                       0,
+                       op.getType(),
+                       rhs_type,
+                       /*scalar_operand_idx=*/1};
   } else if (is_all_tensors(1, axis) && is_all_scalars(0)) {
     std::array<int64_t, 1> lhs_dims{static_cast<int64_t>(op.values().size())};
     auto lhs_type = RankedTensorType::get(lhs_dims, ranked.getElementType());
-    return HoistParams{args(0), args(1), 0, axis, lhs_type, op.getType()};
+    return HoistParams{args(0),
+                       args(1),
+                       0,
+                       axis,
+                       lhs_type,
+                       op.getType(),
+                       /*scalar_operand_idx=*/0};
   }
-
   return None;
 }
 
@@ -1330,6 +1479,11 @@ LogicalResult ConcatOffsetOp::fold(ArrayRef<Attribute> operands,
 //===----------------------------------------------------------------------===//
 // ConstOp
 //===----------------------------------------------------------------------===//
+
+void ConstOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "cst");
+}
 
 OpFoldResult ConstOp::fold(ArrayRef<Attribute> operands) {
   assert(operands.empty() && "constant has no operands");
@@ -1515,7 +1669,7 @@ static LogicalResult inferConvReturnTypes(
                              "D tensor");
 
   if (padding == tensorflow::Padding::EXPLICIT) {
-    if (explicit_padding.size() == 0) {
+    if (explicit_padding.empty()) {
       return emitOptionalError(location,
                                "requires attribute 'explicit_paddings' with "
                                "'EXPLICIT' padding mode");
@@ -1537,43 +1691,47 @@ static LogicalResult inferConvReturnTypes(
     return failure();
   }
 
-  // For operands having dynamic shape.
+  // Output always have `num_dims` rank. All dimensions are initialized to
+  // dynamic size and can be partially inferred.
   SmallVector<int64_t, 4> return_shape(num_dims, ShapedType::kDynamicSize);
-  if (!input_ty.hasStaticShape() || !filter_ty.hasStaticShape()) {
-    inferredReturnTypes.assign(
-        {RankedTensorType::get(return_shape, input_ty.getElementType())});
-    return success();
-  }
-
-  // Checks the size of each of the output dimension.
-  for (auto i : llvm::seq<int>(0, num_spatial_dims)) {
-    const int64_t dim = GetTensorSpatialDimIndex(num_dims, format, i);
-    int64_t stride = get_int(strides[dim]);
-    tensorflow::int64 expected_output_size;
-    tensorflow::int64 pad_low;
-    tensorflow::int64 pad_high;
-    // Retrieve padding, if defined explicitly.
-    if (padding == tensorflow::Padding::EXPLICIT) {
-      pad_low = get_int(explicit_padding[2 * dim]);
-      pad_high = get_int(explicit_padding[2 * dim + 1]);
-    }
-    // Calculate the expected_output_size.
-    tensorflow::Status status = tensorflow::GetWindowedOutputSizeVerboseV2(
-        input_ty.getDimSize(dim), filter_ty.getDimSize(i),
-        get_int(dilations[dim]), stride, padding, &expected_output_size,
-        &pad_low, &pad_high);
-    // Return failure if expected_output_size could not be calculated.
-    if (!status.ok()) return failure();
-    return_shape[dim] = expected_output_size;
-  }
-
-  // The remaining dimensions can be obtained using utilities from
+  // Output batch and channel dimension can be obtained using utilities from
   // tensorflow/core/util/tensor_format.h.
-  return_shape[GetTensorBatchDimIndex(num_dims, format)] =
-      input_ty.getShape()[GetTensorBatchDimIndex(num_dims, format)];
-  return_shape[GetTensorFeatureDimIndex(num_dims, format)] =
-      filter_ty.getShape()[GetFilterTensorOutputChannelsDimIndex(
-          num_dims, tensorflow::FORMAT_HWIO)];
+  if (input_ty.hasRank()) {
+    return_shape[GetTensorBatchDimIndex(num_dims, format)] =
+        input_ty.getDimSize(GetTensorBatchDimIndex(num_dims, format));
+  }
+  if (filter_ty.hasRank()) {
+    return_shape[GetTensorFeatureDimIndex(num_dims, format)] =
+        filter_ty.getDimSize(GetFilterTensorOutputChannelsDimIndex(
+            num_dims, tensorflow::FORMAT_HWIO));
+  }
+  // Spatial dimensions can be inferred only when both input and filter are
+  // ranked because we need to get their spatial dimensions.
+  if (input_ty.hasRank() && filter_ty.hasRank()) {
+    // Checks the size of each of the output spatial dimensions.
+    for (auto i : llvm::seq<int>(0, num_spatial_dims)) {
+      const int64_t dim = GetTensorSpatialDimIndex(num_dims, format, i);
+      int64_t stride = get_int(strides[dim]);
+      int64_t expected_output_size;
+      int64_t pad_low;
+      int64_t pad_high;
+      // Retrieve padding, if defined explicitly.
+      if (padding == tensorflow::Padding::EXPLICIT) {
+        pad_low = get_int(explicit_padding[2 * dim]);
+        pad_high = get_int(explicit_padding[2 * dim + 1]);
+      }
+      // Skip if input or filter size is dynamic.
+      if (input_ty.isDynamicDim(dim) || filter_ty.isDynamicDim(i)) continue;
+      // Calculate the expected_output_size.
+      tensorflow::Status status = tensorflow::GetWindowedOutputSizeVerboseV2(
+          input_ty.getDimSize(dim), filter_ty.getDimSize(i),
+          get_int(dilations[dim]), stride, padding, &expected_output_size,
+          &pad_low, &pad_high);
+      // Return failure if expected_output_size could not be calculated.
+      if (!status.ok()) return failure();
+      return_shape[dim] = expected_output_size;
+    }
+  }
 
   inferredReturnTypes.assign(
       {RankedTensorType::get(return_shape, input_ty.getElementType())});
@@ -1829,6 +1987,136 @@ static LogicalResult Verify(DataFormatVecPermuteOp op) {
 }
 
 //===----------------------------------------------------------------------===//
+// DivNoNanOp
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Canonicalization template for tf.DivNoNan and tf.MulNoNan:
+/// If the op is tf.DivNoNan and the divisor is a constant tensor (with all the
+/// elements of any allowed type: float or complex), rewrite the op to the
+/// divisor if all the elements of the divisor are zero and to tf.Div if all the
+/// elements of the divisor are non-zero.
+
+/// Similarly, if the op is tf.MulNoNan and the multiplier is a constant tensor
+/// (with all the elements of any allowed type: float or complex), rewrite the
+/// op to the multiplier if all the elements of the multiplier are zero and to
+/// tf.Mul if all the elements of the multiplier are non-zero.
+
+/// Replace the given op with an op of type `RetT`. Upon calling
+/// DivNoNanOrMulNoNanConstantY for canonicalizing tf.DivNoNan, tf.DivOp is
+/// passed as the second argument and for canonicalizing tf.MulNoNan, tf.MulOp
+/// is passed as the second argument.
+template <typename OpT, typename RetT>
+class DivNoNanOrMulNoNanConstantY : public OpRewritePattern<OpT> {
+  using OpRewritePattern<OpT>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(OpT op,
+                                PatternRewriter &rewriter) const override {
+    static_assert(
+        llvm::is_one_of<OpT, DivNoNanOp, MulNoNanOp>::value,
+        "only canonicalization of tf.DivNoNan and tf.MulNoNan is supported");
+
+    // Returns true iff `val` (a complex constant with float real and imaginary
+    // parts) is zero.
+    auto complexIsZero = [](const std::complex<APFloat> val) {
+      // Note that when `val` is of complex type, it is zero iff both
+      // its real and imaginary parts are zero.
+      if (val.real().isZero() && val.imag().isZero())
+        return true;
+      else
+        return false;
+    };
+
+    // Returns true iff `attr` has both zero and non-zero elements
+    // (float/complex type) in `attr`.
+    auto hasBothZeroAndNonzeroElements =
+        [&complexIsZero](ElementsAttr attr, bool hasComplexElements) {
+          bool foundZero = false, foundNonzero = false;
+          if (!hasComplexElements) {
+            for (const auto val : attr.getValues<APFloat>()) {
+              if (val.isZero())
+                foundZero = true;
+              else
+                foundNonzero = true;
+              if (foundZero && foundNonzero) return true;
+            }
+          } else {
+            for (const auto val : attr.getValues<std::complex<APFloat>>()) {
+              if (complexIsZero(val))
+                foundZero = true;
+              else
+                foundNonzero = true;
+              if (foundZero && foundNonzero) return true;
+            }
+          }
+          return false;
+        };
+
+    // Note that `y` is the divisor if the op is tf.DivNoNan and it is the
+    // multiplier if the op is tf.MulNoNan.
+    Value y = op.y();
+    // The below if condition is true iff `y.getDefiningOp()` is of the type
+    // TF::ConstOp, i.e., if `y` is defined by an op and it is the tf.Const op.
+    // In that case, `yDefOp` stores this tf.Const op.
+    // Note that if `y` is a block argument, `y.getDefiningOp()` will return
+    // null, which will get propogated by dyn_cast_or_null to `yDefOp`.
+    // Further, if `y` is defined by an op other than tf.Const,
+    // `y.getDefiningOp()` will not return null but dyn_cast_or_null will.
+    if (auto yDefOp = dyn_cast_or_null<TF::ConstOp>(y.getDefiningOp())) {
+      Type typeOfElementsInY = getElementTypeOrSelf(y.getType());
+      ElementsAttr attr = yDefOp.value();
+      bool yHasComplexElements = typeOfElementsInY.isa<ComplexType>();
+
+      // If `y` is a splat constant, then the op will definitely get replaced.
+      // We check for a splat constant first, in order to optimize the
+      // performance of this canonicalization because this check will be O(1).
+      if (auto splatAttr = attr.dyn_cast<SplatElementsAttr>()) {
+        bool splatAttrIsZero = false;
+        if (!yHasComplexElements) {
+          if (splatAttr.getSplatValue<APFloat>().isZero())
+            splatAttrIsZero = true;
+        } else {
+          if (complexIsZero(splatAttr.getSplatValue<std::complex<APFloat>>()))
+            splatAttrIsZero = true;
+        }
+        if (splatAttrIsZero) {
+          // When `y` is a zero splat constant (i.e., all the elements in `y`
+          // are zero, replace the op (tf.divNoNan or tf.MulNoNan) with `y`.
+          rewriter.replaceOp(op, y);
+        } else {
+          // When `y` is a non-zero splat constant, replace tf.DivNoNan with
+          // tf.Div and tf.MulNoNan with tf.Mul.
+          rewriter.replaceOpWithNewOp<RetT>(op, op->getResult(0).getType(),
+                                            op->getOperand(0),
+                                            op->getOperand(1));
+        }
+        return success();
+      }
+
+      // If `y` has both zero and non-zero elements, do nothing.
+      if (hasBothZeroAndNonzeroElements(attr, yHasComplexElements)) {
+        return failure();
+      } else {
+        // When all the elements in `y` are non-splat and non-zero, replace
+        // tf.DivNoNan with tf.Div and tf.MulNoNan with tf.Mul.
+        rewriter.replaceOpWithNewOp<RetT>(op, op->getResult(0).getType(),
+                                          op->getOperand(0), op->getOperand(1));
+        return success();
+      }
+    }
+    return failure();
+  }
+};
+}  // namespace
+
+void DivNoNanOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                             MLIRContext *context) {
+  results.insert<DivNoNanOrMulNoNanConstantY<TF::DivNoNanOp, TF::DivOp>>(
+      context);
+}
+
+//===----------------------------------------------------------------------===//
 // DivOp
 //===----------------------------------------------------------------------===//
 
@@ -2005,7 +2293,20 @@ static LogicalResult Verify(EmptyTensorListOp op) {
 }
 
 //===----------------------------------------------------------------------===//
-// EqualOp
+// EnsureShapeOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult EnsureShapeOp::fold(llvm::ArrayRef<mlir::Attribute>) {
+  ShapedType type = input().getType().dyn_cast<ShapedType>();
+  if (!type || !type.hasRank()) return {};
+  // If shape attribute equals input operand's type's shape, fold it to input.
+  if (type.getShape() == shape()) return input();
+  // Else retain to enable failing dynamically.
+  return {};
+}
+
+//===----------------------------------------------------------------------===//
+// EqualOp/NotEqualOp
 //===----------------------------------------------------------------------===//
 
 static LogicalResult Verify(EqualOp op) {
@@ -2022,6 +2323,41 @@ void EqualOp::build(OpBuilder &builder, OperationState &result, Value x,
   auto result_type = DeduceEqualCmpOpType(&builder, result.location, x, y,
                                           incompatible_shape_error);
   return build(builder, result, result_type, x, y, incompatible_shape_error);
+}
+
+namespace {
+
+// Flips the incompatible_shape_error attribute to true if the shapes are
+// identical and static.
+template <typename Ty>
+static LogicalResult flipComatibleShapeError(Ty op, PatternRewriter &rewriter) {
+  if (op.incompatible_shape_error()) {
+    return rewriter.notifyMatchFailure(op, "the attribute is already true");
+  }
+
+  if (op.x().getType() != op.y().getType()) {
+    return rewriter.notifyMatchFailure(op,
+                                       "require the shapes to be identical");
+  }
+
+  auto src_ty = op.x().getType().template dyn_cast<RankedTensorType>();
+  if (!src_ty || !src_ty.hasStaticShape()) {
+    return rewriter.notifyMatchFailure(op, "require the shapes to be static");
+  }
+  rewriter.template replaceOpWithNewOp<Ty>(op, op.x(), op.y(),
+                                           rewriter.getBoolAttr(true));
+  return success();
+}
+}  // namespace
+
+void EqualOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                          MLIRContext *context) {
+  results.insert(flipComatibleShapeError<EqualOp>);
+}
+
+void NotEqualOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                             MLIRContext *context) {
+  results.insert(flipComatibleShapeError<NotEqualOp>);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2053,6 +2389,24 @@ Type InferExpandDimsOpType(Value input, Value dim) {
 void ExpandDimsOp::build(OpBuilder &builder, OperationState &result,
                          Value input, Value dim) {
   return build(builder, result, InferExpandDimsOpType(input, dim), input, dim);
+}
+
+//===----------------------------------------------------------------------===//
+// Expm1Op
+//===----------------------------------------------------------------------===//
+LogicalResult Expm1Op::inferReturnTypes(
+    MLIRContext *context, Optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, RegionRange regions,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  if (operands.empty()) {
+    return emitOptionalError(location, "requires at least one operand.");
+  }
+  auto input_ty = operands[0].getType().dyn_cast<TensorType>();
+  if (!input_ty) {
+    return emitOptionalError(location, "requires input to be of Tensor type");
+  }
+  inferredReturnTypes.assign({input_ty});
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2153,16 +2507,22 @@ static ShapedType InferFillOpType(Value dims, Value value) {
   Type etype = value.getType().cast<ShapedType>().getElementType();
 
   DenseIntElementsAttr dims_attr;
-  if (!matchPattern(dims, m_Constant(&dims_attr))) {
-    return UnrankedTensorType::get(etype);
+  if (matchPattern(dims, m_Constant(&dims_attr))) {
+    llvm::SmallVector<int64_t, 4> shape;
+    shape.reserve(dims_attr.getNumElements());
+    for (const APInt dim : dims_attr.getValues<APInt>()) {
+      shape.push_back(dim.getSExtValue());
+    }
+    return RankedTensorType::get(shape, etype);
   }
 
-  llvm::SmallVector<int64_t, 4> shape;
-  shape.reserve(dims_attr.getNumElements());
-  for (const APInt dim : dims_attr.getValues<APInt>()) {
-    shape.push_back(dim.getSExtValue());
+  if (auto shape_op = dims.getDefiningOp<ShapeOp>()) {
+    if (auto t = shape_op.input().getType().dyn_cast<ShapedType>()) {
+      return t;
+    }
   }
-  return RankedTensorType::get(shape, etype);
+
+  return UnrankedTensorType::get(etype);
 }
 
 void FillOp::build(OpBuilder &builder, OperationState &result, Value dims,
@@ -2354,16 +2714,23 @@ static LogicalResult Verify(GatherV2Op op) {
   return success();
 }
 
+void GatherOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                           MLIRContext *context) {
+  results.insert<GatherToV2>(context);
+}
+
 //===----------------------------------------------------------------------===//
 // IfOp
 //===----------------------------------------------------------------------===//
 
-static LogicalResult Verify(IfOp op) {
+LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbol_table) {
   auto branch_name = [](unsigned index) -> std::string {
     return index == 0 ? "'then_branch'" : "'else_branch'";
   };
+  // TODO(jpienaar): Remove.
+  if (failed(IfOpAdaptor(*this).verify(getLoc()))) return failure();
   return VerifyCaseOrIfOpBranchFunctions(
-      op, {op.then_branchAttr(), op.else_branchAttr()}, branch_name);
+      symbol_table, *this, {then_branchAttr(), else_branchAttr()}, branch_name);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2401,11 +2768,9 @@ LogicalResult FoldConstantIfOp::matchAndRewrite(
   // Replace IfOp with PartitionedCallOp or StatefulPartitionedCallOp.
   auto rewrite = [&](auto op_type) {
     auto empty = rewriter.getStringAttr("");
-    auto call_op = rewriter.create<typename decltype(op_type)::CallOp>(
-        op.getLoc(), op.getResultTypes(), op.input(), func,
+    ReplaceTfOpWithNewOp<typename decltype(op_type)::CallOp>(
+        rewriter, op, op.getResultTypes(), op.input(), func,
         /*config=*/empty, /*config_proto=*/empty, /*executor_type=*/empty);
-    CopyDeviceAndUnderscoredAttributes(op.getOperation(), call_op);
-    rewriter.replaceOp(op, call_op.getResults());
   };
 
   if (op.is_stateless())
@@ -2536,15 +2901,6 @@ OpFoldResult LeakyReluOp::fold(ArrayRef<Attribute> operands) {
       return DenseElementsAttr::get(arg.getType(), calculate(elementAttr));
   }
   return {};
-}
-
-Optional<ContractionFusion> LeakyReluOp::GetContractionFusion() {
-  // Only f32 is supported for fusion.
-  if (!T().isF32()) return None;
-
-  NamedAttribute alpha(Identifier::get("alpha", getContext()), alphaAttr());
-  return ContractionFusion("LeakyRelu", /*additional_arguments=*/{},
-                           /*additional_attributes=*/{alpha});
 }
 
 //===----------------------------------------------------------------------===//
@@ -2688,7 +3044,7 @@ LogicalResult MeanOp::FoldOperandsPermutation(ArrayRef<int64_t> permutation) {
 
   // Prepare new reduction indices according to operand permutation.
   SmallVector<int32_t, 4> shuffled_reduction;
-  llvm::transform(reductions_value.getIntValues(),
+  llvm::transform(reductions_value.getValues<APInt>(),
                   std::back_inserter(shuffled_reduction),
                   [&](APInt idx) { return permutation[idx.getSExtValue()]; });
 
@@ -2706,11 +3062,31 @@ LogicalResult MeanOp::FoldOperandsPermutation(ArrayRef<int64_t> permutation) {
 }
 
 //===----------------------------------------------------------------------===//
+// MulNoNanOp
+//===----------------------------------------------------------------------===//
+
+void MulNoNanOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                             MLIRContext *context) {
+  results.insert<DivNoNanOrMulNoNanConstantY<TF::MulNoNanOp, TF::MulOp>>(
+      context);
+}
+
+//===----------------------------------------------------------------------===//
 // MulOp
 //===----------------------------------------------------------------------===//
 
 OpFoldResult MulOp::fold(ArrayRef<Attribute> operands) {
   return IdentityArithmeticOpFolder<MulOp>(*this, operands);
+}
+
+//===----------------------------------------------------------------------===//
+// HashTableOp
+//===----------------------------------------------------------------------===//
+void HashTableOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
+                                              MLIRContext *context) {
+  results.insert<HashTableAndInitializeTableToV2>(context);
+  results.insert<HashTableAndLookupTableSizeToV2>(context);
+  results.insert<HashTableAndLookupTableFindToV2>(context);
 }
 
 }  // namespace TF

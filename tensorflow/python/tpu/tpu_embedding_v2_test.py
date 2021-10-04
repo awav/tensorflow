@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for TPU Embeddings mid level API on TPU."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import os
 
@@ -55,6 +51,7 @@ from tensorflow.python.tpu import tpu_embedding
 from tensorflow.python.tpu import tpu_embedding_v2
 from tensorflow.python.tpu import tpu_embedding_v2_utils
 from tensorflow.python.tpu import tpu_strategy_util
+from tensorflow.python.tpu.ops import tpu_ops
 from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.training.tracking import util
 from tensorflow.python.util import nest
@@ -238,6 +235,9 @@ class TPUEmbeddingCheckpointTest(parameterized.TestCase, test.TestCase):
     if not initialize_tpu_embedding:
       saved_fn = tpu.initialize_system_for_tpu_embedding
       tpu.initialize_system_for_tpu_embedding = lambda x: None
+      # Also disable the tpu embedding initialization checking.
+      saved_fn_two = tpu_ops.is_tpu_embedding_initialized
+      tpu_ops.is_tpu_embedding_initialized = lambda: False
 
     # batch_size here does not matter as we aren't training in any of these
     # tests.
@@ -245,6 +245,7 @@ class TPUEmbeddingCheckpointTest(parameterized.TestCase, test.TestCase):
 
     if not initialize_tpu_embedding:
       tpu.initialize_system_for_tpu_embedding = saved_fn
+      tpu_ops.is_tpu_embedding_initialized = saved_fn_two
 
     return mid_level
 
@@ -302,7 +303,8 @@ class TPUEmbeddingCheckpointTest(parameterized.TestCase, test.TestCase):
 
   @parameterized.parameters(tpu_embedding_v2_utils.SGD,
                             tpu_embedding_v2_utils.Adagrad,
-                            tpu_embedding_v2_utils.Adam)
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
   def test_check_checkpoint_variable_names_are_same_on_cpu_and_tpu(self,
                                                                    optimizer):
     # Reinitialize the TPU so that we can re-initialize the embeddings with the
@@ -436,7 +438,7 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     def test_apply():
       mid_level_api.apply_gradients((1, 2, 3))
 
-    with self.assertRaisesRegex(ValueError, 'Expected Tensor.'):
+    with self.assertRaisesRegex(ValueError, 'found non-tensor type'):
       strategy.run(test_apply)
 
   def test_pass_different_structure_to_apply_gradients(self):
@@ -458,10 +460,12 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
     mid_level_api.build(self.batch_size)
     dataset = self._create_sparse_dataset(strategy)
-    data = next(iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False))))
+    data = next(
+        iter(
+            strategy.experimental_distribute_dataset(
+                dataset,
+                options=distribute_lib.InputOptions(
+                    experimental_fetch_to_device=False))))
 
     @def_function.function
     def embedding_and_set_gradients(data):
@@ -549,8 +553,7 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     input_fn = self._create_dense_input_fn(strategy, include_weights=True)
     dist = strategy.distribute_datasets_from_function(
         input_fn,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False))
+        options=distribute_lib.InputOptions(experimental_fetch_to_device=False))
     dist_iter = iter(dist)
 
     @def_function.function
@@ -570,14 +573,16 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     sparse = self._create_sparse_dataset(strategy)
     ragged = self._create_ragged_dataset(strategy, include_weights=True)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
-    ragged_iter = iter(strategy.experimental_distribute_dataset(
-        ragged,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
+    ragged_iter = iter(
+        strategy.experimental_distribute_dataset(
+            ragged,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -598,14 +603,16 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     sparse = self._create_sparse_dataset(strategy, include_weights=True)
     ragged = self._create_ragged_dataset(strategy)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
-    ragged_iter = iter(strategy.experimental_distribute_dataset(
-        ragged,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
+    ragged_iter = iter(
+        strategy.experimental_distribute_dataset(
+            ragged,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -626,14 +633,16 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     sparse = self._create_sparse_dataset(strategy)
     ragged = self._create_ragged_dataset(strategy)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
-    ragged_iter = iter(strategy.experimental_distribute_dataset(
-        ragged,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
+    ragged_iter = iter(
+        strategy.experimental_distribute_dataset(
+            ragged,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -654,10 +663,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
 
     sparse = self._create_sparse_dataset(strategy)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -677,10 +687,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
 
     sparse = self._create_sparse_dataset(strategy, include_weights=True)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -701,14 +712,16 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     sparse = self._create_sparse_dataset(strategy)
     ragged = self._create_ragged_dataset(strategy)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
-    ragged_iter = iter(strategy.experimental_distribute_dataset(
-        ragged,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
+    ragged_iter = iter(
+        strategy.experimental_distribute_dataset(
+            ragged,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -735,10 +748,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
 
     sparse = self._create_sparse_dataset(strategy)
-    sparse_iter = iter(strategy.experimental_distribute_dataset(
-        sparse,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    sparse_iter = iter(
+        strategy.experimental_distribute_dataset(
+            sparse,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def test_fn():
@@ -827,10 +841,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
                                             weight=weight)
       mid_level_api.build(self.batch_size)
 
-    dataset_iter = iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    dataset_iter = iter(
+        strategy.experimental_distribute_dataset(
+            dataset,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def enqueue_and_get(features, weights):
@@ -869,10 +884,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
     mid_level_api.build(self.batch_size)
     dataset = self._create_sparse_dataset(strategy)
-    dataset_iter = iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    dataset_iter = iter(
+        strategy.experimental_distribute_dataset(
+            dataset,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def enqueue_with_outside_compilation(data):
@@ -906,10 +922,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
     dataset = self._create_sparse_dataset(strategy)
-    dataset_iter = iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    dataset_iter = iter(
+        strategy.experimental_distribute_dataset(
+            dataset,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     # This is one way to force the enqueue in some control flow. @tf.functions
     # aren't inlined in the calling tf.function. An alternative would be to
@@ -934,10 +951,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
     mid_level_api.build(self.batch_size)
     dataset = self._create_sparse_dataset(strategy)
-    dataset_iter = iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    dataset_iter = iter(
+        strategy.experimental_distribute_dataset(
+            dataset,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def enqueue_with_outside_compilation():
@@ -957,10 +975,11 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
     strategy, mid_level_api, _ = self._create_strategy_and_mid_level('sgd')
     mid_level_api.build(self.batch_size)
     dataset = self._create_sparse_dataset(strategy)
-    dataset_iter = iter(strategy.experimental_distribute_dataset(
-        dataset,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False)))
+    dataset_iter = iter(
+        strategy.experimental_distribute_dataset(
+            dataset,
+            options=distribute_lib.InputOptions(
+                experimental_fetch_to_device=False)))
 
     @def_function.function
     def enqueue_with_no_gradient_apply(data):
@@ -1024,6 +1043,8 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
         optimizer = tpu_embedding_v2_utils.Adagrad(learning_rate=0.1)
       elif optimizer_name == 'adam':
         optimizer = tpu_embedding_v2_utils.Adam(learning_rate=0.1)
+      elif optimizer_name == 'ftrl':
+        optimizer = tpu_embedding_v2_utils.FTRL(learning_rate=0.1)
       else:
         raise ValueError('optimizer is not recognized: ', optimizer_name)
       mid_level_api = self._create_mid_level(optimizer=optimizer)
@@ -1162,8 +1183,7 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
 
     dist = strategy.distribute_datasets_from_function(
         input_fn,
-        options=distribute_lib.InputOptions(
-            experimental_prefetch_to_device=False))
+        options=distribute_lib.InputOptions(experimental_fetch_to_device=False))
     dist_iter = iter(dist)
 
     @def_function.function
@@ -1272,6 +1292,51 @@ class TPUEmbeddingTest(parameterized.TestCase, test.TestCase):
         # We aren't going to actually run anything, so the batch_size here does
         # not matter.
         mid_level_api.build(self.batch_size)
+
+  def test_same_config_different_instantiations(self):
+    num_tables = 30
+    table_dim = np.random.randint(1, 128, size=[num_tables])
+    table_vocab_size = np.random.randint(100, 1000, size=[num_tables])
+    table_names = ['table{}'.format(i) for i in range(num_tables)]
+    table_data = list(zip(table_dim, table_vocab_size, table_names))
+    strategy = self._get_strategy()
+
+    def tpu_embedding_config():
+      feature_configs = []
+      for dim, vocab, name in table_data:
+        feature_configs.append(tpu_embedding_v2_utils.FeatureConfig(
+            table=tpu_embedding_v2_utils.TableConfig(
+                vocabulary_size=int(vocab), dim=int(dim),
+                initializer=init_ops_v2.Zeros(), name=name)))
+      optimizer = tpu_embedding_v2_utils.Adagrad(
+          learning_rate=0.1)
+      with strategy.scope():
+        mid_level_api = tpu_embedding_v2.TPUEmbedding(
+            feature_config=feature_configs,
+            optimizer=optimizer)
+      mid_level_api._batch_size = 128
+      return mid_level_api._create_config_proto()
+
+    self.assertProtoEquals(tpu_embedding_config(), tpu_embedding_config())
+
+  def test_multiple_creation(self):
+    feature_config = (tpu_embedding_v2_utils.FeatureConfig(
+        table=self.table_user, name='friends', max_sequence_length=2),)
+    optimizer = tpu_embedding_v2_utils.SGD(learning_rate=0.1)
+    strategy = self._get_strategy()
+    with strategy.scope():
+      embedding_one = tpu_embedding_v2.TPUEmbedding(
+          feature_config=feature_config, optimizer=optimizer)
+      embedding_two = tpu_embedding_v2.TPUEmbedding(
+          feature_config=feature_config, optimizer=optimizer)
+
+    # The first TPU embedding should be able to be built.
+    # The second one should fail with a runtime error indicating another TPU
+    # embedding has already been initialized on TPU.
+    embedding_one.build(64)
+    with self.assertRaisesRegex(RuntimeError,
+                                'TPU is already initialized for embeddings.'):
+      embedding_two.build(64)
 
 
 def _unpack(strategy, per_replica_output):

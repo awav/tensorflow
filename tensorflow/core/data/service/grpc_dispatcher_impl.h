@@ -35,6 +35,8 @@ class GrpcDispatcherImpl : public DispatcherService::Service {
 
   Status Start();
 
+  size_t NumActiveJobs();
+
 #define HANDLER(method)                                 \
   ::grpc::Status method(::grpc::ServerContext* context, \
                         const method##Request* request, \
@@ -43,11 +45,14 @@ class GrpcDispatcherImpl : public DispatcherService::Service {
   HANDLER(WorkerUpdate);
   HANDLER(GetDatasetDef);
   HANDLER(GetSplit);
+  HANDLER(GetVersion);
   HANDLER(GetOrRegisterDataset);
   HANDLER(ReleaseJobClient);
+  HANDLER(MaybeRemoveTask);
   HANDLER(GetOrCreateJob);
   HANDLER(ClientHeartbeat);
   HANDLER(GetWorkers);
+  HANDLER(GetElementSpec);
 #undef HANDLER
 
  private:

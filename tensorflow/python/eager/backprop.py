@@ -17,10 +17,6 @@
 # TODO(b/159343581): Properly support CompositeTensor in all functions in this
 # file.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import operator
 import sys
@@ -168,13 +164,23 @@ def _must_record_gradient():
   return not pywrap_tfe.TFE_Py_TapeSetIsEmpty()
 
 
-def _record_gradient(op_name, inputs, attrs, results):
-  return pywrap_tfe.TFE_Py_RecordGradient(op_name, inputs, attrs, results,
-                                          ops.get_name_scope())
+@tf_export("__internal__.record_gradient", v1=[])
+def record_gradient(op_name, inputs, attrs, outputs):
+  """Explicitly record the gradient for a given op.
+
+  Args:
+    op_name: The op name as listed in the `OpDef` for the op.
+    inputs: A list of tensor inputs to the op.
+    attrs: The op attributes as a flattened list of alternating attribute names
+      and attribute values.
+    outputs: A list of tensor outputs from the op.
+  """
+  pywrap_tfe.TFE_Py_RecordGradient(op_name, inputs, attrs, outputs,
+                                   ops.get_name_scope())
 
 
 execute.must_record_gradient = _must_record_gradient
-execute.record_gradient = _record_gradient
+execute.record_gradient = record_gradient
 
 
 def implicit_val_and_grad(f):
@@ -873,6 +879,18 @@ class GradientTape(object):
     tape.pop_tape(self._tape)
     self._recording = False
 
+  @tf_contextlib.contextmanager
+  def _ensure_recording(self):
+    """Ensures that this tape is recording."""
+    if not self._recording:
+      try:
+        self._push_tape()
+        yield
+      finally:
+        self._pop_tape()
+    else:
+      yield
+
   def watch(self, tensor):
     """Ensures that `tensor` is being traced by this tape.
 
@@ -1144,14 +1162,12 @@ class GradientTape(object):
     target_shape = array_ops.shape(target)
     # Note that we push and pop the tape here and below. This is needed since we
     # need gradients through the enclosed operations.
-    self._push_tape()
-    target = array_ops.reshape(target, [-1])
-    self._pop_tape()
+    with self._ensure_recording():
+      target = array_ops.reshape(target, [-1])
 
     def loop_fn(i):
-      self._push_tape()
-      y = array_ops.gather(target, i)
-      self._pop_tape()
+      with self._ensure_recording():
+        y = array_ops.gather(target, i)
       return self.gradient(y, flat_sources,
                            unconnected_gradients=unconnected_gradients)
 
@@ -1285,16 +1301,28 @@ class GradientTape(object):
     # Flatten target to 2-D.
     # Note that we push and pop the tape here and below. This is needed since we
     # need gradients through the enclosed operations.
-    self._push_tape()
-    with ops.control_dependencies(
-        [check_ops.assert_equal(batch_size, source_shape[0])]):
-      target = array_ops.reshape(target, [batch_size, target_row_size])
-    self._pop_tape()
+    with self._ensure_recording():
+      with ops.control_dependencies(
+          [check_ops.assert_equal(batch_size, source_shape[0])]):
+        target = array_ops.reshape(target, [batch_size, target_row_size])
+
+    run_once = False
 
     def loop_fn(i):
-      self._push_tape()
-      y = array_ops.gather(target, i, axis=1)
-      self._pop_tape()
+      nonlocal run_once
+      if run_once and not self._persistent:
+        if parallel_iterations is not None:
+          raise RuntimeError(
+              "GradientTape must be created with persistent=True"
+              " to compute the batch_jacobian with parallel_iterations.")
+        else:
+          raise RuntimeError(
+              "GradientTape must be created with persistent=True"
+              " to compute the batch_jacobian.")
+      run_once = True
+
+      with self._ensure_recording():
+        y = array_ops.gather(target, i, axis=1)
       return self.gradient(y, source,
                            unconnected_gradients=unconnected_gradients)
 

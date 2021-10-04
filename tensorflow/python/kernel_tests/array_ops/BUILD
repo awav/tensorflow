@@ -1,10 +1,11 @@
 # Tests of TensorFlow array ops kernels written using the Python API.
 
 load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load("//tensorflow/core/platform:build_config_root.bzl", "tf_additional_xla_deps_py")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cuda_py_test(
@@ -57,21 +58,24 @@ cuda_py_test(
     name = "gather_op_test",
     size = "medium",
     srcs = ["gather_op_test.py"],
-    tags = ["no_cuda_asan"],  # b/173806733
+    shard_count = 3,
     deps = [
+        "@absl_py//absl/testing:parameterized",
+        "//third_party/py/numpy",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:gradients",
-        "//third_party/py/numpy",
-        "@absl_py//absl/testing:parameterized",
-    ],
+        "//tensorflow/python/eager:def_function",
+        "//tensorflow/python/framework:tensor_spec",
+    ] + tf_additional_xla_deps_py(),
 )
 
 cuda_py_test(
     name = "scatter_nd_ops_test",
     size = "medium",
     srcs = ["scatter_nd_ops_test.py"],
+    shard_count = 2,
     tags = ["noasan"],  # http://b/32635055
     deps = [
         "//tensorflow/python:array_ops",

@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/task/tensor_desc.h"
+#include "tensorflow/lite/delegates/gpu/common/tasks/special/conv_pointwise.h"
 #include "tensorflow/lite/delegates/gpu/common/tasks/special/depthwise_conv_plus_1x1_conv.h"
 #include "tensorflow/lite/delegates/gpu/common/tasks/special/fc_fc_add.h"
 #include "tensorflow/lite/delegates/gpu/common/tensor.h"
@@ -29,8 +30,8 @@ namespace tflite {
 namespace gpu {
 namespace {
 absl::Status TryDepthwiseConvPlus1x1Conv(
-    CalculationsPrecision precision, const GraphFloat32& graph,
-    NodeId first_node_id,
+    const GpuInfo& gpu_info, CalculationsPrecision precision,
+    const GraphFloat32& graph, NodeId first_node_id,
     const std::map<ValueId, TensorDescriptor>& tensor_descriptors,
     std::set<NodeId>* consumed_nodes, GPUOperationsSubgraph* gpu_subgraph) {
   auto* dw_node = graph.GetNode(first_node_id);
@@ -50,13 +51,31 @@ absl::Status TryDepthwiseConvPlus1x1Conv(
   if (consumers.size() != 1) {
     return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
   }
-  auto* conv_node = consumers[0];
-  if (conv_node == nullptr) {
+
+  Node* next_node;
+  next_node = consumers[0];
+  if (next_node == nullptr) {
     return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
   }
-  if (consumed_nodes->find(conv_node->id) != consumed_nodes->end()) {
+  if (consumed_nodes->find(next_node->id) != consumed_nodes->end()) {
     return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
   }
+  Node* relu_node = nullptr;
+  ReLUAttributes relu_attributes;
+  if (OperationTypeFromString(next_node->operation.type) ==
+      OperationType::RELU) {
+    relu_node = next_node;
+    auto relu_outputs = graph.FindOutputs(relu_node->id);
+    consumers = graph.FindConsumers(relu_outputs[0]->id);
+    if (consumers.size() != 1) {
+      return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
+    }
+    relu_attributes =
+        absl::any_cast<ReLUAttributes>(relu_node->operation.attributes);
+    next_node = consumers[0];
+  }
+
+  auto* conv_node = next_node;
   if (OperationTypeFromString(conv_node->operation.type) !=
       OperationType::CONVOLUTION_2D) {
     return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
@@ -79,14 +98,20 @@ absl::Status TryDepthwiseConvPlus1x1Conv(
   if (it != tensor_descriptors.end()) {
     op_def.dst_tensors.push_back(it->second);
   }
-  if (!IsDepthwiseConvPlus1x1ConvSupported(op_def, dw_attr, conv_attr)) {
+  if (!IsDepthwiseConvPlus1x1ConvSupported(op_def, gpu_info, dw_attr,
+                                           conv_attr)) {
     return absl::NotFoundError("DepthwiseConvPlus1x1Conv not suitable.");
   }
   std::unique_ptr<GPUOperation>* gpu_op =
       InitSingleOpSubgraph(dw_inputs, conv_outputs, gpu_subgraph);
-  auto operation = CreateDepthwiseConvPlus1x1Conv(op_def, dw_attr, conv_attr);
+  ReLUAttributes* relu_attr_ptr = relu_node ? &relu_attributes : nullptr;
+  auto operation = CreateDepthwiseConvPlus1x1Conv(op_def, gpu_info, dw_attr,
+                                                  conv_attr, relu_attr_ptr);
   *gpu_op = absl::make_unique<GPUOperation>(std::move(operation));
   consumed_nodes->insert(dw_node->id);
+  if (relu_node) {
+    consumed_nodes->insert(relu_node->id);
+  }
   consumed_nodes->insert(conv_node->id);
   return absl::OkStatus();
 }
@@ -101,10 +126,13 @@ absl::Status TryFCFCAdd(
   if (fc0_node == nullptr) {
     return absl::NotFoundError("FCFCAdd not suitable.");
   }
-  if (OperationTypeFromString(fc0_node->operation.type) !=
-      OperationType::FULLY_CONNECTED) {
+  auto first_op_type = OperationTypeFromString(fc0_node->operation.type);
+  if (first_op_type != OperationType::FULLY_CONNECTED &&
+      first_op_type != OperationType::FULLY_CONNECTED_INT8) {
     return absl::NotFoundError("FCFCAdd not suitable.");
   }
+  const bool first_quantized =
+      first_op_type == OperationType::FULLY_CONNECTED_INT8;
   auto fc0_inputs = graph.FindInputs(fc0_node->id);
   if (fc0_inputs.size() != 1) {
     return absl::NotFoundError("FCFCAdd not suitable.");
@@ -133,8 +161,16 @@ absl::Status TryFCFCAdd(
   if (fc1_node == nullptr) {
     return absl::NotFoundError("FCFCAdd not suitable.");
   }
-  if (OperationTypeFromString(fc1_node->operation.type) !=
-      OperationType::FULLY_CONNECTED) {
+  auto second_op_type = OperationTypeFromString(fc1_node->operation.type);
+  if (second_op_type != OperationType::FULLY_CONNECTED &&
+      second_op_type != OperationType::FULLY_CONNECTED_INT8) {
+    return absl::NotFoundError("FCFCAdd not suitable.");
+  }
+  const bool second_quantized =
+      second_op_type == OperationType::FULLY_CONNECTED_INT8;
+  const bool both_quantized = first_quantized && second_quantized;
+  const bool both_not_quantized = !first_quantized && !second_quantized;
+  if (!(both_quantized || both_not_quantized)) {
     return absl::NotFoundError("FCFCAdd not suitable.");
   }
   if (consumed_nodes->find(fc1_node->id) != consumed_nodes->end()) {
@@ -142,13 +178,6 @@ absl::Status TryFCFCAdd(
   }
   auto fc1_inputs = graph.FindInputs(fc1_node->id);
   if (fc1_inputs.size() != 1) {
-    return absl::NotFoundError("FCFCAdd not suitable.");
-  }
-  auto fc0_attr =
-      absl::any_cast<FullyConnectedAttributes>(fc0_node->operation.attributes);
-  auto fc1_attr =
-      absl::any_cast<FullyConnectedAttributes>(fc1_node->operation.attributes);
-  if (fc0_attr.weights.shape.o != fc1_attr.weights.shape.o) {
     return absl::NotFoundError("FCFCAdd not suitable.");
   }
   auto add_outputs = graph.FindOutputs(add_node->id);
@@ -173,7 +202,27 @@ absl::Status TryFCFCAdd(
   }
   std::unique_ptr<GPUOperation>* gpu_op =
       InitSingleOpSubgraph(fc0_inputs, add_outputs, gpu_subgraph);
-  FCFCAdd fc = CreateFCFCAdd(gpu_info, op_def, fc0_attr, fc1_attr);
+  FCFCAdd fc;
+  if (both_not_quantized) {
+    auto fc0_attr = absl::any_cast<FullyConnectedAttributes>(
+        fc0_node->operation.attributes);
+    auto fc1_attr = absl::any_cast<FullyConnectedAttributes>(
+        fc1_node->operation.attributes);
+    if (fc0_attr.weights.shape.o != fc1_attr.weights.shape.o) {
+      return absl::NotFoundError("FCFCAdd not suitable.");
+    }
+    fc = CreateFCFCAdd(gpu_info, op_def, fc0_attr, fc1_attr);
+  } else {
+    // both_quantized
+    auto fc0_attr = absl::any_cast<FullyConnectedInt8Attributes>(
+        fc0_node->operation.attributes);
+    auto fc1_attr = absl::any_cast<FullyConnectedInt8Attributes>(
+        fc1_node->operation.attributes);
+    if (fc0_attr.weights.shape.o != fc1_attr.weights.shape.o) {
+      return absl::NotFoundError("FCFCAdd not suitable.");
+    }
+    fc = CreateFCFCAdd(gpu_info, op_def, fc0_attr, fc1_attr);
+  }
   *gpu_op = absl::make_unique<FCFCAdd>(std::move(fc));
   consumed_nodes->insert(fc0_node->id);
   consumed_nodes->insert(fc1_node->id);
@@ -188,8 +237,9 @@ absl::Status GPUSubgraphFromGraph(
     const std::map<ValueId, TensorDescriptor>& tensor_descriptors,
     std::set<NodeId>* consumed_nodes, GPUOperationsSubgraph* gpu_subgraph,
     std::string* name) {
-  if ((gpu_info.IsAdreno() || gpu_info.IsNvidia()) &&
-      TryDepthwiseConvPlus1x1Conv(precision, graph, first_node_id,
+  if ((gpu_info.IsAdreno() || gpu_info.IsNvidia() || gpu_info.IsMali() ||
+       (gpu_info.IsApple() && gpu_info.apple_info.IsBionic())) &&
+      TryDepthwiseConvPlus1x1Conv(gpu_info, precision, graph, first_node_id,
                                   tensor_descriptors, consumed_nodes,
                                   gpu_subgraph)
           .ok()) {
@@ -201,6 +251,12 @@ absl::Status GPUSubgraphFromGraph(
                  consumed_nodes, gpu_subgraph)
           .ok()) {
     *name = "fully_connected_x2_and_add";
+    return absl::OkStatus();
+  }
+  if (TryFusedPointwiseConv(graph, first_node_id, precision, tensor_descriptors,
+                            consumed_nodes, gpu_subgraph)
+          .ok()) {
+    *name = "slice_mul_mean_concat";
     return absl::OkStatus();
   }
   return absl::NotFoundError("No special combination.");

@@ -35,6 +35,8 @@ namespace {
 
 class SortingTest : public GpuCodegenTest {
  protected:
+  SortingTest() {}
+
   HloModuleConfig ConfigWithoutLayoutAssignment() {
     HloModuleConfig config;
     auto debug_options = HloTestBase::GetDebugOptionsForTest();

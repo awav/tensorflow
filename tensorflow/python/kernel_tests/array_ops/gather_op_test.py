@@ -14,22 +14,22 @@
 # ==============================================================================
 """Tests for tensorflow.ops.tf.gather."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gradient_checker_v2
 from tensorflow.python.ops import gradients_impl
+from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
@@ -59,7 +59,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
     return data
 
   def testScalar1D(self):
-    with self.cached_session(use_gpu=True):
+    with self.cached_session():
       data = np.array([0, 1, 2, 3, 7, 5])
       for dtype in _TEST_TYPES:
         for indices in 4, [1, 2, 2, 4, 5]:
@@ -74,7 +74,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
             self.assertEqual(np_val.shape, gather_t.get_shape())
 
   def testScalar2D(self):
-    with self.session(use_gpu=True):
+    with self.session():
       data = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8],
                        [9, 10, 11], [12, 13, 14]])
       for dtype in _TEST_TYPES:
@@ -90,7 +90,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
             self.assertEqual(expected_shape, gather_t.get_shape())
 
   def testSimpleTwoD32(self):
-    with self.session(use_gpu=True):
+    with self.session():
       data = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8],
                        [9, 10, 11], [12, 13, 14]])
       for dtype in _TEST_TYPES:
@@ -304,7 +304,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
     # On GPU the bad indices do not raise error but fetch 0 values
     if not test.is_gpu_available():
       return
-    with self.session(use_gpu=True):
+    with self.session():
       params = [[0, 1, 2], [3, 4, 5]]
       with self.assertRaisesOpError(r"indices\[0,0\] = 7 is not in \[0, 2\)"):
         array_ops.gather(params, [[7]], axis=0).eval()
@@ -312,15 +312,42 @@ class GatherTest(test.TestCase, parameterized.TestCase):
         array_ops.gather(params, [[7]], axis=1).eval()
 
   def testBadAxis(self):
+
+    @def_function.function(autograph=False, jit_compile=False)
+    def gather(x, indices, axis):
+      return array_ops.gather(x, indices, axis=axis)
+
+    @def_function.function(
+        autograph=False,
+        jit_compile=False,
+        input_signature=[
+            tensor_spec.TensorSpec(shape=None, dtype=dtypes.int32)
+        ] * 3)
+    def gather_shape_inf_disabled(x, indices, axis):
+      return array_ops.gather(x, indices, axis=axis)
+
+    @def_function.function(
+        autograph=False,
+        jit_compile=True,
+        input_signature=[
+            tensor_spec.TensorSpec(shape=None, dtype=dtypes.int32)
+        ] * 3)
+    def xla_gather(x, indices, axis):
+      return array_ops.gather(x, indices, axis=axis)
+
     params = [0, 1, 2]
     indices = 0
+    functions = [("array_ops.gather", array_ops.gather), ("gather", gather),
+                 ("gather_shape_inf_disabled", gather_shape_inf_disabled),
+                 ("xla_gather", xla_gather)]
     for bad_axis in (1, 2, -2):
-      # Shape inference can validate axis for known params rank.
-      with self.subTest(bad_axis=bad_axis):
-        with self.assertRaisesRegex(
-            (ValueError, errors.InvalidArgumentError),
-            "Shape must be at least rank .* but is rank 1"):
-          array_ops.gather(params, indices, axis=bad_axis)
+      for fn_name, fn in functions:
+        # Shape inference can validate axis for known params rank.
+        with self.subTest(bad_axis=bad_axis, msg=fn_name, fn=fn):
+          with self.assertRaisesRegex(
+              (ValueError, errors.InvalidArgumentError),
+              "Shape must be at least rank .* but is rank 1"):
+            fn(params, indices, axis=bad_axis)
 
   def testEmptySlices(self):
     for dtype in _TEST_TYPES:
@@ -448,6 +475,32 @@ class GatherTest(test.TestCase, parameterized.TestCase):
                     axis=None):
     result = array_ops.gather(params, indices, axis=axis, batch_dims=batch_dims)
     self.assertAllEqual(expected, result)
+
+    # Test gradients
+    f64_params = math_ops.cast(params, dtypes.float64)
+    def gather(params):
+      return array_ops.gather(params, indices, axis=axis, batch_dims=batch_dims)
+    theoretical, numerical = gradient_checker_v2.compute_gradient(
+        gather, [f64_params])
+    self.assertAllClose(theoretical, numerical)
+
+    # Test gradients when input shapes are unknown
+    @def_function.function(input_signature=[
+        tensor_spec.TensorSpec(shape=None, dtype=dtypes.float64),
+        tensor_spec.TensorSpec(shape=None, dtype=dtypes.int32)
+    ])
+    def gather_unknown_shapes(params, indices):
+      return array_ops.gather(params, indices, axis=axis, batch_dims=batch_dims)
+    if batch_dims is None or batch_dims >= 0:
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          lambda p: gather_unknown_shapes(p, indices), [f64_params])
+      self.assertAllClose(theoretical, numerical)
+    else:
+      with self.assertRaisesRegex(
+          ValueError,
+          "Currently, it is unsupported to take the gradient of tf.gather"):
+        gradient_checker_v2.compute_gradient(
+            lambda p: gather_unknown_shapes(p, indices), [f64_params])
 
     # Test the gradients shape.
     with backprop.GradientTape() as tape:

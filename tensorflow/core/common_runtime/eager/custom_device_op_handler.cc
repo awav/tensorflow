@@ -78,11 +78,11 @@ Status CustomDeviceOpHandler::Execute(ImmediateExecutionOperation* op,
         tensorflow::CustomDeviceTensorHandle* previous =
             tensorflow::down_cast<tensorflow::CustomDeviceTensorHandle*>(
                 inputs[i]);
-        tensorflow::ImmediateExecutionTensorHandle* new_tesnor;
+        tensorflow::ImmediateExecutionTensorHandle* new_tensor;
         TF_RETURN_IF_ERROR(previous->device()->CopyTensorFromDevice(
-            previous, target_device, &new_tesnor));
-        Status s = op->SetInput(i, new_tesnor);
-        new_tesnor->Unref();
+            previous, target_device, &new_tensor));
+        Status s = op->SetInput(i, new_tensor);
+        new_tensor->Unref();
         TF_RETURN_IF_ERROR(s);
       }
     }
@@ -93,6 +93,39 @@ Status CustomDeviceOpHandler::Execute(ImmediateExecutionOperation* op,
           reinterpret_cast<tensorflow::AbstractTensorHandle**>(retvals),
           *num_retvals),
       num_retvals);
+}
+
+ImmediateExecutionTensorHandle* CustomDeviceOpHandler::CopyTensorHandleToDevice(
+    ImmediateExecutionContext* context, ImmediateExecutionTensorHandle* handle,
+    const char* device_name, Status* status) {
+  *status = Status::OK();
+  ImmediateExecutionTensorHandle* result = nullptr;
+  tensorflow::CustomDevice* dev;
+
+  if (FindCustomDeviceFromName(device_name, &dev)) {
+    *status = dev->CopyTensorToDevice(handle, &result);
+    if (status->ok()) {
+      return result;
+    }
+    return nullptr;
+  }
+
+  // Target device is regular device. Check if the input is on custom
+  // device
+  const char* handle_device_name = handle->DeviceName(status);
+  if (!status->ok()) {
+    return nullptr;
+  }
+  if (FindCustomDeviceFromName(handle_device_name, &dev)) {
+    *status = dev->CopyTensorFromDevice(handle, device_name, &result);
+    if (status->ok()) {
+      return result;
+    }
+    return nullptr;
+  }
+
+  // Both source and target device are regular device.
+  return context->CopyTensorHandleToDevice(handle, device_name, status);
 }
 
 Status CustomDeviceOpHandler::MaybePinToCustomDevice(

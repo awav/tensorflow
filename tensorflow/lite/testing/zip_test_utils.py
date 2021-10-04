@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Utils for make_zip tests."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import itertools
 import operator
@@ -75,12 +71,13 @@ RANDOM_SEED = 342
 TF_TYPE_INFO = {
     tf.float32: (np.float32, "FLOAT"),
     tf.float16: (np.float16, "FLOAT"),
-    tf.float64: (np.double, "FLOAT64"),
+    tf.float64: (np.float64, "FLOAT64"),
     tf.int32: (np.int32, "INT32"),
+    tf.uint32: (np.uint32, "UINT32"),
     tf.uint8: (np.uint8, "QUANTIZED_UINT8"),
     tf.int16: (np.int16, "QUANTIZED_INT16"),
     tf.int64: (np.int64, "INT64"),
-    tf.bool: (np.bool, "BOOL"),
+    tf.bool: (np.bool_, "BOOL"),
     tf.string: (np.string_, "STRING"),
 }
 
@@ -115,7 +112,7 @@ def create_tensor_data(dtype, shape, min_value=-100, max_value=100):
     real = (max_value - min_value) * np.random.random_sample(shape) + min_value
     imag = (max_value - min_value) * np.random.random_sample(shape) + min_value
     value = real + imag * 1j
-  elif dtype in (tf.int32, tf.uint8, tf.int64, tf.int16):
+  elif dtype in (tf.uint32, tf.int32, tf.uint8, tf.int64, tf.int16):
     value = np.random.randint(min_value, max_value + 1, shape)
   elif dtype == tf.bool:
     value = np.random.choice([True, False], size=shape)
@@ -327,6 +324,16 @@ def make_zip_of_tests(options,
 
   processed_labels = set()
 
+  if options.make_tf_ptq_tests:
+    # For cases with fully_quantize is True, also generates a case with
+    # fully_quantize is False. Marks these cases as suitable for PTQ tests.
+    parameter_count = 0
+    for parameters in test_parameters:
+      if True in parameters.get("fully_quantize", []):
+        parameters.update({"fully_quantize": [True, False], "tf_ptq": [True]})
+        parameter_count += functools.reduce(
+            operator.mul, [len(values) for values in parameters.values()])
+
   if options.make_edgetpu_tests:
     extra_toco_options.inference_input_type = tf.uint8
     extra_toco_options.inference_output_type = tf.uint8
@@ -367,6 +374,9 @@ def make_zip_of_tests(options,
       processed_labels.add(label)
 
       param_dict = dict(zip(keys, curr))
+
+      if options.make_tf_ptq_tests and not param_dict.get("tf_ptq", False):
+        continue
 
       if options.make_edgetpu_tests and (not param_dict.get(
           "fully_quantize", False) or param_dict.get("quant_16x8", False)):
@@ -478,8 +488,8 @@ def make_zip_of_tests(options,
         report["converter_log"] = toco_log
 
         if options.save_graphdefs:
-          archive.writestr(zip_path_label + ".pbtxt",
-                           text_format.MessageToString(graph_def),
+          zipinfo = zipfile.ZipInfo(zip_path_label + ".pbtxt")
+          archive.writestr(zipinfo, text_format.MessageToString(graph_def),
                            zipfile.ZIP_DEFLATED)
 
         if tflite_model_binary:
@@ -487,19 +497,20 @@ def make_zip_of_tests(options,
             # Set proper min max values according to input dtype.
             baseline_inputs, baseline_outputs = generate_inputs_outputs(
                 tflite_model_binary, min_value=0, max_value=255)
-          archive.writestr(zip_path_label + ".bin", tflite_model_binary,
-                           zipfile.ZIP_DEFLATED)
+          zipinfo = zipfile.ZipInfo(zip_path_label + ".bin")
+          archive.writestr(zipinfo, tflite_model_binary, zipfile.ZIP_DEFLATED)
           example = {"inputs": baseline_inputs, "outputs": baseline_outputs}
 
           example_fp = StringIO()
           write_examples(example_fp, [example])
-          archive.writestr(zip_path_label + ".inputs", example_fp.getvalue(),
-                           zipfile.ZIP_DEFLATED)
+          zipinfo = zipfile.ZipInfo(zip_path_label + ".inputs")
+          archive.writestr(zipinfo, example_fp.getvalue(), zipfile.ZIP_DEFLATED)
 
           example_fp2 = StringIO()
           write_test_cases(example_fp2, zip_path_label + ".bin", [example])
-          archive.writestr(zip_path_label + "_tests.txt",
-                           example_fp2.getvalue(), zipfile.ZIP_DEFLATED)
+          zipinfo = zipfile.ZipInfo(zip_path_label + "_tests.txt")
+          archive.writestr(zipinfo, example_fp2.getvalue(),
+                           zipfile.ZIP_DEFLATED)
 
           zip_manifest_label = zip_path_label + " " + label
           if zip_path_label == label:
@@ -529,16 +540,18 @@ def make_zip_of_tests(options,
     report_io = StringIO()
     report_lib.make_report_table(report_io, zip_path, convert_report)
     if options.multi_gen_state:
-      archive.writestr("report_" + options.multi_gen_state.test_name + ".html",
-                       report_io.getvalue())
+      zipinfo = zipfile.ZipInfo("report_" + options.multi_gen_state.test_name +
+                                ".html")
+      archive.writestr(zipinfo, report_io.getvalue())
     else:
-      archive.writestr("report.html", report_io.getvalue())
+      zipinfo = zipfile.ZipInfo("report.html")
+      archive.writestr(zipinfo, report_io.getvalue())
 
   if options.multi_gen_state:
     options.multi_gen_state.zip_manifest.extend(zip_manifest)
   else:
-    archive.writestr("manifest.txt", "".join(zip_manifest),
-                     zipfile.ZIP_DEFLATED)
+    zipinfo = zipfile.ZipInfo("manifest.txt")
+    archive.writestr(zipinfo, "".join(zip_manifest), zipfile.ZIP_DEFLATED)
 
   # Log statistics of what succeeded
   total_conversions = len(convert_report)
@@ -560,7 +573,8 @@ def make_zip_of_tests(options,
                         "TensorFlow fails in %d percent of the cases.") %
                        (zip_path, int(100 * tf_failures / parameter_count)))
 
-  if not options.make_edgetpu_tests and tf_failures != expected_tf_failures:
+  if tf_failures != expected_tf_failures and not (options.make_edgetpu_tests or
+                                                  options.make_tf_ptq_tests):
     raise RuntimeError(("Expected TF to fail %d times while generating '%s', "
                         "but that happened %d times") %
                        (expected_tf_failures, zip_path, tf_failures))

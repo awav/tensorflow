@@ -14,12 +14,9 @@
 # ==============================================================================
 """Generate some SavedModels for use by AOT compilation tests."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
+from absl import app
 from absl import flags
 
 from tensorflow.python.eager import def_function
@@ -27,7 +24,6 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import tensor_spec
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.platform import app
 from tensorflow.python.saved_model import save
 from tensorflow.python.training.tracking import tracking
 

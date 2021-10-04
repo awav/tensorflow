@@ -30,10 +30,6 @@ profiling. Before enabling customized profiling, set the callback flag
 "profile_batches=[]" to disable automatic sampled profiling.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import threading
 
@@ -179,7 +175,7 @@ def start_server(port):
 
   Args:
     port: port profiler server listens to.
-  Example usage: ```python tf.profiler.experimental.server.start('6009') # do
+  Example usage: ```python tf.profiler.experimental.server.start(6009) # do
     your training here.
   """
   _pywrap_profiler.start_server(port)

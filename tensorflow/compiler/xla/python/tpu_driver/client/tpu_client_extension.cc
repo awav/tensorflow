@@ -19,21 +19,26 @@ limitations under the License.
 #include "tensorflow/compiler/xla/python/python_ref_manager.h"
 #include "tensorflow/compiler/xla/python/tpu_driver/client/tpu_client.h"
 #include "tensorflow/compiler/xla/python/types.h"
+#include "tensorflow/python/lib/core/bfloat16.h"
 
 namespace xla {
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(tpu_client_extension, m) {
+  CHECK(tensorflow::RegisterNumpyBfloat16());
+
   py::class_<PyTpuClient, std::shared_ptr<PyTpuClient>>(m, "TpuClient")
       .def_static("Get", &PyTpuClient::Get, py::arg("worker"))
       .def_property_readonly("platform", &PyTpuClient::platform_name)
+      .def_property_readonly("platform_version", &PyTpuClient::platform_version)
       .def("device_count", &PyTpuClient::device_count)
       .def("local_device_count", &PyTpuClient::local_device_count)
       .def("devices", &PyTpuClient::devices)
       .def("local_devices", &PyTpuClient::local_devices)
-      .def("host_id", &PyTpuClient::task_id)
-      .def("task_id", &PyTpuClient::task_id)
+      .def("process_index", &PyTpuClient::process_index)
+      .def("host_id", &PyTpuClient::process_index)
+      .def("task_id", &PyTpuClient::process_index)
       .def("get_default_device_assignment",
            [](PyTpuClient* client, int num_replicas, int num_partitions)
                -> StatusOr<
@@ -140,7 +145,7 @@ PYBIND11_MODULE(tpu_client_extension, m) {
           py::arg("computation"),
           py::arg("compile_options") = CompileOptions());
 
-  py::class_<PyTpuBuffer>(m, "PyTpuBuffer")
+  py::class_<PyTpuBuffer>(m, "PyTpuBuffer", py::dynamic_attr())
       .def_property_readonly("client", &PyTpuBuffer::client)
       .def("copy_to_device",
            [](PyTpuBuffer* buffer, std::shared_ptr<PjRtDevice> dst_device) {
@@ -168,8 +173,16 @@ PYBIND11_MODULE(tpu_client_extension, m) {
              }
              return LiteralToPython(std::move(literal));
            })
-      .def("shape", &PyTpuBuffer::on_host_shape)
+      .def_property_readonly("shape",
+                             [](const PyTpuBuffer& buffer) {
+                               return buffer.on_host_shape().dimensions();
+                             })
       .def("xla_shape", &PyTpuBuffer::on_host_shape)
+      .def_property_readonly(
+          "dtype",
+          [](PyTpuBuffer* buffer) {
+            return PrimitiveTypeToDtype(buffer->on_host_shape().element_type());
+          })
       .def("device", &PyTpuBuffer::device)
       .def("platform", &PyTpuBuffer::platform_name)
       .def("is_deleted",
@@ -202,11 +215,17 @@ PYBIND11_MODULE(tpu_client_extension, m) {
            py::call_guard<py::gil_scoped_release>(), py::arg("arguments"))
       // TODO(phawkins): implement traceback support.
       .def_property_readonly("traceback",
+                             [](PyTpuExecutable*) { return py::none(); })
+      .def_property_readonly("fingerprint",
                              [](PyTpuExecutable*) { return py::none(); });
 
   py::class_<TpuDevice, PjRtDevice, std::shared_ptr<TpuDevice>>(m, "TpuDevice")
       .def_property_readonly("coords", &TpuDevice::coords)
       .def_property_readonly("core_on_chip", &TpuDevice::core_on_chip)
+      .def_property_readonly("client",
+                             [](TpuDevice* device) {
+                               return device->tpu_client()->shared_from_this();
+                             })
       // TODO(skye): this is a horrible hack because falling back to
       // PjRtDevice::platform_name() segfaults, due to TpuDevice::client_ being
       // uninitialized. This can be removed when PyTpuClient subclasses
@@ -216,8 +235,9 @@ PYBIND11_MODULE(tpu_client_extension, m) {
           [](const TpuDevice& device) -> std::string { return kTpuPlatform; })
       .def("__repr__", [](const TpuDevice& device) {
         return absl::StrFormat(
-            "TpuDevice(id=%i, host_id=%i, coords=(%i,%i,%i), core_on_chip=%i)",
-            device.id(), device.task_id(), device.coords()[0],
+            "TpuDevice(id=%i, process_index=%i, coords=(%i,%i,%i), "
+            "core_on_chip=%i)",
+            device.id(), device.process_index(), device.coords()[0],
             device.coords()[1], device.coords()[2], device.core_on_chip());
       });
 }  // NOLINT(readability/fn_size)

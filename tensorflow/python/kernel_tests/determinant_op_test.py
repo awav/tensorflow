@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.tf.MatrixDeterminant."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.client import session
@@ -154,7 +150,7 @@ class DeterminantOpTest(test.TestCase):
 
   @test_util.run_v1_only("b/120545219")
   def testConcurrentExecutesWithoutError(self):
-    with self.session(use_gpu=True) as sess:
+    with self.session():
       matrix1 = random_ops.random_normal([5, 5], seed=42)
       matrix2 = random_ops.random_normal([5, 5], seed=42)
       det1 = linalg_ops.matrix_determinant(matrix1)

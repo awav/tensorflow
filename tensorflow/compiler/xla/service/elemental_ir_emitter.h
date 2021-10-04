@@ -57,6 +57,12 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
   llvm::Module* module() { return module_; }
 
  protected:
+  virtual llvm_ir::IrArray::Index GetSourceIndexOfBitcast(
+      const llvm_ir::IrArray::Index& index, const HloInstruction* hlo) {
+    return index.SourceIndexOfBitcast(hlo->shape(), hlo->operand(0)->shape(),
+                                      b_);
+  }
+
   virtual StatusOr<llvm::Value*> EmitFloatBinaryOp(const HloInstruction* op,
                                                    llvm::Value* lhs_value,
                                                    llvm::Value* rhs_value);
@@ -95,6 +101,10 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
   llvm::Value* EmitIntegerPow(llvm::Value* lhs, llvm::Value* rhs,
                               bool is_signed);
 
+  virtual StatusOr<llvm::Value*> EmitPredBinaryOp(const HloInstruction* op,
+                                                  llvm::Value* lhs_value,
+                                                  llvm::Value* rhs_value);
+
   virtual StatusOr<llvm::Value*> EmitIntegerBinaryOp(const HloInstruction* op,
                                                      llvm::Value* lhs_value,
                                                      llvm::Value* rhs_value,
@@ -105,10 +115,12 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
                                                      llvm::Value* rhs_value);
 
   virtual llvm::Value* EmitFloatMax(llvm::Value* lhs_value,
-                                    llvm::Value* rhs_value);
+                                    llvm::Value* rhs_value,
+                                    absl::string_view name);
 
   virtual llvm::Value* EmitFloatMin(llvm::Value* lhs_value,
-                                    llvm::Value* rhs_value);
+                                    llvm::Value* rhs_value,
+                                    absl::string_view name);
 
   llvm::Value* EmitIntegralMax(llvm::Value* lhs_value, llvm::Value* rhs_value,
                                bool is_signed);
@@ -117,7 +129,8 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
                                bool is_signed);
 
   virtual StatusOr<llvm::Value*> EmitAtan2(PrimitiveType prim_type,
-                                           llvm::Value* lhs, llvm::Value* rhs);
+                                           llvm::Value* lhs, llvm::Value* rhs,
+                                           absl::string_view name);
 
   virtual StatusOr<llvm::Value*> EmitLog(PrimitiveType prim_type,
                                          llvm::Value* value);
@@ -141,13 +154,15 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
                                          llvm::Value* value);
 
   virtual StatusOr<llvm::Value*> EmitExp(PrimitiveType prim_type,
-                                         llvm::Value* value);
+                                         llvm::Value* value,
+                                         absl::string_view name);
 
   virtual StatusOr<llvm::Value*> EmitExpm1(PrimitiveType prim_type,
                                            llvm::Value* value);
 
   virtual StatusOr<llvm::Value*> EmitPow(PrimitiveType prim_type,
-                                         llvm::Value* lhs, llvm::Value* rhs);
+                                         llvm::Value* lhs, llvm::Value* rhs,
+                                         absl::string_view name);
 
   virtual StatusOr<llvm::Value*> EmitTanh(PrimitiveType prim_type,
                                           llvm::Value* value);
@@ -166,6 +181,25 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
                                                     llvm::Value* operand_value);
   virtual StatusOr<llvm::Value*> EmitRsqrtComplexAbs(
       PrimitiveType prim_type, llvm::Value* operand_value);
+
+  virtual StatusOr<llvm::Value*> EmitComplexAdd(const HloInstruction* op,
+                                                llvm::Value* lhs_value,
+                                                llvm::Value* rhs_value);
+
+  virtual StatusOr<llvm::Value*> EmitComplexSubtract(const HloInstruction* op,
+                                                     llvm::Value* lhs_value,
+                                                     llvm::Value* rhs_value);
+
+  virtual StatusOr<llvm::Value*> EmitComplexMultiply(const HloInstruction* op,
+                                                     llvm::Value* lhs_value,
+                                                     llvm::Value* rhs_value);
+
+  virtual StatusOr<llvm::Value*> EmitComplexDivide(const HloInstruction* op,
+                                                   llvm::Value* lhs_value,
+                                                   llvm::Value* rhs_value);
+
+  virtual StatusOr<llvm::Value*> EmitComplexLog(const HloInstruction* op,
+                                                llvm::Value* operand_value);
 
   virtual StatusOr<llvm::Value*> EmitComplexSqrt(const HloInstruction* op,
                                                  PrimitiveType prim_type,

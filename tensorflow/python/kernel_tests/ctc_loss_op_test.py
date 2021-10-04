@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for tensorflow.ctc_ops.ctc_decoder_ops."""
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Tests for tensorflow.ctc_ops.ctc_loss_op."""
 
 from absl.testing import parameterized
 import numpy as np

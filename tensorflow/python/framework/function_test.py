@@ -14,10 +14,6 @@
 # =============================================================================
 """Tests for functions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import re
 import time
 
@@ -422,7 +418,9 @@ class FunctionTest(test.TestCase):
       with ops.control_dependencies([z]):
         return x * 2
 
-    with ops.Graph().as_default(), self.cached_session():
+    # @function.Defun creates a non-partitioned function.  If we place this on
+    # the GPU then the inner `Print` op cannot be run.
+    with ops.Graph().as_default(), self.cached_session(use_gpu=False):
       z = Foo(constant_op.constant(3.0))
       self.assertAllEqual(z, 6.0)
 
@@ -460,7 +458,7 @@ class FunctionTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testWhileLoopCallsFunc(self):
-    with self.session(use_gpu=True) as sess:
+    with self.session():
 
       @function.Defun(dtypes.float32)
       def Times2(x):
@@ -589,14 +587,14 @@ class FunctionTest(test.TestCase):
           return constant_op.constant([1])
 
         _ = KwArgs.definition
-      with self.assertRaisesRegex(ValueError, "specified input types"):
+      with self.assertRaisesRegex(ValueError, "tf.function input types"):
 
         @function.Defun(dtypes.float32)
         def PlusMinusV2(a, b):
           return a + b, b - a
 
         _ = PlusMinusV2.definition
-      with self.assertRaisesRegex(ValueError, "specified input types"):
+      with self.assertRaisesRegex(ValueError, "tf.function input types"):
 
         @function.Defun(dtypes.float32, dtypes.float32, dtypes.float32)
         def PlusMinusV3(a, b):
@@ -624,20 +622,20 @@ class FunctionTest(test.TestCase):
       # pylint: disable=too-many-function-args
       # pylint: disable=unexpected-keyword-arg
       # pylint: disable=no-value-for-parameter
-      with self.assertRaisesRegex(ValueError, "arguments: 0"):
+      with self.assertRaisesRegex(ValueError, "Expected 0"):
         _ = Const(1)
-      with self.assertRaisesRegex(ValueError, "arguments: 0"):
+      with self.assertRaisesRegex(ValueError, "Expected 0"):
         _ = Const(1, 2)
 
-      with self.assertRaisesRegex(ValueError, "arguments: 1"):
+      with self.assertRaisesRegex(ValueError, "Expected 1"):
         _ = PlusOne()
       _ = PlusOne(1)
-      with self.assertRaisesRegex(ValueError, "arguments: 1"):
+      with self.assertRaisesRegex(ValueError, "Expected 1"):
         _ = PlusOne(1, 2)
 
-      with self.assertRaisesRegex(ValueError, "arguments: 2"):
+      with self.assertRaisesRegex(ValueError, "Expected 2"):
         _ = PlusMinus()
-      with self.assertRaisesRegex(ValueError, "arguments: 2"):
+      with self.assertRaisesRegex(ValueError, "Expected 2"):
         _ = PlusMinus(1)
       _ = PlusMinus(1, 2)
 

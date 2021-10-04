@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.tf.BatchMatMul."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python import tf2
@@ -166,7 +162,7 @@ class BatchMatmulGradientTest(test.TestCase):
     def Loss(x, y):
       return math_ops.reduce_sum(math_ops.matmul(x, y, adjoint_a, adjoint_b))
 
-    with self.cached_session(use_gpu=True):
+    with self.cached_session():
       ((x_jacob_t, y_jacob_t),
        (x_jacob_n, y_jacob_n)) = gradient_checker_v2.compute_gradient(
            Loss, [x, y], delta=delta)

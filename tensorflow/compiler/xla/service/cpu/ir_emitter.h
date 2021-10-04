@@ -83,9 +83,9 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // emit_code_for_msan: whether emitted code should be compatible with msan.
   IrEmitter(mlir::MLIRContext* mlir_context, const HloModule& hlo_module,
             const BufferAssignment& assignment, llvm::Module* llvm_module,
-            std::unordered_map<const HloInstruction*, int64>
+            std::unordered_map<const HloInstruction*, int64_t>
                 instruction_to_profile_idx,
-            std::unordered_map<const HloComputation*, int64>
+            std::unordered_map<const HloComputation*, int64_t>
                 computation_to_profile_idx,
             const TargetMachineFeatures* target_machine,
             bool emit_code_for_msan);
@@ -209,7 +209,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   template <typename T>
   llvm::Value* GetProfileCounterCommon(
       const T& hlo,
-      const std::unordered_map<const T*, int64>& profile_index_map);
+      const std::unordered_map<const T*, int64_t>& profile_index_map);
 
   // Gets the IR Value emitted previously for the given hlo.
   //
@@ -332,7 +332,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // most-minor dimension).
   llvm::Constant* CreateInitializerForConstantArray(
       const std::vector<llvm::Constant*>& array_elements, const Shape& shape,
-      int64 dimension_index);
+      int64_t dimension_index);
 
   // Tries to codegen a reduction operation using vectorized instructions.
   // Returns true if successful, and false on failure.  On failure, sets
@@ -346,7 +346,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   StatusOr<bool> EmitVectorizedReduce(HloInstruction* reduce,
                                       HloInstruction* arg,
                                       HloInstruction* init_value,
-                                      absl::Span<const int64> dimensions,
+                                      absl::Span<const int64_t> dimensions,
                                       HloComputation* function,
                                       string* failure_reason);
 
@@ -379,7 +379,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // "store_address".
   void EmitShardedVectorStore(llvm::Value* store_address,
                               const ShardedVector& value_to_store,
-                              const int alignment,
+                              llvm::Align alignment,
                               const llvm_ir::IrArray& containing_array);
 
   using ReductionGenerator = std ::function<llvm::Value*(
@@ -398,8 +398,8 @@ class IrEmitter : public DfsHloVisitorWithDefault,
       const ReductionGenerator& reduction_generator,
       const llvm_ir::IrArray::Index& output_index,
       const ShardedVectorType& accumulator_type, HloInstruction* init_value,
-      HloInstruction* arg, absl::Span<const int64> dimensions,
-      unsigned element_alignment);
+      HloInstruction* arg, absl::Span<const int64_t> dimensions,
+      llvm::Align element_alignment);
 
   // Tries to emit a fast concatenate operation using memcpy.  Returns true if
   // successful, and false on failure.  On failure, sets "failure_reason" to a
@@ -411,13 +411,15 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Emits LLVM IR to transfer "element_count" elements of type "primitive_type"
   // from the address "source" to the address "target".
   void EmitTransferElements(llvm::Value* target, llvm::Value* source,
-                            int64 element_count, PrimitiveType primitive_type,
+                            int64_t element_count, PrimitiveType primitive_type,
                             const llvm_ir::IrArray& target_array,
                             const llvm_ir::IrArray& source_array);
 
   // Emits printing during the execution.
   llvm::Value* EmitPrintf(absl::string_view fmt,
                           absl::Span<llvm::Value* const> arguments);
+  llvm::Value* EmitPrintfToStderr(absl::string_view fmt,
+                                  absl::Span<llvm::Value* const> arguments);
 
   // Emits a call to a non-variadic function `func_name` with arguments
   // `arguments` assuming C calling convention.
@@ -462,15 +464,15 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Maps the buffer allocation slices for the parameters to the computation
   // being compiled to their parameter numbers.  Only relevant for thread local
   // computations.
-  absl::flat_hash_map<BufferAllocation::Index, int64>
+  absl::flat_hash_map<BufferAllocation::Index, int64_t>
       computation_parameter_allocations_;
 
   // Maps HLO instructions to their index into the profile counter array.
-  const std::unordered_map<const HloInstruction*, int64>
+  const std::unordered_map<const HloInstruction*, int64_t>
       instruction_to_profile_idx_;
 
   // Maps HLO computations to their index into the profile counter array.
-  const std::unordered_map<const HloComputation*, int64>
+  const std::unordered_map<const HloComputation*, int64_t>
       computation_to_profile_idx_;
 
   // Maps HLOs to Values emitted for them.
@@ -478,9 +480,10 @@ class IrEmitter : public DfsHloVisitorWithDefault,
 
   llvm_ir::AliasAnalysis alias_analysis_;
 
-  // The number of root instruction outer dimensions used in parallel loop
-  // emission (ParallelLoopEmitter).
-  int64 num_dynamic_loop_bounds_ = 0;
+  // The number of outer dimensions of the root instruction's shape that
+  // will be partitioned when emitting parallel loops. (See
+  // ParallelLoopEmitter).
+  int64_t num_dynamic_loop_bounds_ = 0;
 
   // Returns whether the given instruction should be emitted as a parallel loop.
   bool ShouldEmitParallelLoopFor(const HloInstruction& op) const {
@@ -552,14 +555,15 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Given a load instruction and a shape or buffer size, annotate the load's
   // result with the alignment required by the shape or size.
   void AttachAlignmentMetadataForLoad(llvm::LoadInst* load, const Shape& shape);
-  void AttachAlignmentMetadataForLoad(llvm::LoadInst* load, int64 buffer_size);
+  void AttachAlignmentMetadataForLoad(llvm::LoadInst* load,
+                                      int64_t buffer_size);
 
   // Given a load instruction and a shape or buffer size, annotate the load's
   // result with the dereferenceable bytes required by the shape / buffer size.
   void AttachDereferenceableMetadataForLoad(llvm::LoadInst* load,
                                             const Shape& shape);
   void AttachDereferenceableMetadataForLoad(llvm::LoadInst* load,
-                                            int64 buffer_size);
+                                            int64_t buffer_size);
 
   // Calculate the alignment of a buffer allocated for a given shape.
   int MinimumAlignmentForShape(const Shape& shape);
@@ -568,7 +572,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   int MinimumAlignmentForPrimitiveType(PrimitiveType primitive_type);
 
   // Returns the number of bytes within the shape.
-  int64 ByteSizeOf(const Shape& shape) const;
+  int64_t ByteSizeOf(const Shape& shape) const;
 
   enum class XfeedKind {
     kInfeed,

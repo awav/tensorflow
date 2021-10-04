@@ -14,9 +14,6 @@
 # ==============================================================================
 """Tests for class OneDeviceStrategy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 from tensorflow.python import tf2
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.distribute import combinations
@@ -121,7 +118,7 @@ class OneDeviceStrategyTest(
 
   def test_prefetch_to_device_dataset(self, distribution):
     input_options = distribute_lib.InputOptions(
-        experimental_prefetch_to_device=True)
+        experimental_fetch_to_device=True)
     dataset = dataset_ops.Dataset.range(100)
     dataset = dataset.batch(distribution.num_replicas_in_sync)
     dataset = distribution.experimental_distribute_dataset(
@@ -142,7 +139,7 @@ class OneDeviceStrategyTest(
 
   def test_prefetch_to_host_dataset(self, distribution):
     input_options = distribute_lib.InputOptions(
-        experimental_prefetch_to_device=False)
+        experimental_fetch_to_device=False)
     dataset = dataset_ops.Dataset.range(100)
     dataset = dataset.batch(distribution.num_replicas_in_sync)
     dataset = distribution.experimental_distribute_dataset(

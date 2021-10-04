@@ -20,12 +20,8 @@ in this directory. It will re-generate the saved models that are used for
 testing.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import google_type_annotations
-from __future__ import print_function
-
 import os
+from absl import app
 
 from tensorflow.python.compat import v2_compat
 
@@ -37,7 +33,6 @@ from tensorflow.python.module import module
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import variables
-from tensorflow.python.platform import app
 from tensorflow.python.saved_model import saved_model
 
 

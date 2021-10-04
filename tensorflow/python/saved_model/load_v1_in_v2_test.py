@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for importing a TF v1-style SavedModel when executing eagerly."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import shutil
 
@@ -123,6 +119,7 @@ class LoadTest(test.TestCase):
     imported = load.load(saved)
     fn = imported.signatures["serving_default"]
     self.evaluate(lookup_ops.tables_initializer())
+    self.evaluate(ops.get_collection("saved_model_initializers"))
     self.assertEqual(
         6., self.evaluate(fn(start=constant_op.constant(2.))["output"]))
 

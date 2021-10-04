@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/c/eager/c_api_experimental.h"
+#include "tensorflow/core/framework/cancellation.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 
@@ -80,6 +81,11 @@ class ParallelDevice {
   // The number of devices operations run on.
   size_t num_underlying_devices() const { return underlying_devices_.size(); }
 
+  // The devices operations run on.
+  const std::vector<std::string>& underlying_devices() const {
+    return underlying_devices_;
+  }
+
   // Takes a description of a single operation being executed on the
   // ParallelDevice, and in turn runs one operation per component device with
   // its corresponding inputs from the input ParallelTensors. Wraps the
@@ -103,10 +109,16 @@ class ParallelDevice {
   // parallel device, then call `Join` on each; even if some of the `Join`s
   // return a bad status the caller must run all of the `Join`s or any future
   // `StartExecute`s will deadlock).
+  //
+  // If `is_async=false` (constructor argument), `cancellation_manager` must
+  // live until `Join` finishes. If `is_async=true` it must live until `Join` is
+  // followed by `TFE_ContextAsyncWait` to clear pending operations. It will be
+  // used to cancel all other operations if any fails.
   void StartExecute(TFE_Context* context,
                     const std::vector<ParallelTensor*>& inputs,
                     const char* operation_name, const TFE_OpAttrs* attributes,
-                    int expected_max_outputs) const;
+                    int expected_max_outputs,
+                    CancellationManager& cancellation_manager) const;
 
   // Blocks until the previous `StartExecute` has run `TFE_Execute` on each
   // device. If is_async=false (constructor argument) this means the ops have
@@ -122,6 +134,13 @@ class ParallelDevice {
   absl::optional<std::vector<std::unique_ptr<ParallelTensor>>> Join(
       const std::vector<PartialTensorShape>& expected_output_shapes,
       TF_Status* status) const;
+
+  void AsyncWait(TFE_Context* context, TF_Status* status) const;
+
+  // Device strings for component devices that only include a
+  // worker/task/replica if any of those differ across components. Useful for
+  // printing debug messages.
+  std::vector<std::string> SummarizeDeviceNames() const;
 
  private:
   // A sequence of device names, indicating which devices replicated operations
@@ -140,6 +159,10 @@ class ParallelDevice {
   // than a single list of threads so aliased nested parallel devices don't
   // re-use a thread.
   std::vector<std::unique_ptr<DeviceThread>> device_threads_;
+  // A cancellation manager to use if the caller does not provide one. When ops
+  // are executed asynchronously this must outlive the queued op, so it can't be
+  // function-local to Execute.
+  mutable std::unique_ptr<CancellationManager> default_cancellation_manager_;
 };
 
 // Contains a tuple of tensors, one on each of the `underlying_devices_` of the
@@ -156,7 +179,7 @@ class ParallelTensor {
   // when ParallelTensor::Shape is called.
   static std::unique_ptr<ParallelTensor> FromTensorHandles(
       const ParallelDevice& parallel_device,
-      std::vector<TensorHandlePtr> components, absl::Span<const int64> shape,
+      std::vector<TensorHandlePtr> components, absl::Span<const int64_t> shape,
       TF_Status* status);
 
   size_t num_tensors() const { return tensors_.size(); }
@@ -171,10 +194,14 @@ class ParallelTensor {
   Status Shape(const std::vector<int64_t>** shape) const;
   TF_DataType dtype() const { return dtype_; }
 
+  // Sets its output argument to a summary of the values of this tensor on every
+  // component device.
+  Status SummarizeValue(std::string& summary);
+
  private:
   ParallelTensor(const ParallelDevice& device,
                  std::vector<TensorHandlePtr> tensors,
-                 absl::Span<const int64> shape, const TF_DataType dtype)
+                 absl::Span<const int64_t> shape, const TF_DataType dtype)
       : device_(device),
         tensors_(std::move(tensors)),
         shape_(std::vector<int64_t>(shape.begin(), shape.end())),

@@ -16,10 +16,6 @@
 # pylint: disable=g-long-lambda
 """Tests for tensorflow.ops.control_flow_ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import math
 import re
@@ -31,6 +27,7 @@ import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python import tf2
 from tensorflow.python.client import device_lib
 from tensorflow.python.client import session
@@ -557,7 +554,7 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
 
   @test_util.run_v1_only("b/120545219")
   def testCondColocation(self):
-    with self.session(use_gpu=True):
+    with self.session():
       with ops.device("/cpu:0"):
         v = variables.Variable(7.0)
 
@@ -754,7 +751,13 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
 
     r = control_flow_ops.cond(constant_op.constant(True), true_fn, lambda: 0.)
 
-    with session.Session() as sess:
+    # Disable Loop_optimizer grappler pass for this test because it replaces
+    # Switch with Identity when it's part of a dead branch.
+    config = config_pb2.ConfigProto()
+    config.graph_options.rewrite_options.loop_optimization = (
+        rewriter_config_pb2.RewriterConfig.OFF)
+
+    with self.session(config=config) as sess:
       run_metadata = config_pb2.RunMetadata()
       options = config_pb2.RunOptions(output_partition_graphs=True)
       sess.run(
@@ -786,7 +789,13 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
         constant_op.constant(True), true_fn,
         lambda: constant_op.constant(0, dtypes.int64))
 
-    with session.Session() as sess:
+    # Disable Loop_optimizer grappler pass for this test because it replaces
+    # Switch with Identity when it's part of a dead branch.
+    config = config_pb2.ConfigProto()
+    config.graph_options.rewrite_options.loop_optimization = (
+        rewriter_config_pb2.RewriterConfig.OFF)
+
+    with session.Session(config=config) as sess:
       run_metadata = config_pb2.RunMetadata()
       options = config_pb2.RunOptions(output_partition_graphs=True)
       sess.run(
@@ -816,7 +825,13 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
 
     r = control_flow_ops.cond(constant_op.constant(True), true_fn, lambda: 0.)
 
-    with session.Session() as sess:
+    # Disable Loop_optimizer grappler pass for this test because it replaces
+    # Switch with Identity when it's part of a dead branch.
+    config = config_pb2.ConfigProto()
+    config.graph_options.rewrite_options.loop_optimization = (
+        rewriter_config_pb2.RewriterConfig.OFF)
+
+    with session.Session(config=config) as sess:
       run_metadata = config_pb2.RunMetadata()
       options = config_pb2.RunOptions(output_partition_graphs=True)
       sess.run(
@@ -1224,7 +1239,7 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
   def testCondGradMultiDevice(self):
     config = config_pb2.ConfigProto(device_count={"CPU": 2},
                                     allow_soft_placement=True)
-    with self.cached_session(use_gpu=True, config=config) as sess:
+    with self.cached_session(config=config) as sess:
       pred = array_ops.placeholder(dtypes.bool, [])
       x = array_ops.placeholder(dtypes.float32)
       y = array_ops.placeholder(dtypes.float32)
@@ -1386,6 +1401,16 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
       self.assertAllEqual(37.0, sess.run(result, feed_dict={predicate: False}))
       self.assertAllEqual(0.0, sess.run(result, feed_dict={predicate: True}))
       self.assertAllEqual(0.0, sess.run(result))
+
+  def testCondTensorDeps(self):
+    t = array_ops.identity(1.)
+
+    @def_function.function
+    def f():
+      with ops.control_dependencies([t]):
+        return array_ops.identity(2.)
+
+    f.get_concrete_function()
 
   @test_util.run_in_graph_and_eager_modes
   def testCondAutoControlDeps(self):
@@ -2075,10 +2100,9 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
       b = lambda i, j: [i + 1, array_ops.concat([j, j], 0)]
       with self.assertRaisesRegex(
           ValueError,
-          r"Input tensor 'ones:0' enters the loop with shape \(2, 2\), but has "
-          r"shape \(4, 2\) after one iteration. To allow the shape to vary "
-          r"across iterations, use the `shape_invariants` argument of "
-          r"tf.while_loop to specify a less-specific shape."):
+          r".*\(2, 2\).*\(4, 2\) after one iteration\. To allow the shape to "
+          r"vary across iterations, use the `shape_invariants` argument of "
+          r"tf.while_loop to specify a less-specific shape\."):
         control_flow_ops.while_loop(c, b, [i, m])
 
   def testWhileShapeInferenceSparseTensor(self):
@@ -2621,7 +2645,7 @@ class ControlFlowTest(test.TestCase, parameterized.TestCase):
   def testWhileCondGradMultiDevice(self):
     config = config_pb2.ConfigProto(device_count={"CPU": 2},
                                     allow_soft_placement=True)
-    with self.cached_session(use_gpu=True, config=config) as sess:
+    with self.cached_session(config=config) as sess:
       pred = array_ops.placeholder(dtypes.bool, [])
       x_init = constant_op.constant(1.0)
 
@@ -4911,7 +4935,7 @@ class AssertTest(test.TestCase):
     if test_util.is_gpu_available():
       self.skipTest("b/128646478 fails in opensource")
 
-    with self.session(use_gpu=True) as sess:
+    with self.session() as sess:
       with ops.device(test.gpu_device_name()):
         value = constant_op.constant(1.0)
       with ops.device("/cpu:0"):

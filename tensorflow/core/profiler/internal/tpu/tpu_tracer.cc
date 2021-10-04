@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/profiler/protobuf/xplane.pb.h"
 #include "tensorflow/core/profiler/utils/xplane_schema.h"
 #include "tensorflow/core/tpu/tpu_api.h"
+#include "tensorflow/core/tpu/tpu_initializer_helper.h"
 #include "tensorflow/core/tpu/tpu_ops_c_api.h"
 #include "tensorflow/stream_executor/tpu/status_helper.h"
 
@@ -47,9 +48,6 @@ class TpuTracer : public ProfilerInterface {
   Status Start() override;
 
   Status Stop() override;
-
-  // Unsupported.
-  Status CollectData(RunMetadata* run_metadata) override;
 
   Status CollectData(XSpace* space) override;
 
@@ -89,11 +87,6 @@ Status TpuTracer::Stop() {
   return Status::OK();
 }
 
-Status TpuTracer::CollectData(RunMetadata* run_metadata) {
-  // Unsupported
-  return Status::OK();
-}
-
 Status TpuTracer::CollectData(XSpace* space) {
   StatusHelper status;
   // Get size of buffer required for TPU driver to serialize XSpace into.
@@ -130,11 +123,17 @@ std::unique_ptr<ProfilerInterface> CreateTpuTracer(
       options.device_type() != ProfileOptions::UNSPECIFIED) {
     return nullptr;
   }
+  // Don't attempt to create a TpuTracer if the TPU C API isn't initialized.
+  if (tpu::OpsApiFn()->TpuProfiler_CreateFn == nullptr) {
+    return nullptr;
+  }
   return absl::make_unique<TpuTracer>();
 }
 
 auto register_tpu_tracer_factory = [] {
-  RegisterProfilerFactory(&CreateTpuTracer);
+  if (tensorflow::tpu::TryAcquireTpuLock()) {
+    RegisterProfilerFactory(&CreateTpuTracer);
+  }
   return 0;
 }();
 

@@ -14,12 +14,8 @@
 # ==============================================================================
 """This module contains the user- and codegen-facing API for AutoGraph."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
-import imp
+import importlib
 import inspect
 import os
 import sys
@@ -106,25 +102,10 @@ class _ErrorMetadata(error_utils.ErrorMetadataBase):
       message = self.get_message()
       init_args = tuple(init_argspec.args)
       # At the time of this writing, TF errors either take 3 or 4 arguments,
-      # with the fourth being error_code.
-      if init_args == ('self', 'node_def', 'op', 'message', 'error_code'):
-        return preferred_type(
-            node_def=source_error.node_def,
-            op=source_error.op,
-            message=message,
-            error_code=self.error_code)
-      elif init_args == ('self', 'node_def', 'op', 'message'):
-        if 'error_code' in init_argspec.kwonlyargs:
-          return preferred_type(
-              node_def=source_error.node_def,
-              op=source_error.op,
-              message=message,
-              errro_code=self.error_code)
-        else:
-          return preferred_type(
-              node_def=source_error.node_def,
-              op=source_error.op,
-              message=message)
+      # the argument '*args' may or may not be used.
+      if init_args == ('self', 'node_def', 'op', 'message'):
+        return preferred_type(source_error.node_def, source_error.op, message,
+                              source_error.experimental_payloads)
 
     elif preferred_type in (errors.PyCTError, AutoGraphError, ConversionError,
                             StagingError, errors_impl.InaccessibleTensorError,
@@ -159,8 +140,8 @@ def _attach_error_metadata(e, f):
 
   cause_tb = traceback.extract_tb(sys.exc_info()[2])[1:]
 
-  e.ag_error_metadata = _ErrorMetadata(
-      cause_tb, metadata, message, source_map, __file__)
+  e.ag_error_metadata = _ErrorMetadata(cause_tb, metadata, message, source_map,
+                                       __file__)
 
 
 class StackTraceMapper(tf_stack.StackTraceMapper):
@@ -219,7 +200,8 @@ class PyToTF(transpiler.PyToPy):
       # TODO(mdan): Move into core or replace with an actual importable module.
       # Craft a module that exposes the external API as well as certain
       # internal modules.
-      ag_internal = imp.new_module('autograph')
+      module_spec = importlib.machinery.ModuleSpec('autograph', None)
+      ag_internal = importlib.util.module_from_spec(module_spec)
       ag_internal.__dict__.update(inspect.getmodule(PyToTF).__dict__)
       ag_internal.ConversionOptions = converter.ConversionOptions
       ag_internal.STD = converter.STANDARD_OPTIONS
@@ -312,11 +294,7 @@ def is_autograph_artifact(entity):
   return hasattr(entity, 'autograph_info__')
 
 
-def converted_call(f,
-                   args,
-                   kwargs,
-                   caller_fn_scope=None,
-                   options=None):
+def converted_call(f, args, kwargs, caller_fn_scope=None, options=None):
   """Converts a function call inline.
 
   For internal use only.
@@ -437,8 +415,7 @@ def converted_call(f,
     return _fall_back_unconverted(f, args, kwargs, options, e)
 
   if not hasattr(target_entity, '__code__'):
-    logging.log(2, 'Permanently allowed: %s: native binding',
-                target_entity)
+    logging.log(2, 'Permanently allowed: %s: native binding', target_entity)
     return _call_unconverted(f, args, kwargs, options)
   elif (hasattr(target_entity.__code__, 'co_filename') and
         target_entity.__code__.co_filename == '<string>'):
@@ -493,15 +470,18 @@ def _fall_back_unconverted(f, args, kwargs, options, exc):
       'Cause: %s\n'
       'To silence this warning, decorate the function with'
       ' @tf.autograph.experimental.do_not_convert')
-  if isinstance(exc, errors.UnsupportedLanguageElementError):
+  if isinstance(exc, errors.InaccessibleSourceCodeError):
+    if ag_ctx.INSPECT_SOURCE_SUPPORTED:
+      logging.warning(warning_template, f, '', exc)
+  elif isinstance(exc, errors.UnsupportedLanguageElementError):
     if not conversion.is_in_allowlist_cache(f, options):
-      logging.warn(warning_template, f, '', exc)
+      logging.warning(warning_template, f, '', exc)
   else:
     file_bug_message = (
         'Please report this to the TensorFlow team. When filing the bug, set'
         ' the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and'
         ' attach the full output.\n')
-    logging.warn(warning_template, f, file_bug_message, exc)
+    logging.warning(warning_template, f, file_bug_message, exc)
 
   return _call_unconverted(f, args, kwargs, options)
 
@@ -611,6 +591,7 @@ def tf_convert(f, ctx, convert_by_default=True, user_requested=False):
 
 def call_with_unspecified_conversion_status(func):
   """Decorator that resets the conversion context to the unspecified status."""
+
   def wrapper(*args, **kwargs):
     with ag_ctx.ControlStatusCtx(status=ag_ctx.Status.UNSPECIFIED):
       return func(*args, **kwargs)

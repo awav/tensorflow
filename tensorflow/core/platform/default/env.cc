@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -69,7 +70,8 @@ class PThread : public Thread {
     }
     int ret = pthread_create(&thread_, &attributes, &ThreadFn, params);
     // There is no mechanism for the thread creation API to fail, so we CHECK.
-    CHECK_EQ(ret, 0) << "Thread creation via pthread_create() failed.";
+    CHECK_EQ(ret, 0) << "Thread " << name
+                     << " creation via pthread_create() failed.";
     pthread_attr_destroy(&attributes);
   }
 
@@ -116,8 +118,8 @@ class PosixEnv : public Env {
 
       if (micros >= 1e6) {
         sleep_time.tv_sec =
-            std::min<int64>(micros / 1e6, std::numeric_limits<time_t>::max());
-        micros -= static_cast<int64>(sleep_time.tv_sec) * 1e6;
+            std::min<int64_t>(micros / 1e6, std::numeric_limits<time_t>::max());
+        micros -= static_cast<int64_t>(sleep_time.tv_sec) * 1e6;
       }
       if (micros < 1e6) {
         sleep_time.tv_nsec = 1000 * micros;
@@ -248,6 +250,7 @@ class PosixEnv : public Env {
 REGISTER_FILE_SYSTEM("", PosixFileSystem);
 REGISTER_FILE_SYSTEM("file", LocalPosixFileSystem);
 REGISTER_FILE_SYSTEM("ram", RamFileSystem);
+
 
 Env* Env::Default() {
   static Env* default_env = new PosixEnv;

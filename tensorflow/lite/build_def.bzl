@@ -1,8 +1,9 @@
-"""Generate Flatbuffer binary from json."""
+"""Build macros for TF Lite."""
 
 load(
     "//tensorflow:tensorflow.bzl",
     "clean_dep",
+    "if_oss",
     "tf_binary_additional_srcs",
     "tf_cc_shared_object",
     "tf_cc_test",
@@ -10,6 +11,7 @@ load(
 load("//tensorflow/lite:special_rules.bzl", "tflite_copts_extra")
 load("//tensorflow/lite/java:aar_with_jni.bzl", "aar_with_jni")
 load("@build_bazel_rules_android//android:rules.bzl", "android_library")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
 def tflite_copts():
     """Defines common compile time flags for TFLite libraries."""
@@ -82,6 +84,7 @@ def tflite_linkopts_unstripped():
     # negligible, and created potential compatibility problems.
     return select({
         clean_dep("//tensorflow:android"): [
+            "-latomic",  # Required for some uses of ISO C++11 <atomic> in x86.
             "-Wl,--no-export-dynamic",  # Only inc syms referenced by dynamic obj.
             "-Wl,--gc-sections",  # Eliminate unused code and data.
             "-Wl,--as-needed",  # Don't link unused libs.
@@ -103,6 +106,7 @@ def tflite_jni_linkopts_unstripped():
     # negligible, and created potential compatibility problems.
     return select({
         clean_dep("//tensorflow:android"): [
+            "-latomic",  # Required for some uses of ISO C++11 <atomic> in x86.
             "-Wl,--gc-sections",  # Eliminate unused code and data.
             "-Wl,--as-needed",  # Don't link unused libs.
         ],
@@ -112,23 +116,40 @@ def tflite_jni_linkopts_unstripped():
 def tflite_symbol_opts():
     """Defines linker flags whether to include symbols or not."""
     return select({
-        clean_dep("//tensorflow:android"): [
-            "-latomic",  # Required for some uses of ISO C++11 <atomic> in x86.
-        ],
-        "//conditions:default": [],
-    }) + select({
         clean_dep("//tensorflow:debug"): [],
+        clean_dep("//tensorflow/lite:tflite_keep_symbols"): [],
         "//conditions:default": [
             "-s",  # Omit symbol table, for all non debug builds
         ],
     })
 
+def tflite_linkopts_no_undefined():
+    """Defines linker flags to enable errors for undefined symbols.
+
+    This enables link-time errors for undefined symbols even when linking
+    shared libraries, where the default behaviour on many systems is to only
+    report errors for undefined symbols at runtime.
+    """
+    return if_oss(
+        ["-Wl,--no-undefined"],
+        select({
+            # Can't enable errors for undefined symbols for asan/msan/tsan mode,
+            # since undefined symbols in shared libraries (references to symbols
+            # that will be defined in the main executable) are normal and
+            # expected in those cases.
+            "//tools/cpp:asan_build": [],
+            "//tools/cpp:msan_build": [],
+            "//tools/cpp:tsan_build": [],
+            "//conditions:default": ["-Wl,--no-undefined"],
+        }),
+    )
+
 def tflite_linkopts():
-    """Defines linker flags to reduce size of TFLite binary."""
+    """Defines linker flags for linking TFLite binary."""
     return tflite_linkopts_unstripped() + tflite_symbol_opts()
 
 def tflite_jni_linkopts():
-    """Defines linker flags to reduce size of TFLite binary with JNI."""
+    """Defines linker flags for linking TFLite binary with JNI."""
     return tflite_jni_linkopts_unstripped() + tflite_symbol_opts()
 
 def tflite_jni_binary(
@@ -142,7 +163,8 @@ def tflite_jni_binary(
         testonly = 0,
         deps = [],
         tags = [],
-        srcs = []):
+        srcs = [],
+        visibility = None):  # 'None' means use the default visibility.
     """Builds a jni binary for TFLite."""
     linkopts = linkopts + select({
         clean_dep("//tensorflow:macos"): [
@@ -165,6 +187,7 @@ def tflite_jni_binary(
         tags = tags,
         linkopts = linkopts,
         testonly = testonly,
+        visibility = visibility,
     )
 
 def tflite_cc_shared_object(
@@ -198,7 +221,6 @@ def tf_to_tflite(name, src, options, out):
     toco_cmdline = " ".join([
         "$(location //tensorflow/lite/python:tflite_convert)",
         "--enable_v1_converter",
-        "--experimental_new_converter",
         ("--graph_def_file=$(location %s)" % src),
         ("--output_file=$(location %s)" % out),
     ] + options)
@@ -286,7 +308,7 @@ def json_to_tflite(name, src, out):
 
 # This is the master list of generated examples that will be made into tests. A
 # function called make_XXX_tests() must also appear in generate_examples.py.
-# Disable a test by adding it to the blacklists specified in
+# Disable a test by adding it to the denylists specified in
 # generated_test_models_failing().
 def generated_test_models():
     return [
@@ -405,8 +427,6 @@ def generated_test_models():
         "transpose",
         "transpose_conv",
         "unfused_gru",
-        "unidirectional_sequence_lstm",
-        "unidirectional_sequence_rnn",
         "unique",
         "unpack",
         "unroll_batch_matmul",
@@ -427,8 +447,12 @@ def generated_test_models_failing(conversion_mode):
       List of failing test models for the conversion mode.
     """
     if conversion_mode == "toco-flex":
+        # These tests mean to fuse multiple TF ops to TFLite fused RNN & LSTM
+        # ops (e.g. LSTM, UnidirectionalSequentceLSTM) with some semantic
+        # changes (becoming stateful). We have no intention to make these
+        # work in Flex.
         return [
-            "lstm",  # TODO(b/117510976): Restore when lstm flex conversion works.
+            "lstm",
             "unidirectional_sequence_lstm",
             "unidirectional_sequence_rnn",
         ]
@@ -486,6 +510,11 @@ def common_test_tags_for_generated_models(conversion_mode, failing):
       tags for the failing generated model tests.
     """
     tags = []
+
+    # Forward-compat coverage testing is largely redundant, and contributes
+    # to coverage test bloat.
+    if conversion_mode == "forward-compat":
+        tags.append("nozapfhahn")
 
     if failing:
         return ["notap", "manual"]
@@ -830,7 +859,6 @@ def tflite_custom_cc_library(
         name = name,
         srcs = real_srcs,
         hdrs = [
-            # TODO(b/161323860) replace this by generated header.
             "//tensorflow/lite:create_op_resolver.h",
         ],
         copts = tflite_copts(),
@@ -900,8 +928,8 @@ def tflite_custom_android_library(
 
     android_library(
         name = name,
-        srcs = ["//tensorflow/lite/java:java_srcs"],
         manifest = "//tensorflow/lite/java:AndroidManifest.xml",
+        srcs = ["//tensorflow/lite/java:java_srcs"],
         deps = [
             ":%s_jni" % name,
             "@org_checkerframework_qual",
@@ -941,15 +969,21 @@ def tflite_custom_c_library(
             name = "%s_create_op_resolver" % name,
             srcs = [
                 ":%s_registration" % name,
-                "//tensorflow/lite:create_op_resolver_with_selected_ops.cc",
             ],
             hdrs = ["//tensorflow/lite:create_op_resolver.h"],
             copts = tflite_copts(),
             deps = [
+                "//tensorflow/lite:create_op_resolver_with_selected_ops",
                 "//tensorflow/lite:op_resolver",
                 "//tensorflow/lite:framework",
                 "//tensorflow/lite/kernels:builtin_ops",
             ],
+            # Using alwayslink here is needed, I believe, to avoid warnings about
+            # backwards references when linking create_op_resolver_with_selected_ops,
+            # which has a reference to the RegisterSelectedOps function defined by
+            # '":%s_registration" % name' (the code generated by the call to
+            # gen_selected_ops above).
+            alwayslink = True,
         )
         op_resolver_deps = "%s_create_op_resolver" % name
 
@@ -972,3 +1006,67 @@ def tflite_custom_c_library(
         ],
         **kwargs
     )
+
+def tflite_combine_cc_tests(
+        name,
+        deps_conditions,
+        extra_cc_test_tags = [],
+        extra_build_test_tags = [],
+        **kwargs):
+    """Combine all certain cc_tests into a single cc_test and a build_test.
+
+    Args:
+      name: the name of the combined cc_test.
+      deps_conditions: the list of deps that those cc_tests need to have in
+          order to be combined.
+      extra_cc_test_tags: the list of extra tags appended to the created
+          combined cc_test.
+      extra_build_test_tags: the list of extra tags appended to the created
+          corresponding build_test for the combined cc_test.
+      **kwargs: kwargs to pass to the cc_test rule of the test suite.
+    """
+    combined_test_srcs = {}
+    combined_test_deps = {}
+    for r in native.existing_rules().values():
+        # We only include cc_test.
+        if not r["kind"] == "cc_test":
+            continue
+
+        # Tests with data, args or special build option are not counted.
+        if r["data"] or r["args"] or r["copts"] or r["defines"] or \
+           r["includes"] or r["linkopts"] or r["additional_linker_inputs"]:
+            continue
+
+        # We only consider a single-src-file unit test.
+        if len(r["srcs"]) > 1:
+            continue
+
+        dep_attr = r["deps"]
+        if type(dep_attr) != type(()) and type(dep_attr) != type([]):
+            # Attributes based on select() is not supported for simplicity.
+            continue
+
+        # The test has to depend on :test_main
+        if not any([v in deps_conditions for v in dep_attr]):
+            continue
+
+        combined_test_srcs.update({s: True for s in r["srcs"]})
+        combined_test_deps.update({d: True for d in r["deps"]})
+
+    if combined_test_srcs:
+        native.cc_test(
+            name = name,
+            size = "large",
+            srcs = list(combined_test_srcs),
+            tags = ["manual", "notap"] + extra_cc_test_tags,
+            deps = list(combined_test_deps),
+            **kwargs
+        )
+        build_test(
+            name = "%s_build_test" % name,
+            targets = [":%s" % name],
+            tags = [
+                "manual",
+                "tflite_portable_build_test",
+            ] + extra_build_test_tags,
+        )
