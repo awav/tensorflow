@@ -16,14 +16,14 @@ namespace m = match;
 
 class IntermediateTensorSplitterTest : public HloTestBase {
  protected:
-  const int64 max_size() {
+  const int64_t max_size() {
     return IntermediateTensorSplitter::SplitTensorBytes();
   }
 
-  const int64 large_dim() { return max_size() / 32 * 8 / 3; }
+  const int64_t large_dim() { return max_size() / 32 * 8 / 3; }
 
-  const int64 max_op_bytes_in_graph(HloInstruction* inst) {
-    int64 max_size = 0;
+  const int64_t max_op_bytes_in_graph(HloInstruction* inst) {
+    int64_t max_size = 0;
     max_size = std::max(max_size, ShapeUtil::ByteSizeOf(inst->shape(), 8));
     for (HloInstruction* op : inst->operands()) {
       max_size = std::max(max_size, max_op_bytes_in_graph(op));
@@ -240,7 +240,7 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
       HloInstruction::CreateParameter(0, param_shape, "p"));
 
   Shape broadcast_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
-  std::vector<int64> dims = {};
+  std::vector<int64_t> dims = {};
   HloInstruction* broadcast =
       builder.AddInstruction(HloInstruction::CreateBroadcast(
           broadcast_shape, p, absl::MakeSpan(dims)));
@@ -279,7 +279,7 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
       HloInstruction::CreateParameter(0, param_shape, "p"));
 
   Shape broadcast_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
-  std::vector<int64> dims = {0};
+  std::vector<int64_t> dims = {0};
   HloInstruction* broadcast =
       builder.AddInstruction(HloInstruction::CreateBroadcast(
           broadcast_shape, p, absl::MakeSpan(dims)));
