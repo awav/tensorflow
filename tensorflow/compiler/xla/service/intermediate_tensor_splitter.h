@@ -16,7 +16,7 @@ class IntermediateTensorSplitter : public HloModulePass {
   StatusOr<bool> Run(HloModule* module) override;
 
   // Use this to retreive the configured split size in bytes.
-  static int64 SplitTensorBytes();
+  static int64_t SplitTensorBytes();
 };
 
 }  // namespace xla

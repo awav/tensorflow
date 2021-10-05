@@ -50,26 +50,26 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
     */
     c = rhs;
 
-    int64 rank_a = a->shape().rank();
-    int64 contr_ab_c =
+    int64_t rank_a = a->shape().rank();
+    int64_t contr_ab_c =
         dot->dot_dimension_numbers().lhs_contracting_dimensions(0);
 
     if (contr_ab_c >= rank_a - 1) {
       // Case 1 or 2, three indices are stright forward
-      int64 contr_a_b =
+      int64_t contr_a_b =
           lhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
-      int64 contr_b_a =
+      int64_t contr_b_a =
           lhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
-      int64 contr_c_b =
+      int64_t contr_c_b =
           dot->dot_dimension_numbers().rhs_contracting_dimensions(0);
       // If the bc index falls onto or grater than ba, increase it
-      int64 contr_b_c =
+      int64_t contr_b_c =
           dot->dot_dimension_numbers().lhs_contracting_dimensions(0) -
           (rank_a - 1);
       if (contr_b_c >= contr_b_a) contr_b_c += 1;
 
-      int64 current_size = ShapeUtil::ElementsIn(lhs->shape());
-      int64 proposed_size =
+      int64_t current_size = ShapeUtil::ElementsIn(lhs->shape());
+      int64_t proposed_size =
           ShapeUtil::ElementsIn(b->shape()) / b->shape().dimensions(contr_b_c) *
           ShapeUtil::ElementsIn(c->shape()) / c->shape().dimensions(contr_c_b);
 
@@ -82,8 +82,8 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
             MakeDotHlo(b, c, inner_dnums, dot->precision_config(),
                        dot->shape().element_type()));
 
-        int64 contr_bc_a = contr_b_a < contr_b_c ? contr_b_a : contr_b_a - 1;
-        int64 contr_a_bc = contr_a_b;
+        int64_t contr_bc_a = contr_b_a < contr_b_c ? contr_b_a : contr_b_a - 1;
+        int64_t contr_a_bc = contr_a_b;
 
         DotDimensionNumbers outer_dnums;
         outer_dnums.add_lhs_contracting_dimensions(contr_a_bc);
@@ -120,25 +120,25 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
     */
     a = lhs;
 
-    int64 rank_b = b->shape().rank();
-    int64 contr_bc_a =
+    int64_t rank_b = b->shape().rank();
+    int64_t contr_bc_a =
         dot->dot_dimension_numbers().rhs_contracting_dimensions(0);
 
     if (contr_bc_a < rank_b - 1) {
       // Case 1 or 2, three indices are stright forward
-      int64 contr_b_c =
+      int64_t contr_b_c =
           rhs->dot_dimension_numbers().lhs_contracting_dimensions(0);
-      int64 contr_c_b =
+      int64_t contr_c_b =
           rhs->dot_dimension_numbers().rhs_contracting_dimensions(0);
-      int64 contr_a_b =
+      int64_t contr_a_b =
           dot->dot_dimension_numbers().lhs_contracting_dimensions(0);
       // If the ba index falls onto or grater than bc, increase it
-      int64 contr_b_a =
+      int64_t contr_b_a =
           dot->dot_dimension_numbers().rhs_contracting_dimensions(0);
       if (contr_b_a >= contr_b_c) contr_b_a += 1;
 
-      int64 current_size = ShapeUtil::ElementsIn(rhs->shape());
-      int64 proposed_size =
+      int64_t current_size = ShapeUtil::ElementsIn(rhs->shape());
+      int64_t proposed_size =
           ShapeUtil::ElementsIn(a->shape()) / a->shape().dimensions(contr_a_b) *
           ShapeUtil::ElementsIn(b->shape()) / b->shape().dimensions(contr_b_a);
 
@@ -151,8 +151,8 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
             MakeDotHlo(a, b, inner_dnums, dot->precision_config(),
                        dot->shape().element_type()));
 
-        int64 contr_ab_c = contr_b_c < contr_b_a ? contr_b_c : contr_b_c - 1;
-        int64 contr_c_ab = contr_c_b;
+        int64_t contr_ab_c = contr_b_c < contr_b_a ? contr_b_c : contr_b_c - 1;
+        int64_t contr_c_ab = contr_c_b;
 
         DotDimensionNumbers outer_dnums;
         outer_dnums.add_lhs_contracting_dimensions(contr_ab_c);

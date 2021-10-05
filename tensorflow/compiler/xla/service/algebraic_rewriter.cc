@@ -19,9 +19,9 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
   explicit AlgebraicRewriterVisitor() {}
 
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
-                           HloInstruction** y, bool* is_sub, int64* x_dim,
-                           int64* x_reduce_dim, int64* y_dim,
-                           int64* y_reduce_dim);
+                           HloInstruction** y, bool* is_sub, int64_t* x_dim,
+                           int64_t* x_reduce_dim, int64_t* y_dim,
+                           int64_t* y_reduce_dim);
 
   Status HandleReduce(HloInstruction* reduce) override;
 };
@@ -30,8 +30,8 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
 bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     HloInstruction* reduce, HloInstruction** x, HloInstruction** y,
-    bool* is_sub, int64* x_dim, int64* x_reduce_dim, int64* y_dim,
-    int64* y_reduce_dim) {
+    bool* is_sub, int64_t* x_dim, int64_t* x_reduce_dim, int64_t* y_dim,
+    int64_t* y_reduce_dim) {
   // Check up to reduce
   HloInstruction* add_or_sub;
   HloInstruction* reduce_init;
@@ -64,14 +64,14 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   if (!power_const->literal().Get<float>({0}) == 2.0) return false;
 
   // Check the broadcast + reduce dimensions are correct
-  int64 reduce_dim = reduce->dimensions(0);
+  int64_t reduce_dim = reduce->dimensions(0);
   // the reduce dimension must NOT be a broadcasted one
   *x_reduce_dim = -1;
   *y_reduce_dim = -1;
-  for (int64 i = 0; i < lhs->dimensions().size(); i++) {
+  for (int64_t i = 0; i < lhs->dimensions().size(); i++) {
     if (lhs->dimensions(i) == reduce_dim) *x_reduce_dim = i;
   }
-  for (int64 i = 0; i < rhs->dimensions().size(); i++) {
+  for (int64_t i = 0; i < rhs->dimensions().size(); i++) {
     if (rhs->dimensions(i) == reduce_dim) *y_reduce_dim = i;
   }
   if (*x_reduce_dim == -1 || *y_reduce_dim == -1) return false;
@@ -79,11 +79,11 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   // x -> i : R, j : B and y -> i : B, j : R
   CHECK(ShapeUtil::Equal(lhs->shape(), rhs->shape()));
   if (lhs->shape().rank() != 3) return false;
-  int64 rank = lhs->shape().rank();
+  int64_t rank = lhs->shape().rank();
   *x_dim = -1;
   *y_dim = -1;
-  for (int64 i = 0; i < rank; i++) {
-    for (int64 j = 0; j < rank; j++) {
+  for (int64_t i = 0; i < rank; i++) {
+    for (int64_t j = 0; j < rank; j++) {
       if (i == j) continue;
       if (i == reduce_dim || j == reduce_dim) continue;
       if (absl::c_linear_search(lhs->dimensions(), i) &&
@@ -106,7 +106,7 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 
   HloInstruction *x, *y;
   bool is_sub;
-  int64 x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
+  int64_t x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
   if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
                            &y_dim, &y_reduce_dim))
     return Status::OK();
@@ -148,9 +148,9 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   HloInstruction* xy;
   if (x_dim == 0 && y_dim == 1) {
     Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
-    for (int64 i = 0; i < x->shape().rank(); i++)
+    for (int64_t i = 0; i < x->shape().rank(); i++)
       if (i != x_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
-    for (int64 i = 0; i < y->shape().rank(); i++)
+    for (int64_t i = 0; i < y->shape().rank(); i++)
       if (i != y_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
 
     PrecisionConfig conf;
@@ -161,9 +161,9 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
         HloInstruction::CreateDot(xy_shape, x, y, dnums, conf));
   } else if (x_dim == 1 && y_dim == 0) {
     Shape xy_shape = ShapeUtil::MakeShape(x->shape().element_type(), {});
-    for (int64 i = 0; i < y->shape().rank(); i++)
+    for (int64_t i = 0; i < y->shape().rank(); i++)
       if (i != x_reduce_dim) xy_shape.add_dimensions(y->shape().dimensions(i));
-    for (int64 i = 0; i < x->shape().rank(); i++)
+    for (int64_t i = 0; i < x->shape().rank(); i++)
       if (i != y_reduce_dim) xy_shape.add_dimensions(x->shape().dimensions(i));
 
     PrecisionConfig conf;
@@ -193,7 +193,7 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
-  // int64 split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  // int64_t split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
   AlgebraicRewriterVisitor visitor;
   return visitor.RunOnModule(module);
 }

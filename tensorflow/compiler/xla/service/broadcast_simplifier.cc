@@ -39,7 +39,7 @@ class BroadcastSimplifierVisitor : public DfsHloRewriteVisitor {
 }  // namespace
 
 bool BroadcastSimplifierVisitor::DimsAreIndexes(HloInstruction* inst) {
-  for (int64 i = 0; i < inst->dimensions().size(); i++) {
+  for (auto i = 0; i < inst->dimensions().size(); i++) {
     if (i != inst->dimensions(i)) {
       return false;
     }
