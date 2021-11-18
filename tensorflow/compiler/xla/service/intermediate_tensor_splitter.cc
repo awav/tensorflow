@@ -979,7 +979,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
-          splitter.SplitInstruction(lhs, split_dim, split_size));
+          splitter.SplitInstruction(lhs, split_dim, split_rest));
 
       HloInstruction* rest_part = rest_builder.AddInstruction(
           dot->CloneWithNewOperands(dot->shape(), {rest_lhs, rest_lhs}));
@@ -1590,15 +1590,11 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       old_output = reduce;
     }
 
-    // LOG(INFO) << "TEST1";
-
     HloInstruction* output_tuple = rest_splitter.BuildOutputTuple(
         reduce_split_dim, split_rest, old_output, output_part, false,
         split_along_reduce_dim);
     HloComputation* rest =
         parent_module->AddEmbeddedComputation(rest_builder.Build(output_tuple));
-
-    // LOG(INFO) << "TEST2";
 
     int64_t output_idx = output_tuple->shape().tuple_shapes().size() - 1;
     HloInstruction* init = reduce->parent()->AddInstruction(
@@ -1608,8 +1604,6 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     HloInstruction* result_rest =
         reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
             old_output->shape(), call, output_idx));
-
-    // LOG(INFO) << "TEST3";
 
     if (split_along_reduce_dim) {
       // we're splitting on a reduced dimension
@@ -1672,8 +1666,6 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
               reduce->shape(), {result_slice, result_rest_slice},
               reduce_split_dim));
     }
-
-    // LOG(INFO) << "TEST10";
   }
   return ReplaceInstruction(old_output, result);
 }
