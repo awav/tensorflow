@@ -528,9 +528,9 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
                        ShapeUtil::ElementsIn(
                            rhs->shape());  // this works, since only one of the
                                            // operands needs to be split
-      // LOG(INFO) << "splitting inter dot " << inst->name()
-      //           << " split_dim=" << split_dim
-      //           << "; is_lhs=" << (split_lhs ? "yes" : "no");
+      LOG(INFO) << "splitting inter dot " << inst->name()
+                << " split_dim=" << split_dim
+                << "; is_lhs=" << (split_lhs ? "yes" : "no");
       if (split_lhs) {
         CHECK(split_dim < lhs->shape().dimensions_size() - 1);
         int64_t lhs_contr_dim =
@@ -1094,10 +1094,10 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
-          splitter.SplitInstruction(lhs, split_dim_lhs, split_size));
+          splitter.SplitInstruction(lhs, split_dim_lhs, split_rest));
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_rhs,
-          splitter.SplitInstruction(rhs, split_dim_rhs, split_size));
+          splitter.SplitInstruction(rhs, split_dim_rhs, split_rest));
 
       HloInstruction* rest_part = rest_builder.AddInstruction(
           dot->CloneWithNewOperands(dot->shape(), {rest_lhs, rest_rhs}));
@@ -1250,7 +1250,9 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloInstruction* result = dot->parent()->AddInstruction(
         HloInstruction::CreateGetTupleElement(dot->shape(), loop, output_idx));
 
-    if (split_rest > 0) {
+    if (split_rest == 0) {
+      return ReplaceInstruction(dot, result);
+    } else {
       HloComputation::Builder rest_builder(
           "intermediate_tensor_splitter_dot_rest");
       Splitter splitter(
@@ -1360,8 +1362,6 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
                 dot->shape(), {result_slice, rest_result}, dot_split_dim));
         return ReplaceInstruction(dot, full_result);
       }
-    } else {
-      return ReplaceInstruction(dot, result);
     }
   }
 }

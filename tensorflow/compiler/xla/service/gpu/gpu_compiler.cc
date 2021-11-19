@@ -344,8 +344,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     pipeline.AddPass<IntermediateTensorSplitter>();
-    pipeline
-        .AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+    pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
     pipeline.AddPass<GpuScatterExpander>();
     // TODO(phawkins): replace QR and Eigh decompositions with calls to
