@@ -486,19 +486,31 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
   auto visited_inst_key = MakeVisitedInstructionKey(inst, split_dim, split_size);
   if (visited_instructions_.contains(visited_inst_key)) {
     LOG(INFO) << "<<< Found a duplicate for " << inst->name();
-    // return visited_instructions_[visited_inst_key];
+    return visited_instructions_[visited_inst_key];
   }
   
   if (absl::c_linear_search(leafs_, inst)) {
     if (Match(inst, m::Dot())) {
       LOG(INFO) << "# Split 'Dot' instruction '" << inst->name() << "'";
-      return SplitLeafDot(inst, split_dim, split_size);
+      TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_inst,
+        SplitLeafDot(inst, split_dim, split_size));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (Match(inst, m::Broadcast())) {
       LOG(INFO) << "# Split 'Broadcast' instruction '" << inst->name() << "'";
-      return SplitLeafBroadcast(inst, split_dim, split_size);
+      TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_inst,
+        SplitLeafBroadcast(inst, split_dim, split_size));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (Match(inst, m::Iota())) {
       LOG(INFO) << "# Split 'Iota' instruction '" << inst->name() << "'";
-      return SplitLeafIota(inst, split_dim, split_size);
+      TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_inst,
+        SplitLeafIota(inst, split_dim, split_size));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     }
   } else {
     HloInstruction *operand, *lhs, *rhs;
@@ -517,8 +529,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(
+      HloInstruction *new_inst = builder_.AddInstruction(
           inst->CloneWithNewOperands(new_shape, {new_operand}));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (MatchSupportedNestedReduce(inst)) {
       // For a reduce, split the 0th and only operand
       // (the initializer a scalar, so all we need to do
@@ -539,8 +553,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(inst->CloneWithNewOperands(
+      HloInstruction *new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
           new_shape, {new_operand, new_init_operand}));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
       LOG(INFO) << "# Split 'TriangularSolve' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
@@ -548,8 +564,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
           SplitInstruction(inst->mutable_operand(1), split_dim, split_size));
       HloInstruction* mat;
       AddParameter(inst->mutable_operand(0), &mat);
-      return builder_.AddInstruction(
+      HloInstruction *new_inst = builder_.AddInstruction(
           inst->CloneWithNewOperands(new_operand->shape(), {mat, new_operand}));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
       LOG(INFO) << "# Split 'Dot(Op, Op)' instruction '" << inst->name() << "'";
       // For an intermediate dot, split the correct operand and assemble
@@ -577,8 +595,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
         Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                                inst->shape().dimensions());
         new_shape.set_dimensions(split_dim, split_size);
-        return builder_.AddInstruction(
+        HloInstruction *new_inst = builder_.AddInstruction(
             inst->CloneWithNewOperands(new_shape, {new_lhs, param_rhs}));
+        visited_instructions_[visited_inst_key] = new_inst;
+        return new_inst;
       } else {
         int64_t rhs_start = lhs->shape().dimensions_size() - 1;
         CHECK(split_dim >= rhs_start);
@@ -596,8 +616,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
         AddParameter(lhs, &param_lhs);
 
         new_shape.set_dimensions(split_dim, split_size);
-        return builder_.AddInstruction(
+        HloInstruction *new_inst = builder_.AddInstruction(
             inst->CloneWithNewOperands(new_shape, {param_lhs, new_rhs}));
+        visited_instructions_[visited_inst_key] = new_inst;
+        return new_inst;
       }
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
@@ -614,8 +636,10 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      return builder_.AddInstruction(
+      HloInstruction *new_inst = builder_.AddInstruction(
           inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else {
       // Invariant violation
       // TODO: Is there a more idiomatic way to return a bad status?
