@@ -95,11 +95,11 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
    public:
     explicit Splitter(HloComputation::Builder& builder, HloComputation* parent,
-                      absl::Span<HloInstruction*> leafs)
+                      absl::Span<HloInstruction*> leafs, int64_t offset = 0)
         : builder_(builder), leafs_(leafs) {
-      // Create the offset init (0)
+
       HloInstruction* init_offset = parent->AddInstruction(
-          HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(0)));
+          HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(offset)));
       parameters_.push_back(init_offset);
 
       // Make a param, the shape can be added to over time to get correct shape
@@ -982,8 +982,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     int64_t split_size, split_count, split_rest;
     DetermineSplitSize(lhs, split_dim, &split_size, &split_count, &split_rest);
-    CHECK(split_count * split_size + split_rest ==
-          lhs->shape().dimensions(split_dim));
+    auto main_split_size = split_count *  split_size;
+    CHECK(main_split_size + split_rest == lhs->shape().dimensions(split_dim));
 
     LOG(INFO) << "<<< "
               << "Splitting self dot " << dot->name()
@@ -1042,7 +1042,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       HloComputation::Builder rest_builder(
           "intermediate_tensor_splitter_dot_rest");
       Splitter splitter(rest_builder, dot->parent(),
-                        absl::MakeSpan(split_leafs_lhs));
+                        absl::MakeSpan(split_leafs_lhs),
+                        split_rest);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
@@ -1157,7 +1158,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       HloComputation::Builder rest_builder(
           "intermediate_tensor_splitter_dot_rest");
       Splitter splitter(rest_builder, dot->parent(),
-                        absl::MakeSpan(split_leafs_lhs));
+                        absl::MakeSpan(split_leafs_lhs),
+                        split_rest);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
@@ -1325,7 +1327,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
           "intermediate_tensor_splitter_dot_rest");
       Splitter splitter(
           rest_builder, dot->parent(),
-          absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs));
+          absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs),
+          split_rest);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * comp_root,
@@ -1602,28 +1605,32 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     HloComputation::Builder rest_builder(
         "intermediate_tensor_splitter_reduce_rest");
     Splitter rest_splitter(rest_builder, reduce->parent(),
-                           absl::MakeSpan(split_leafs));
+                           absl::MakeSpan(split_leafs),
+                           split_rest);
 
     std::vector<HloInstruction*> operands;
     for (int64_t i = 0; i < op_count; i++) {
       TF_ASSIGN_OR_RETURN(
           HloInstruction * split_op,
-          rest_splitter.SplitInstruction(reduce->mutable_operand(i), split_dim,
-                                         split_rest));
+          rest_splitter.SplitInstruction(
+            reduce->mutable_operand(i), split_dim, split_rest)
+      );
       operands.push_back(split_op);
     }
 
     // Add init parameters to computation
     for (int64_t i = 0; i < op_count; i++) {
       HloInstruction* init_op;
-      rest_splitter.AddParameter(reduce->mutable_operand(i + op_count),
-                                 &init_op);
+      rest_splitter.AddParameter(reduce->mutable_operand(i + op_count), &init_op);
       operands.push_back(init_op);
     }
 
     int64_t reduce_split_dim = split_dim;
-    for (int64_t r_dim : reduce->dimensions())
-      if (r_dim < split_dim) reduce_split_dim--;
+    for (int64_t r_dim : reduce->dimensions()) {
+      if (r_dim < split_dim) {
+        reduce_split_dim--;
+      }
+    }
 
     Shape output_part_shape;
     HloInstruction *output_part, *old_output;
@@ -1644,16 +1651,18 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
       output_part_shape = ShapeUtil::MakeShape(
           old_output->shape().element_type(), old_output->shape().dimensions());
-      if (!split_along_reduce_dim)
+      if (!split_along_reduce_dim) {
         output_part_shape.set_dimensions(reduce_split_dim, split_rest);
+      }
       output_part =
           rest_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
               output_part_shape, new_reduce, old_output->tuple_index()));
     } else {
       output_part_shape = ShapeUtil::MakeShape(reduce->shape().element_type(),
                                                reduce->shape().dimensions());
-      if (!split_along_reduce_dim)
+      if (!split_along_reduce_dim) {
         output_part_shape.set_dimensions(reduce_split_dim, split_rest);
+      }
       output_part = rest_builder.AddInstruction(
           reduce->CloneWithNewOperands(output_part_shape, operands));
       old_output = reduce;
@@ -1681,29 +1690,35 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       HloComputation* reduce_fn = reduce->called_computations()[0];
       if (ShapeUtil::IsScalar(result_rest->shape())) {
         // we can call the function directly
+        LOG(INFO) << "# Result rest shape: " << result_rest->shape();
+        LOG(INFO) << "# Exit via calling function directly";
         result = reduce->parent()->AddInstruction(HloInstruction::CreateCall(
             reduce->shape(), {result, result_rest}, reduce_fn));
       } else {
         // we have to call the function through map
+        LOG(INFO) << "# Exit via through map";
         result = reduce->parent()->AddInstruction(HloInstruction::CreateMap(
             reduce->shape(), {result, result_rest}, reduce_fn));
       }
     } else {
+      auto dim_len = old_output->shape().dimensions_size();
       Shape slice_shape = ShapeUtil::MakeShape(result->shape().element_type(),
                                                result->shape().dimensions());
       slice_shape.set_dimensions(reduce_split_dim, split_size * split_count);
       std::vector<int64_t> starts;
       std::vector<int64_t> limits;
       std::vector<int64_t> strides;
-      for (int64_t d = 0; d < old_output->shape().dimensions_size(); d++) {
+
+      for (int64_t d = 0; d < dim_len; d++) {
+        strides.push_back(1);
         starts.push_back(0);
         if (d == reduce_split_dim) {
           limits.push_back(split_size * split_count);
         } else {
           limits.push_back(old_output->shape().dimensions(d));
         }
-        strides.push_back(1);
       }
+
       HloInstruction* result_slice =
           reduce->parent()->AddInstruction(HloInstruction::CreateSlice(
               slice_shape, result, absl::MakeSpan(starts),
@@ -1716,19 +1731,26 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       std::vector<int64_t> starts_rest;
       std::vector<int64_t> limits_rest;
       std::vector<int64_t> strides_rest;
-      for (int64_t d = 0; d < old_output->shape().dimensions_size(); d++) {
-        starts_rest.push_back(0);
-        if (d == reduce_split_dim) {
-          limits_rest.push_back(split_rest);
-        } else {
-          limits_rest.push_back(old_output->shape().dimensions(d));
-        }
+
+      for (int64_t d = 0; d < dim_len; d++) {
         strides_rest.push_back(1);
+        auto full_size = old_output->shape().dimensions(d);
+        limits_rest.push_back(full_size);
+        if (d == reduce_split_dim) {
+          starts_rest.push_back(split_rest);
+        } else {
+          starts_rest.push_back(0);
+        }
       }
+
       HloInstruction* result_rest_slice =
           reduce->parent()->AddInstruction(HloInstruction::CreateSlice(
               slice_shape_rest, result_rest, absl::MakeSpan(starts_rest),
               absl::MakeSpan(limits_rest), absl::MakeSpan(strides_rest)));
+        
+      LOG(INFO) << "# Shape of the main slice: " << result_slice->shape();
+      LOG(INFO) << "# Shape of the rest slice: " << result_rest_slice->shape();
+      LOG(INFO) << "# Exit via splitting on main and rest";
 
       result =
           reduce->parent()->AddInstruction(HloInstruction::CreateConcatenate(
