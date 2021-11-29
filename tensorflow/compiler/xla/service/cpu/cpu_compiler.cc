@@ -111,6 +111,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/indexed_array_analysis.h"
 #include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
+#include "tensorflow/compiler/xla/service/rce_optimizer.h"
 #include "tensorflow/compiler/xla/service/llvm_compiler.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_command_line_options.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
@@ -328,7 +329,9 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<DynamicIndexSplitter>();
 
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<RceOptimizer>();
+  pipeline.AddPass<BroadcastSimplifier>();
+  // pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
   pipeline.AddPass<IntermediateTensorSplitter>();

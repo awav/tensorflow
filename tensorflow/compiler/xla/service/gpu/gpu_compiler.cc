@@ -132,6 +132,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/loop_schedule_linearizer.h"
 #include "tensorflow/compiler/xla/service/operand_upcaster.h"
 #include "tensorflow/compiler/xla/service/qr_expander.h"
+#include "tensorflow/compiler/xla/service/rce_optimizer.h"
 #include "tensorflow/compiler/xla/service/real_imag_expander.h"
 #include "tensorflow/compiler/xla/service/reduce_scatter_combiner.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
@@ -340,6 +341,8 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<ZeroSizedHloElimination>();
 
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
+    pipeline.AddPass<RceOptimizer>();
+    // pipeline.AddPass<BroadcastSimplifier>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();

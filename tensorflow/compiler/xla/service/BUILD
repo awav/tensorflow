@@ -2349,6 +2349,18 @@ cc_library(
 )
 
 cc_library(
+    name = "rce_optimizer",
+    srcs = ["rce_optimizer.cc"],
+    hdrs = ["rce_optimizer.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "@com_google_absl//absl/algorithm:container",
+    ],
+)
+
+cc_library(
     name = "tree_reduction_rewriter",
     srcs = ["tree_reduction_rewriter.cc"],
     hdrs = ["tree_reduction_rewriter.h"],

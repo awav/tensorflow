@@ -28,11 +28,8 @@ class BroadcastSimplifierVisitor : public DfsHloRewriteVisitor {
   }
 
   Status HandleBroadcast(HloInstruction* broadcast) override;
-
   Status HandleTranspose(HloInstruction* transpose) override;
-
   Status HandleReshape(HloInstruction* reshape) override;
-
   Status HandleConvert(HloInstruction* convert) override;
 };
 
@@ -96,6 +93,7 @@ Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
 
 StatusOr<bool> BroadcastSimplifier::Run(HloModule* module) {
   BroadcastSimplifierVisitor visitor;
+  LOG(INFO) << "Running broadcast simplifier...";
   return visitor.RunOnModule(module);
 }
 
