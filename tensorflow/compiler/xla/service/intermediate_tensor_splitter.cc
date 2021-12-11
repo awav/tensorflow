@@ -168,7 +168,9 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
 
 bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
     HloInstruction* inst) {
-  if (!inst->shape().IsArray()) return false;
+  if (!inst->shape().IsArray()) {
+    return false;
+  }
   return ShapeUtil::ByteSizeOfElements(inst->shape()) > max_intermediate_bytes;
 }
 
@@ -176,6 +178,17 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs,
     std::vector<int64_t>* original_dimensions,
     std::vector<int64_t>* exclude_dimensions) {
+  std::stringstream msg;
+  msg << "orig=[";
+  for (auto dim : *original_dimensions) {
+    msg << dim << ",";
+  }
+  msg << "], excl=[";
+  for (auto dim : *exclude_dimensions) {
+    msg << dim << ",";
+  }
+  msg << "]";
+  LOG(INFO) << "\n> Can be split for '" << inst->name() << "', " << msg.str();
   HloInstruction *next, *lhs, *rhs;
   std::vector<HloInstruction*> next_vec;
   if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
@@ -287,13 +300,13 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
       // this path is not tail recursive :(
       if (!OperandCanBeSplit(next, split_leafs, original_dimensions,
                              exclude_dimensions)) {
-        LOG(INFO) << "\n> Here we go 1!";
+        LOG(INFO) << "\n> Exit. Cannot be split 1 for '" << next->name() << "'";;
         return false;
       }
     }
     return true;
   } else {
-    LOG(INFO) << "\n> Here we go 0!";
+    LOG(INFO) << "\n> Exit. Cannot be split 0 for '" << inst->name() << "'";
     return false;
   }
 }
@@ -481,6 +494,7 @@ void IntermediateTensorSplitterRewriteVisitor::DetermineSplitSize(
 StatusOr<HloInstruction*>
 IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
     HloInstruction* inst, int64_t split_dim, int64_t split_size) {
+  LOG(INFO) << "\n *** TRY SPLIT: " << inst->name() << "***";
   auto visited_inst_key = MakeVisitedInstructionKey(inst, split_dim, split_size);
   if (visited_instructions_.contains(visited_inst_key)) {
     LOG(INFO) << "<<< Found a duplicate for <"
