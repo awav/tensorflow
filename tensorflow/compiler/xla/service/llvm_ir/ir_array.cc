@@ -476,6 +476,7 @@ llvm::Value* IrArray::EmitArrayElementAddress(const IrArray::Index& index,
     return base_ptr_;
   }
   CHECK_EQ(index.size(), shape_.rank());
+  // LOG(INFO) << "\n @@@ Before error shape=" << shape_ << ", name=" << name;
   CHECK(index.ShapeIsCompatible(shape_));
 
   if (use_linear_index && index.LinearValidOnShape(shape_)) {

@@ -330,8 +330,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<RceOptimizer>();
-  pipeline.AddPass<BroadcastSimplifier>();
-  // pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
   pipeline.AddPass<IntermediateTensorSplitter>();

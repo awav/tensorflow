@@ -33,6 +33,9 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
   // interested in splitting it.
   bool OperandShouldBeSplit(HloInstruction* inst);
 
+  // Difference between operand size and memory threshold
+  int64_t ByteSizeLargerThanThreshold(HloInstruction* inst);
+
   // Determine if an operand can be split by traversing it's
   // inputs until a splittable node is found. This will also
   // return a list leafs and a list of dimensions which can
@@ -98,6 +101,15 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
                       absl::Span<HloInstruction*> leafs, int64_t offset = 0)
         : builder_(builder), leafs_(leafs) {
 
+      std::stringstream msg;
+
+      msg << "leafs=[";
+      for (auto leaf : leafs_) {
+        msg << leaf->name() << ",";
+      }
+      msg << "]";
+      LOG(INFO) << "\n> @@@ " << msg.str();
+
       HloInstruction* init_offset = parent->AddInstruction(
           HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(offset)));
       parameters_.push_back(init_offset);
@@ -121,6 +133,10 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
                                                  int64_t split_dim,
                                                  int64_t split_size);
 
+    StatusOr<HloInstruction*> SplitLeafParameter(HloInstruction* parameter,
+                                                 int64_t split_dim,
+                                                 int64_t split_size);
+
     StatusOr<HloInstruction*> SplitLeafIota(HloInstruction* iota,
                                             int64_t split_dim, int64_t split_size);
 
@@ -129,7 +145,6 @@ class IntermediateTensorSplitterRewriteVisitor : public DfsHloRewriteVisitor {
                                                     int64_t split_size) {
       int unique_id = inst->unique_id();
       return std::make_tuple(unique_id, split_dim, split_size);
-
     }
 
     // Add the parameter and returnd it's index in the tuple. If get_tuple
@@ -174,6 +189,15 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandShouldBeSplit(
   return ShapeUtil::ByteSizeOfElements(inst->shape()) > max_intermediate_bytes;
 }
 
+
+int64_t IntermediateTensorSplitterRewriteVisitor::ByteSizeLargerThanThreshold(
+    HloInstruction* inst) {
+  if (!inst->shape().IsArray()) {
+    return 0;
+  }
+  return ShapeUtil::ByteSizeOfElements(inst->shape()) - max_intermediate_bytes;
+}
+
 bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     HloInstruction* inst, std::vector<HloInstruction*>* split_leafs,
     std::vector<int64_t>* original_dimensions,
@@ -188,14 +212,20 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     msg << dim << ",";
   }
   msg << "]";
-  LOG(INFO) << "\n> Can be split for '" << inst->name() << "', " << msg.str();
+  msg << "\n> Can be split for '" << inst->name() << "'";
   HloInstruction *next, *lhs, *rhs;
   std::vector<HloInstruction*> next_vec;
   if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
-    if (OperandShouldBeSplit(lhs) && OperandShouldBeSplit(rhs)) {
+    bool do_split_lhs = OperandShouldBeSplit(lhs);
+    bool do_split_rhs = OperandShouldBeSplit(rhs);
+
+    if (do_split_lhs && do_split_rhs) {
       // We can only split one dimension, so this is impossible
+      LOG(INFO) << msg.str();
       return false;
-    } else if (OperandShouldBeSplit(lhs)) {
+    } else if (do_split_lhs) {
+      msg << ", split LHS;";
+      LOG(INFO) << msg.str();
       // Exclude all rhs dims from split
       for (int64_t i = lhs->shape().dimensions_size() - 1;
            i < original_dimensions->size(); i++) {
@@ -219,7 +249,9 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
                                          exclude_dimensions);
       lhs_original_dims.clear();
       return can_split;  // not tail recursive to keep fresh orig dims
-    } else if (OperandShouldBeSplit(rhs)) {
+    } else if (do_split_lhs) {
+      msg << ", split RHS;";
+      LOG(INFO) << msg.str();
       // Exclude all lhs dims from split
       for (int64_t i = 0; i < lhs->shape().dimensions_size() - 1; i++) {
         exclude_dimensions->push_back((*original_dimensions)[i]);
@@ -245,57 +277,106 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
       rhs_original_dims.clear();
       return can_split;  // not tail recursive to keep fresh orig dims
     } else {
+      msg << ", dot base case;";
+      LOG(INFO) << msg.str();
       // Base case: A Dot produces this large intermediate tensor
-      if (split_leafs != nullptr) split_leafs->push_back(inst);
+      if (split_leafs != nullptr) {
+        split_leafs->push_back(inst);
+      }
       return true;
     }
   } else if (Match(inst, m::Broadcast(m::Op()))) {
+    LOG(INFO) << msg.str();
     // Base case: A broadcast can be split
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
+    if (split_leafs != nullptr) {
+      split_leafs->push_back(inst);
+    }
     return true;
   } else if (Match(inst, m::Iota())) {
+    LOG(INFO) << msg.str();
     // Base case: An Iota can be split!
-    if (split_leafs != nullptr) split_leafs->push_back(inst);
+    if (split_leafs != nullptr) {
+      split_leafs->push_back(inst);
+    }
     return true;
+  } else if (Match(inst, m::Parameter())) {
+    LOG(INFO) << msg.str();
+    LOG(INFO) << "\n> Exit. Parameter will be split '" << inst->name() << "'";
+    // TODO(awav)
+    if (split_leafs != nullptr) {
+      split_leafs->push_back(inst);
+    }
+    return true;
+    // TODO(awav)
+    // return false;
   } else if (Match(inst, m::Transpose(m::Op(&next)))) {
     // A transpose changes the dimensions, so we need to
     // update the original_dimensions array.
-    if (original_dimensions != nullptr) {
-      std::vector<int64_t> old_original_dimensions(original_dimensions->begin(),
-                                                 original_dimensions->end());
-      for (int64_t i = 0; i < original_dimensions->size(); i++) {
-        (*original_dimensions)[i] =
-            old_original_dimensions[inst->dimensions(i)];
-      }
+
+    // if (original_dimensions != nullptr) {
+    //   std::vector<int64_t>
+    //   old_original_dimensions(original_dimensions->begin(),
+    //                                                original_dimensions->end());
+    //   for (int64_t i = 0; i < original_dimensions->size(); i++) {
+    //     (*original_dimensions)[i] =
+    //         old_original_dimensions[inst->dimensions(i)];
+    //   }
+    // }
+    // return OperandCanBeSplit(next, split_leafs, original_dimensions,
+    //                          exclude_dimensions);
+
+    if (original_dimensions == nullptr) {
+      LOG(INFO) << msg.str();
+      return OperandCanBeSplit(next, split_leafs, original_dimensions,
+                               exclude_dimensions);
     }
-    return OperandCanBeSplit(next, split_leafs, original_dimensions,
+
+    msg << ", transpose original dims to [";
+    std::vector<int64_t> transposed_dimensions(original_dimensions->begin(),
+                                               original_dimensions->end());
+    for (int64_t i = 0; i < original_dimensions->size(); i++) {
+      transposed_dimensions[i] = original_dimensions->at(inst->dimensions(i));
+      msg << transposed_dimensions[i] << ",";
+    }
+    msg << "]";
+    LOG(INFO) << msg.str();
+    return OperandCanBeSplit(next, split_leafs, &transposed_dimensions,
                              exclude_dimensions);
   } else if (MatchSupportedNestedReduce(inst)) {
+    msg << ", split nested reduce;";
+    LOG(INFO) << msg.str();
     return OperandCanBeSplit(inst->mutable_operand(0), split_leafs,
                              original_dimensions, exclude_dimensions);
   } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
+    msg << ", split triangular solve;";
+    LOG(INFO) << msg.str();
     // We can split a triangular solve on some (but not all)
     // dims
     if (original_dimensions != nullptr && exclude_dimensions != nullptr) {
       if (inst->triangular_solve_options().left_side()) {
         // exclude second to last : Ax = y
         exclude_dimensions->push_back(
-            (*original_dimensions)[original_dimensions->size() - 2]);
+            original_dimensions->at(original_dimensions->size() - 2));
       } else {
         // exclude last : xA = y
         exclude_dimensions->push_back(
-            (*original_dimensions)[original_dimensions->size() - 1]);
+            original_dimensions->at(original_dimensions->size() - 1));
       }
     }
     // We can't split the matrix for now, so ignore it
     return OperandCanBeSplit(inst->mutable_operand(1), split_leafs,
                              original_dimensions, exclude_dimensions);
   } else if (MatchPointwiseUnary(inst, &next)) {
+    msg << ", split pointwise unary;";
+    LOG(INFO) << msg.str();
     // This is a special case seperate from nary,
     // since we can make it tail recursive :)
     return OperandCanBeSplit(next, split_leafs, original_dimensions,
                              exclude_dimensions);
   } else if (MatchPointwiseNary(inst, &next_vec)) {
+    msg << ", split pointwise nary;";
+    LOG(INFO) << msg.str();
+
     for (HloInstruction* next : next_vec) {
       // this path is not tail recursive :(
       if (!OperandCanBeSplit(next, split_leafs, original_dimensions,
@@ -306,6 +387,7 @@ bool IntermediateTensorSplitterRewriteVisitor::OperandCanBeSplit(
     }
     return true;
   } else {
+    LOG(INFO) << msg.str();
     LOG(INFO) << "\n> Exit. Cannot be split 0 for '" << inst->name() << "'";
     return false;
   }
@@ -369,9 +451,13 @@ int64_t IntermediateTensorSplitterRewriteVisitor::BestSplitDim(
   const Shape& shape = inst->shape();
   int64_t best_dim = -1, best_split = 0;  // ShapeUtil::ElementsIn(inst->shape());
   for (int64_t i = 0; i < shape.dimensions_size(); i++) {
-    if (absl::c_linear_search(excluded, i)) continue;
+    if (absl::c_linear_search(excluded, i)) {
+      continue;
+    }
     int64_t split = BestEvenSplitSize(inst, i);
-    if (split == -1 || split <= best_split) continue;
+    if (split == -1 || split <= best_split) {
+      continue;
+    }
     best_split = split;
     best_dim = i;
   }
@@ -503,22 +589,30 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
   }
   
   if (absl::c_linear_search(leafs_, inst)) {
+    LOG(INFO) << "\n> Found in leafs '" << inst->name() << "'";
     if (Match(inst, m::Dot())) {
-      // LOG(INFO) << "# Split 'Dot' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'Dot' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
         HloInstruction * new_inst,
         SplitLeafDot(inst, split_dim, split_size));
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (Match(inst, m::Broadcast())) {
-      // LOG(INFO) << "# Split 'Broadcast' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'Broadcast' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
         HloInstruction * new_inst,
         SplitLeafBroadcast(inst, split_dim, split_size));
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
+    } else if (Match(inst, m::Parameter())) {
+      LOG(INFO) << "\n# Split 'Parameter' instruction '" << inst->name() << "'";
+      TF_ASSIGN_OR_RETURN(
+        HloInstruction * new_inst,
+        SplitLeafParameter(inst, split_dim, split_size));
+      visited_instructions_[visited_inst_key] = new_inst;
+      return new_inst;
     } else if (Match(inst, m::Iota())) {
-      // LOG(INFO) << "# Split 'Iota' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'Iota' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
         HloInstruction * new_inst,
         SplitLeafIota(inst, split_dim, split_size));
@@ -534,11 +628,11 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       // being split. So we obtain the new split dimension and then
       // recursively a new operand to make a clone.
       int64_t operand_split_dim = inst->dimensions(split_dim);
+      LOG(INFO) << "\n# Split 'Transpose:Op' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
           HloInstruction * new_operand,
           SplitInstruction(operand, operand_split_dim, split_size));
 
-      // LOG(INFO) << "# Split 'Transpoes:Op' instruction '" << inst->name() << "'";
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
@@ -552,9 +646,11 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       // is update the shape and clone the operand with new
       // inputs)
 
-      // LOG(INFO) << "# Split 'NestedReduce' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'NestedReduce' instruction '" << inst->name() << "'";
       int64_t operand_split_dim = split_dim;  // split dim in operand
-      if (inst->dimensions(0) <= split_dim) operand_split_dim += 1;
+      if (inst->dimensions(0) <= split_dim) {
+        operand_split_dim += 1;
+      }
 
       TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
                           SplitInstruction(inst->mutable_operand(0),
@@ -572,7 +668,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
-      // LOG(INFO) << "# Split 'TriangularSolve' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'TriangularSolve' instruction '" << inst->name() << "'";
       TF_ASSIGN_OR_RETURN(
           HloInstruction * new_operand,
           SplitInstruction(inst->mutable_operand(1), split_dim, split_size));
@@ -583,17 +679,19 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
-      // LOG(INFO) << "# Split 'Dot(Op, Op)' instruction '" << inst->name() << "'";
+      std::stringstream msg;
+      msg << "\n# Split 'Dot(Op, Op)' instruction '" << inst->name() << "'";
       // For an intermediate dot, split the correct operand and assemble
       // a new dot.
       bool split_lhs = ShapeUtil::ElementsIn(lhs->shape()) >
                        ShapeUtil::ElementsIn(
                            rhs->shape());  // this works, since only one of the
                                            // operands needs to be split
-      // LOG(INFO) << "<<< "
-      //           << "Splitting inter dot " << inst->name()
-      //           << " split_dim=" << split_dim
-      //           << "; is_lhs=" << (split_lhs ? "yes" : "no");
+      msg << ", split_dim=" << split_dim
+          << ", split_size=" << split_size
+          << ", is_lhs=" << (split_lhs ? "yes" : "no"); 
+      LOG(INFO) << msg.str();
+
       if (split_lhs) {
         CHECK(split_dim < lhs->shape().dimensions_size() - 1);
         int64_t lhs_contr_dim =
@@ -638,7 +736,7 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitInstruction(
     } else if (MatchPointwiseNary(inst, &operands)) {
       // For a pointwise operation recursively obtain the new operands and
       // clone the operation.
-      // LOG(INFO) << "# Split 'PointwiseNary' instruction '" << inst->name() << "'";
+      LOG(INFO) << "\n# Split 'PointwiseNary' instruction '" << inst->name() << "'";
       std::vector<HloInstruction*> ops;
       for (HloInstruction* operand : operands) {
         TF_ASSIGN_OR_RETURN(HloInstruction * new_operand,
@@ -760,7 +858,19 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
   int64_t parameter_idx;
   Shape parameter_shape = ShapeUtil::MakeShape(operand->shape().element_type(),
                                                operand->shape().dimensions());
+
+  std::stringstream msg;
+  msg << "broadcast->dimentions[";
+  for (auto d : broadcast->dimensions()) msg << d << ",";
+  msg << "], broadcast->dimentions().size=" << broadcast->dimensions().size();
+  msg << ", split_dim=" << split_dim << ", split_size=" << split_size;
+
+  msg << ", split_on_original_dim=" << split_on_original_dim;
+  msg << ", operand_shape=" << parameter_shape;
+  LOG(INFO) << "\n> @@@ " << msg.str();
+
   HloInstruction* new_operand;
+
   if (split_on_original_dim) {
     // we need to slice the parameter ...
     int64_t operand_split_dim;
@@ -800,6 +910,45 @@ IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
   std::vector<HloInstruction*> params = {new_operand};
   return builder_.AddInstruction(
       broadcast->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
+}
+
+StatusOr<HloInstruction*>
+IntermediateTensorSplitterRewriteVisitor::Splitter::SplitLeafParameter(
+    HloInstruction* parameter, int64_t split_dim, int64_t split_size) {
+  CHECK(Match(parameter, m::Parameter()));
+  const Shape& parameter_shape = parameter->shape();
+  const auto& parameter_dims = parameter_shape.dimensions();
+  const auto& element_type = parameter_shape.element_type();
+  CHECK(parameter_shape.dimensions_size() > split_dim);
+
+  HloInstruction* get_tuple_parameter;
+  auto parameter_idx = AddParameter(parameter, &get_tuple_parameter);
+
+  Shape slice_shape = ShapeUtil::MakeShape(element_type, parameter_dims);
+  slice_shape.set_dimensions(split_dim, split_size);
+
+  std::vector<HloInstruction*> start_indices;
+  for (auto dim = 0; dim < parameter_shape.dimensions_size(); dim++) {
+    if (dim == split_dim) {
+      start_indices.push_back(offset_);
+    } else {
+      start_indices.push_back(builder_.AddInstruction(
+          HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(0))));
+    }
+  }
+
+  std::stringstream msg;
+  msg << "parameter '" << parameter->name() << "' dimensions[";
+  for (auto d : parameter_dims) msg << d << ",";
+  msg << "], parameter->dimentions().size=" << parameter_dims.size();
+  msg << ", shape=" << parameter_shape;
+  msg << ", split_dim=" << split_dim << ", split_size=" << split_size;
+  msg << ", split_dim_for_param=" << parameter_shape.dimensions(split_dim);
+  LOG(INFO) << "\n> @@@ " << msg.str();
+
+  return builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
+      slice_shape, get_tuple_parameter, absl::MakeSpan(start_indices),
+      slice_shape.dimensions()));
 }
 
 StatusOr<HloInstruction*>
@@ -941,7 +1090,17 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
   auto& dnums = dot->dot_dimension_numbers();
 
-  if (OperandShouldBeSplit(dot)) return Status::OK();
+  LOG(INFO) << "\n ----> Enter HandleDot for '" << dot->name() << "'";
+  if (OperandShouldBeSplit(dot)) {
+    // auto output_size = ByteSizeLargerThanThreshold(dot);
+    // auto lhs_size = ByteSizeLargerThanThreshold(lhs);
+    // auto rhs_size = ByteSizeLargerThanThreshold(rhs);
+    // if (output_size <= lhs_size && output_size <= rhs_size) {
+    //   LOG(INFO) << "\n ----< Exit HandleDot for '" << dot->name() << "'";
+    //   return Status::OK();
+    // }
+    return Status::OK();
+  }
 
   // TODO: Handle the case where both operands can be
   //       split in a better way.
@@ -970,12 +1129,16 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       OperandCanBeSplit(lhs, &split_leafs_lhs, &orig_dims, &exclude_dims_lhs);
 
   orig_dims.clear();
-  for (int64_t i = 0; i < rhs->shape().dimensions_size(); i++)
+
+  for (int64_t i = 0; i < rhs->shape().dimensions_size(); i++) {
     orig_dims.push_back(i);
+  }
+
   bool can_split_rhs =
       OperandShouldBeSplit(rhs) &&
       OperandCanBeSplit(rhs, &split_leafs_rhs, &orig_dims, &exclude_dims_rhs);
-
+    
+  
   if (can_split_lhs && can_split_rhs && rhs_is_lhs) {
     //
     // Case :: Self dot
@@ -987,8 +1150,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     int64_t split_dim = dnums.lhs_contracting_dimensions()[0];
     if (absl::c_linear_search(exclude_dims_lhs, split_dim)) {
-      LOG(WARNING) << "failed to split self dot " << dot->name()
-                   << "as contracted dimension is excluded.";
+      LOG(WARNING) << "Failed to split self dot '" << dot->name()
+                   << "' as contracted dimension is excluded.";
       return Status::OK();
     }
 
@@ -1038,8 +1201,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     HloComputation* cond =
         parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
 
-    // build the while and replace the original element with a get
-    // tuple.
+    // build the while and replace the original element with a get tuple.
     int64_t output_idx = output_tuple->shape().tuple_shapes().size() - 1;
     HloInstruction* init = dot->parent()->AddInstruction(
         HloInstruction::CreateTuple(splitter.parameters()));
@@ -1088,14 +1250,14 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     int64_t split_dim_lhs = dnums.lhs_contracting_dimensions()[0];
     if (absl::c_linear_search(exclude_dims_lhs, split_dim_lhs)) {
-      LOG(WARNING) << "failed to split both sides of dot " << dot->name()
-                   << "as lhs contracted dimension is excluded.";
+      LOG(WARNING) << "Failed to split both sides of dot '" << dot->name()
+                   << "' as LHS contracted dimension is excluded.";
       return Status::OK();
     }
     int64_t split_dim_rhs = dnums.rhs_contracting_dimensions()[0];
     if (absl::c_linear_search(exclude_dims_rhs, split_dim_rhs)) {
-      LOG(WARNING) << "failed to split both sides of dot " << dot->name()
-                   << "as rhs contracted dimension is excluded.";
+      LOG(WARNING) << "Failed to split both sides of dot '" << dot->name()
+                   << "' as RHS contracted dimension is excluded.";
       return Status::OK();
     }
 
@@ -1112,16 +1274,20 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
               << " lhs and rhs will be split on contracted dimension with split size "
               << split_size << " and split rest " << split_rest;
 
-    HloComputation::Builder body_builder(
-        "intermediate_tensor_splitter_dot_body");
-    for (HloInstruction* leaf : split_leafs_rhs)
-      split_leafs_lhs.push_back(leaf);
-    Splitter splitter(body_builder, dot->parent(),
-                      absl::MakeSpan(split_leafs_lhs));
+    HloComputation::Builder body_builder("intermediate_tensor_splitter_dot_body");
 
+    for (HloInstruction* leaf : split_leafs_rhs) {
+      split_leafs_lhs.push_back(leaf);
+    }
+
+    Splitter splitter(body_builder, dot->parent(), absl::MakeSpan(split_leafs_lhs));
+
+    LOG(INFO) << "\n> Split LHS '" << lhs->name() << "'";
     TF_ASSIGN_OR_RETURN(
         HloInstruction * split_lhs,
         splitter.SplitInstruction(lhs, split_dim_lhs, split_size));
+      
+    LOG(INFO) << "\n> Split RHS '" << rhs->name() << "'";
     TF_ASSIGN_OR_RETURN(
         HloInstruction * split_rhs,
         splitter.SplitInstruction(rhs, split_dim_rhs, split_size));
@@ -1135,8 +1301,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
         parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
     // build the condition
-    HloComputation::Builder cond_builder(
-        "intermediate_tensor_splitter_dot_cond");
+    HloComputation::Builder cond_builder("intermediate_tensor_splitter_dot_cond");
     HloInstruction* cond_param =
         cond_builder.AddInstruction(HloInstruction::CreateParameter(
             0, output_tuple->shape(), "loop_param"));
@@ -1166,8 +1331,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
     if (split_rest == 0) {
       return ReplaceInstruction(dot, result);
     } else {
-      HloComputation::Builder rest_builder(
-          "intermediate_tensor_splitter_dot_rest");
+      HloComputation::Builder rest_builder("intermediate_tensor_splitter_dot_rest");
       Splitter splitter(rest_builder, dot->parent(),
                         absl::MakeSpan(split_leafs_lhs),
                         main_split_size);
@@ -1445,6 +1609,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       }
     }
   }
+
+  LOG(INFO) << "\n ----< Exit HandleDot for '" << dot->name() << "' with no splitting";
 }
 
 Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
@@ -1453,29 +1619,31 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
     return Status::OK();
   }
 
+  LOG(INFO) << "\n ----> Enter HandleReduce for '" << reduce->name() << "'";
+
   // MatchSupportedReduce enforces that all inputs are of the
   // same shape, and that there is at least one operand!
   if (!OperandShouldBeSplit(reduce->mutable_operand(0))) {
-    LOG(INFO) << "\n> Reduce '" << reduce->name() << "' CANNOT be split";
+    LOG(INFO) << "\n<<< Reduce '" << reduce->name() << "' CANNOT be split";
     return Status::OK();
   }
 
-  LOG(INFO) << "\n> Reduce '" << reduce->name() << "' SHOULD be split";
+  LOG(INFO) << "\n>>> Reduce '" << reduce->name() << "' SHOULD be split";
 
   // TODO: This is a hack, I need to more seriously rethink the
   //       two pass system, to mark elements in a first pass and combine
   //       sections properly ...
   if (OperandShouldBeSplit(reduce)) {
-    LOG(INFO) << "\n> Looks like reduce '" << reduce->name() << "' cannot be split after all";
+    LOG(INFO) << "\n<<< Looks like reduce '" << reduce->name() << "' cannot be split after all";
     return Status::OK();
   }
 
-  LOG(INFO) << "\n> Reduce operand '" << reduce->operand(0)->name() << "'" ;
+  LOG(INFO) << "\n<<< Reduce operand '" << reduce->operand(0)->name() << "'" ;
 
   // If this is a multi-argument reduce, check if only one
   // result is used.
   if (reduce->shape().IsTuple() && reduce->user_count() > 1) {
-    LOG(INFO) << "\n> Nah, looks like reduce '" << reduce->name() << "' cannot be split after all";
+    LOG(INFO) << "\n<<< Nah, looks like reduce '" << reduce->name() << "' cannot be split after all";
     return Status::OK();
   }
 
@@ -1494,7 +1662,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
     if (!OperandCanBeSplit(
           reduce->mutable_operand(i), &split_leafs, &orig_dims, &exclude_dims)) {
-      LOG(INFO) << "\n> Again, looks like reduce '" << reduce->name() << "' cannot be split because of '"
+      LOG(INFO) << "\n<<< Again, looks like reduce '" << reduce->name() << "' cannot be split because of '"
                 << reduce->mutable_operand(i)->name() << "'";
       return Status::OK();
     }
@@ -1510,7 +1678,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
       BestSplitDim(reduce->mutable_operand(0), absl::MakeSpan(exclude_dims));
   if (split_dim == -1) {
     // Bail, we can't split this tensor into equally sized parts.
-    LOG(INFO) << "\n> Looks like reduce '" << reduce->name() << "' cannot be split into equally sized parts";
+    LOG(INFO) << "\n<<< Looks like reduce '" << reduce->name() << "' cannot be split into equally sized parts";
     return Status::OK();
   }
 
