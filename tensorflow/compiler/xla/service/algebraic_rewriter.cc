@@ -33,35 +33,65 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     bool* is_sub, int64_t* x_dim, int64_t* x_reduce_dim, int64_t* y_dim,
     int64_t* y_reduce_dim) {
   // Check up to reduce
-  HloInstruction* add_or_sub;
+  HloInstruction* pow_operand;
+  // HloInstruction* reduce_operand;
+  // HloInstruction* mult_lhs;
+  // HloInstruction* mult_rhs;
   HloInstruction* reduce_init;
   HloInstruction* power_const;
+  // if (!Match(reduce, m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
+  //   return false;
+  // }
+  // auto is_pow_based = Match(reduce_operand, m::Power(m::Op(&add_or_sub), m::Broadcast(m::Constant(&power_const))));
+  // auto is_mul_based = reduce_operand->opcode() == HloOpcode::kMultiply && reduce_operand->operand(0) != reduce_operand->operand(1);
+  // if (!(is_pow_based || is_mul_based)) {
+  //   return false;
   if (!Match(reduce,
-             m::Reduce(m::Power(m::Op(&add_or_sub),
+             m::Reduce(m::Power(m::Op(&pow_operand),
                                 m::Broadcast(m::Constant(&power_const))),
-                       m::Constant(&reduce_init))))
+                       m::Constant(&reduce_init)))) {
     return false;
+  }
+  // } else if (reduce->opcode() == HloOpcode::kMultiply &&
+  //     reduce->operand(0) == reduce->operand(1)) {
+  // } else if (Match(reduce, m::Reduce(m::Multiply(m::Op(&mult_lhs),
+  //                                                m::Op(&mult_rhs))))) {
+  //   if (mult_lhs->unique_id() != mult_rhs->unique_id()) {
+  //     return false;
+  //   }
+  // }
 
   // Check add or sub
   HloInstruction *lhs, *rhs;
-  if (Match(add_or_sub, m::Add(m::Op(&lhs), m::Op(&rhs))))
+  if (Match(pow_operand, m::Add(m::Op(&lhs), m::Op(&rhs)))) {
     *is_sub = false;
-  else if (Match(add_or_sub, m::Subtract(m::Op(&lhs), m::Op(&rhs))))
+  } else if (Match(pow_operand, m::Subtract(m::Op(&lhs), m::Op(&rhs)))) {
     *is_sub = true;
-  else
+  } else {
     return false;
+  }
 
   // Check broadcast
   if (!Match(lhs, m::Broadcast(m::Op(x))) ||
-      !Match(rhs, m::Broadcast(m::Op(y))))
+      !Match(rhs, m::Broadcast(m::Op(y)))) {
     return false;
+  }
 
   // Check the constants are correct
-  if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1) return false;
-  if (!reduce_init->literal().IsZero({0})) return false;
+  if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1) {
+    return false;
+  }
 
-  if (ShapeUtil::ElementsIn(power_const->shape()) != 1) return false;
-  if (!power_const->literal().Get<float>({0}) == 2.0) return false;
+  if (!reduce_init->literal().IsZero({0})) {
+    return false;
+  }
+
+  if (ShapeUtil::ElementsIn(power_const->shape()) != 1) {
+    return false;
+  }
+  if (!power_const->literal().Get<float>({0}) == 2.0) {
+    return false;
+  }
 
   // Check the broadcast + reduce dimensions are correct
   int64_t reduce_dim = reduce->dimensions(0);
@@ -95,7 +125,9 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
       }
     }
   }
-  if (*x_dim == -1 || *y_dim == -1) return false;
+  if (*x_dim == -1 || *y_dim == -1) {
+    return false;
+  }
 
   // TODO: Check reduce computation is add
 

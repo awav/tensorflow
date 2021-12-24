@@ -344,8 +344,8 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<RceOptimizer>();
     // pipeline.AddPass<BroadcastSimplifier>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<IntermediateTensorSplitter>();
     pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 

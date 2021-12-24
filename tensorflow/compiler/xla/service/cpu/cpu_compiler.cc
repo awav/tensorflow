@@ -331,8 +331,8 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<RceOptimizer>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<IntermediateTensorSplitter>();
   pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
