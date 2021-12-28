@@ -69,7 +69,7 @@ Status BroadcastSimplifierVisitor::HandleTranspose(HloInstruction* transpose) {
 }
 
 Status BroadcastSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
-  HloInstruction* op;
+  HloInstruction* op = nullptr;
   CHECK(Match(reshape, m::Reshape(m::Op(&op))));
 
   // TODO: Does the physical layout matter for reshapes? I don't
@@ -79,6 +79,16 @@ Status BroadcastSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
     // This reshape does nothing, remove it
     return ReplaceInstruction(reshape, op);
   }
+
+  HloInstruction* broadcast_operand = nullptr;
+  if (Match(op, m::Broadcast(m::Op(&broadcast_operand)))) {
+    const Shape& reshape_shape = reshape->shape();
+    const Shape& broadcast_operand_shape = broadcast_operand->shape();
+    if (reshape_shape == broadcast_operand_shape) {
+      return ReplaceInstruction(reshape, broadcast_operand);
+    }
+  }
+  return Status::OK();
 }
 
 Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
@@ -93,7 +103,7 @@ Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
 
 StatusOr<bool> BroadcastSimplifier::Run(HloModule* module) {
   BroadcastSimplifierVisitor visitor;
-  LOG(INFO) << "Running broadcast simplifier...";
+  LOG(INFO) << "Running broadcast simplifier for '" << module->name() << "'";
   return visitor.RunOnModule(module);
 }
 

@@ -342,9 +342,9 @@ Status GpuCompiler::OptimizeHloModule(
 
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<RceOptimizer>();
-    // pipeline.AddPass<BroadcastSimplifier>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+    // pipeline.AddPass<AlgebraicRewriter>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<IntermediateTensorSplitter>();
     pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph

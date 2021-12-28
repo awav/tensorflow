@@ -32,64 +32,50 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     HloInstruction* reduce, HloInstruction** x, HloInstruction** y,
     bool* is_sub, int64_t* x_dim, int64_t* x_reduce_dim, int64_t* y_dim,
     int64_t* y_reduce_dim) {
-  // Check up to reduce
-  HloInstruction* pow_operand;
-  // HloInstruction* reduce_operand;
-  // HloInstruction* mult_lhs;
-  // HloInstruction* mult_rhs;
-  HloInstruction* reduce_init;
-  HloInstruction* power_const;
-  // if (!Match(reduce, m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
-  //   return false;
-  // }
-  // auto is_pow_based = Match(reduce_operand, m::Power(m::Op(&add_or_sub), m::Broadcast(m::Constant(&power_const))));
-  // auto is_mul_based = reduce_operand->opcode() == HloOpcode::kMultiply && reduce_operand->operand(0) != reduce_operand->operand(1);
-  // if (!(is_pow_based || is_mul_based)) {
-  //   return false;
-  if (!Match(reduce,
-             m::Reduce(m::Power(m::Op(&pow_operand),
-                                m::Broadcast(m::Constant(&power_const))),
-                       m::Constant(&reduce_init)))) {
+  HloInstruction* core_expr = nullptr;
+  HloInstruction* reduce_operand = nullptr;
+  HloInstruction* reduce_init = nullptr;
+  if (!Match(reduce, m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
     return false;
   }
-  // } else if (reduce->opcode() == HloOpcode::kMultiply &&
-  //     reduce->operand(0) == reduce->operand(1)) {
-  // } else if (Match(reduce, m::Reduce(m::Multiply(m::Op(&mult_lhs),
-  //                                                m::Op(&mult_rhs))))) {
-  //   if (mult_lhs->unique_id() != mult_rhs->unique_id()) {
-  //     return false;
-  //   }
-  // }
+  auto is_pow_based = reduce_operand->opcode() == HloOpcode::kPower;
+  auto is_mul_based = reduce_operand->opcode() == HloOpcode::kMultiply &&
+                      reduce_operand->operand(0) == reduce_operand->operand(1);
+  if (is_mul_based) {
+    core_expr = reduce_operand->mutable_operand(0);
+  } else if (is_pow_based) {
+    HloInstruction* power_const = nullptr;
+    if (!Match(reduce_operand,
+               m::Power(m::Op(&core_expr),
+                        m::Broadcast(m::Constant(&power_const))))) {
+      return false;
+    }
+    if (ShapeUtil::ElementsIn(power_const->shape()) != 1 ||
+        !power_const->literal().Get<float>({0}) == 2.0) {
+      return false;
+    }
+  }
 
   // Check add or sub
-  HloInstruction *lhs, *rhs;
-  if (Match(pow_operand, m::Add(m::Op(&lhs), m::Op(&rhs)))) {
+  HloInstruction *lhs = nullptr;
+  HloInstruction* rhs = nullptr;
+  if (Match(core_expr, m::Add(m::Op(&lhs), m::Op(&rhs)))) {
     *is_sub = false;
-  } else if (Match(pow_operand, m::Subtract(m::Op(&lhs), m::Op(&rhs)))) {
+  } else if (Match(core_expr, m::Subtract(m::Op(&lhs), m::Op(&rhs)))) {
     *is_sub = true;
   } else {
+    return false;
+  }
+
+  // Check the constants are correct
+  if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1 ||
+      !reduce_init->literal().IsZero({0})) {
     return false;
   }
 
   // Check broadcast
   if (!Match(lhs, m::Broadcast(m::Op(x))) ||
       !Match(rhs, m::Broadcast(m::Op(y)))) {
-    return false;
-  }
-
-  // Check the constants are correct
-  if (ShapeUtil::ElementsIn(reduce_init->shape()) != 1) {
-    return false;
-  }
-
-  if (!reduce_init->literal().IsZero({0})) {
-    return false;
-  }
-
-  if (ShapeUtil::ElementsIn(power_const->shape()) != 1) {
-    return false;
-  }
-  if (!power_const->literal().Get<float>({0}) == 2.0) {
     return false;
   }
 
@@ -226,6 +212,7 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
   // TODO: Make the size limit configurable + find a better default
   // int64_t split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
+  LOG(INFO) << "Running algebraic rewriter for '" << module->name() << "'";
   AlgebraicRewriterVisitor visitor;
   return visitor.RunOnModule(module);
 }

@@ -51,7 +51,7 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
 
 StatusOr<bool> RceOptimizer::Run(HloModule* module) {
   RceOptimizerVisitor visitor;
-  LOG(INFO) << "Running RCE optimizer ...";
+  LOG(INFO) << "Running RCE optimizer for " << module->name() << "'";
   return visitor.RunOnModule(module);
 }
 
