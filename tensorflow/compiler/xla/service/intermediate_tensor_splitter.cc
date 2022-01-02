@@ -2024,7 +2024,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
   }
   HloInstruction* array = sort->mutable_operand(0);
   HloInstruction* indices = sort->mutable_operand(1);
-  // std::stringstream msg;
+
+  std::stringstream msg;
 
   if (!ShapeUtil::CompatibleIgnoringElementType(array->shape(),
                                                 indices->shape())) {
@@ -2046,8 +2047,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
     }
   }
 
-  const HloInstruction* array_slice = get_array->users()[0];
-  const HloInstruction* indices_slice = get_indices->users()[0];
+  HloInstruction* array_slice = get_array->users()[0];
+  HloInstruction* indices_slice = get_indices->users()[0];
   auto left_is_slice = Match(array_slice, m::Slice(m::GetTupleElement(m::Sort())));
   auto right_is_slice = Match(indices_slice, m::Slice(m::GetTupleElement(m::Sort())));
   if (!(left_is_slice && right_is_slice)) {
@@ -2133,6 +2134,10 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
   TF_ASSIGN_OR_RETURN(
       HloInstruction * body_indices,
       body_splitter.SplitInstruction(indices, split_dim, split_size));
+  
+  HloInstruction* body_offset = body_splitter.offset();
+  HloInstruction* body_split_size =
+      body_builder.AddInstruction(CONSTANT_INT64(split_size));
 
   // Create the body of while loop
   // The body sort operation acts on slices of the original tensor
@@ -2156,14 +2161,15 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
 
   // Initialize While sort input from outside of the loop
   // and place initial arrays tuple.
-  auto split_dim_size = slice_k * split_count;
-  Shape body_acc_array_shape = array->shape();
-  Shape body_acc_indices_shape = indices->shape();
-  body_acc_array_shape.set_dimensions(split_dim, split_dim_size);
-  body_acc_indices_shape.set_dimensions(split_dim, split_dim_size);
+  // auto split_dim_size = slice_k * split_count; // TODO
+
+  Shape body_acc_array_shape = array_slice->shape();
+  Shape body_acc_indices_shape = indices_slice->shape();
+  // body_acc_array_shape.set_dimensions(split_dim, split_dim_size); // TODO
+  // body_acc_indices_shape.set_dimensions(split_dim, split_dim_size); // TODO
   Shape body_acc_shape =
       ShapeUtil::MakeTupleShape({body_acc_array_shape, body_acc_indices_shape});
-  
+
   HloInstruction* body_init_acc_array_scalar =
       sort_comp->AddInstruction(HloInstruction::CreateConstant(
           LiteralUtil::Zero(body_acc_shape.tuple_shapes(0).element_type())));
@@ -2188,41 +2194,113 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
 
   // While operation updates
   // Update While accumulator for sort operation.
-  HloInstruction* body_get_acc_array =
-      body_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
-          body_acc_shape.tuple_shapes(0), body_get_acc, 0));
-  HloInstruction* body_get_acc_indices =
-      body_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
-          body_acc_shape.tuple_shapes(1), body_get_acc, 1));
 
-  HloInstruction* body_offset = body_splitter.offset();
-  HloInstruction* body_split_size =
-      body_builder.AddInstruction(CONSTANT_INT64(split_size));
-  HloInstruction* body_slice_k =
-      body_builder.AddInstruction(CONSTANT_INT64(slice_k));
-  HloInstruction* body_iterator = body_builder.AddInstruction(
-      HloInstruction::CreateBinary(body_offset->shape(), HloOpcode::kDivide,
-                                   body_offset, body_split_size));
-  HloInstruction* body_acc_iterator = body_builder.AddInstruction(
-      HloInstruction::CreateBinary(body_iterator->shape(), HloOpcode::kMultiply,
-                                   body_iterator, body_slice_k));
+  // Continue building body. Sorting cached and new arrays.
+  // 
 
-  auto dim_size = body_array->shape().dimensions_size();
-  std::vector<HloInstruction*> start_indices = CreateStartIndicesArray(
-      body_builder, dim_size, 0, split_dim, body_acc_iterator);
+  HloInstruction* body_cond_params =
+      body_builder.AddInstruction(HloInstruction::CreateTuple({
+        body_array_slice, body_indices_slice, body_get_acc
+      }));
 
-  HloInstruction* body_update_acc_array =
-      body_builder.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
-          body_acc_shape.tuple_shapes(0), body_get_acc_array, body_array_slice,
-          start_indices));
-  HloInstruction* body_update_acc_indices =
-      body_builder.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
-          body_acc_shape.tuple_shapes(1), body_get_acc_indices,
-          body_indices_slice, start_indices));
+  const Shape& body_cond_params_shape = body_cond_params->shape();
+
+  HloComputation::Builder false_builder("splitter_body_false_cond");
+  {
+    auto false_param =
+        false_builder.AddInstruction(HloInstruction::CreateParameter(
+            0, body_cond_params_shape, "body_sort_result"));
+
+    auto false_array_slice_new =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            body_cond_params_shape.tuple_shapes(0), false_param, 0));
+    auto false_indices_slice_new =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            body_cond_params_shape.tuple_shapes(1), false_param, 1));
+
+    const Shape& false_acc_shape = body_cond_params_shape.tuple_shapes(2);
+    auto false_acc = false_builder.AddInstruction(
+        HloInstruction::CreateGetTupleElement(false_acc_shape, false_param, 2));
+
+    auto false_array_acc =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            false_acc_shape.tuple_shapes(0), false_acc, 0));
+    auto false_indices_acc =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            false_acc_shape.tuple_shapes(1), false_acc, 1));
+
+    Shape false_array_shape = body_acc_array_shape;
+    Shape false_indices_shape = body_acc_indices_shape;
+    false_array_shape.set_dimensions(
+        split_dim, 2 * body_acc_array_shape.dimensions(split_dim));
+    false_indices_shape.set_dimensions(
+        split_dim, 2 * body_acc_indices_shape.dimensions(split_dim));
+    Shape false_sort_shape =
+        ShapeUtil::MakeTupleShape({false_array_shape, false_indices_shape});
+
+    auto false_array =
+        false_builder.AddInstruction(HloInstruction::CreateConcatenate(
+            false_sort_shape.tuple_shapes(0),
+            {false_array_slice_new, false_array_acc}, split_dim));
+    auto false_indices =
+        false_builder.AddInstruction(HloInstruction::CreateConcatenate(
+            false_sort_shape.tuple_shapes(1),
+            {false_indices_slice_new, false_indices_acc}, split_dim));
+
+    auto false_sort = false_builder.AddInstruction(sort->CloneWithNewOperands(
+        false_sort_shape, {false_array, false_indices}));
+
+    auto false_array_get =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            false_sort_shape.tuple_shapes(0), false_sort, 0));
+    auto false_indices_get =
+        false_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            false_sort_shape.tuple_shapes(1), false_sort, 1));
+
+    auto false_array_slice =
+        false_builder.AddInstruction(array_slice->CloneWithNewOperands(
+            array_slice->shape(), {false_array_get}));
+    auto false_indices_slice =
+        false_builder.AddInstruction(indices_slice->CloneWithNewOperands(
+            indices_slice->shape(), {false_indices_get}));
+
+    false_builder.AddInstruction(
+        HloInstruction::CreateTuple({false_array_slice, false_indices_slice}));
+  }
+  HloComputation* false_comp =
+      parent_module->AddEmbeddedComputation(false_builder.Build());
+
+  HloComputation::Builder true_builder("splitter_body_true_cond");
+  {
+    auto true_param =
+        true_builder.AddInstruction(HloInstruction::CreateParameter(
+            0, body_cond_params_shape, "body_sort_result"));
+
+    auto true_array =
+        true_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            body_cond_params_shape.tuple_shapes(0), true_param, 0));
+    auto true_indices =
+        true_builder.AddInstruction(HloInstruction::CreateGetTupleElement(
+            body_cond_params_shape.tuple_shapes(1), true_param, 1));
+
+    true_builder.AddInstruction(
+        HloInstruction::CreateTuple({true_array, true_indices}));
+  }
+  HloComputation* true_comp =
+      parent_module->AddEmbeddedComputation(true_builder.Build());
+
+  HloInstruction* body_init_offset =
+      body_builder.AddInstruction(CONSTANT_INT64(0));
+  HloInstruction* body_cond_pred =
+      body_builder.AddInstruction(HloInstruction::CreateCompare(
+          ShapeUtil::MakeShape(PRED, {}), body_offset, body_init_offset,
+          ComparisonDirection::kEq));
 
   HloInstruction* body_update_acc =
-      body_builder.AddInstruction(HloInstruction::CreateTuple(
-          {body_update_acc_array, body_update_acc_indices}));
+      body_builder.AddInstruction(HloInstruction::CreateConditional(
+          body_acc_shape, body_cond_pred, body_cond_params, true_comp,
+          body_cond_params, false_comp));
+
 
   // Update split slice iteration
   HloInstruction* body_update_offset =
@@ -2259,31 +2337,23 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
       {std::make_tuple(body_acc_parameter_id, body_acc_shape)});
   HloInstruction* while_sort_result = results[0];
 
-  // msg << "\n-> body_acc_parameter_id=" << body_acc_parameter_id;
-  // msg << "\n-> results.size()=" << results.size();
-  // msg << "\n-> while_sort_result->shape()=" << while_sort_result->shape();
-  // msg << "\n-> while_sort_result->name()=" << while_sort_result->name();
-  // msg << "\n-> while_sort_result->operand(0)->shape()=" << while_sort_result->operand(0)->shape();
-  // msg << "\n-> while_sort_result->operand(0)->name()=" << while_sort_result->operand(0)->name();
-
   HloInstruction* while_get_array =
       sort_comp->AddInstruction(HloInstruction::CreateGetTupleElement(
           body_acc_shape.tuple_shapes(0), while_sort_result, 0));
   HloInstruction* while_get_indices =
       sort_comp->AddInstruction(HloInstruction::CreateGetTupleElement(
           body_acc_shape.tuple_shapes(1), while_sort_result, 1));
-
-  // msg << "\n-> while_get_array->shape()=" << while_get_array->shape();
-  // msg << "\n-> while_get_indices->shape()=" << while_get_indices->shape();
-  // msg << "\n-> while_get_array->name()=" << while_get_array->name();
-  // msg << "\n-> while_get_indices->name()=" << while_get_indices->name();
-
-  // Add final sort
-  HloInstruction* merged_array = while_get_array;
-  HloInstruction* merged_indices = while_get_indices;
+  
+  CHECK(while_get_array->shape().dimensions(split_dim) == slice_k);
+  CHECK(while_get_indices->shape().dimensions(split_dim) == slice_k);
 
   // Build
-  if (split_rest != 0) {
+  if (split_rest == 0) {
+    TF_RETURN_IF_ERROR(sort_comp->ReplaceInstructionWithDifferentShape(
+        array_slice, while_get_array));
+    TF_RETURN_IF_ERROR(sort_comp->ReplaceInstructionWithDifferentShape(
+        indices_slice, while_get_indices));
+  } else {
     auto rest_builder_name = "splitter_rest_sort";
     HloComputation::Builder rest_builder(rest_builder_name);
     Splitter rest_splitter(rest_builder, sort_comp, absl::MakeSpan(split_leafs),
@@ -2297,107 +2367,59 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
         HloInstruction * rest_indices,
         rest_splitter.SplitInstruction(indices, split_dim, split_rest));
 
-    Shape rest_sort_shape =
-        ShapeUtil::MakeTupleShape({rest_array->shape(), rest_indices->shape()});
-    HloInstruction* rest_sort =
-        rest_builder.AddInstruction(sort->CloneWithNewOperands(
-            rest_sort_shape, {rest_array, rest_indices}));
+    HloInstruction* get_params_array = nullptr;
+    HloInstruction* get_params_indices = nullptr;
+    rest_splitter.AddParameter(while_get_array, &get_params_array);
+    rest_splitter.AddParameter(while_get_indices, &get_params_indices);
 
+    Shape merged_array_shape = while_get_array->shape();
+    Shape merged_indices_shape = while_get_indices->shape();
+    auto merged_split_dim_size = slice_k + split_rest;
+    merged_array_shape.set_dimensions(split_dim, merged_split_dim_size);
+    merged_indices_shape.set_dimensions(split_dim, merged_split_dim_size);
+    auto rest_merged_array =
+        rest_builder.AddInstruction(HloInstruction::CreateConcatenate(
+            merged_array_shape, {get_params_array, rest_array}, split_dim));
+    auto rest_merged_indices =
+        rest_builder.AddInstruction(HloInstruction::CreateConcatenate(
+            merged_indices_shape, {get_params_indices, rest_indices},
+            split_dim));
+
+    Shape rest_sort_shape = ShapeUtil::MakeTupleShape(
+        {rest_merged_array->shape(), rest_merged_indices->shape()});
+    auto rest_sort =
+        rest_builder.AddInstruction(sort->CloneWithNewOperands(
+            rest_sort_shape, {rest_merged_array, rest_merged_indices}));
+    
     HloComputation* rest_comp =
         parent_module->AddEmbeddedComputation(rest_builder.Build(rest_sort));
 
     rest_splitter.parameters()[0] =
         sort_comp->AddInstruction(CONSTANT_INT64(main_split_size));
-    HloInstruction* rest_args = sort_comp->AddInstruction(
+    auto rest_args = sort_comp->AddInstruction(
         HloInstruction::CreateTuple(rest_splitter.parameters()));
-    HloInstruction* rest_sort_result = sort_comp->AddInstruction(
-        HloInstruction::CreateCall(rest_sort->shape(), {rest_args}, rest_comp));
+    auto rest_sort_result = sort_comp->AddInstruction(
+        HloInstruction::CreateCall(rest_sort_shape, {rest_args}, rest_comp));
 
-    HloInstruction* rest_get_array =
+    auto rest_get_array =
         sort_comp->AddInstruction(HloInstruction::CreateGetTupleElement(
             rest_sort_shape.tuple_shapes(0), rest_sort_result, 0));
-    HloInstruction* rest_get_indices =
+    auto rest_get_indices =
         sort_comp->AddInstruction(HloInstruction::CreateGetTupleElement(
             rest_sort_shape.tuple_shapes(1), rest_sort_result, 1));
 
-    HloInstruction* rest_array_slice =
+    auto rest_array_slice =
         sort_comp->AddInstruction(array_slice->CloneWithNewOperands(
             array_slice->shape(), {rest_get_array}));
-    HloInstruction* rest_indices_slice =
+    auto rest_indices_slice =
         sort_comp->AddInstruction(indices_slice->CloneWithNewOperands(
             indices_slice->shape(), {rest_get_indices}));
 
-    Shape merged_array_shape = while_get_array->shape();
-    Shape merged_indices_shape = while_get_indices->shape();
-    auto merged_split_dim_size =
-        while_get_array->shape().dimensions(split_dim) +
-        rest_array_slice->shape().dimensions(split_dim);
-    merged_array_shape.set_dimensions(split_dim, merged_split_dim_size);
-    merged_indices_shape.set_dimensions(split_dim, merged_split_dim_size);
-
-    merged_array = sort_comp->AddInstruction(HloInstruction::CreateConcatenate(
-        merged_array_shape, {while_get_array, rest_array_slice}, split_dim));
-    merged_indices =
-        sort_comp->AddInstruction(HloInstruction::CreateConcatenate(
-            merged_indices_shape, {while_get_indices, rest_indices_slice},
-            split_dim));
+    TF_RETURN_IF_ERROR(sort_comp->ReplaceInstructionWithDifferentShape(
+        array_slice, rest_array_slice));
+    TF_RETURN_IF_ERROR(sort_comp->ReplaceInstructionWithDifferentShape(
+        indices_slice, rest_indices_slice));
   }
-
-  Shape final_sort_shape = ShapeUtil::MakeTupleShape(
-      {merged_array->shape(), merged_indices->shape()});
-  HloInstruction* final_sort =
-      sort_comp->AddInstruction(sort->CloneWithNewOperands(
-          final_sort_shape, {merged_array, merged_indices}));
-
-  // msg << "\n-> while_get_array->shape()=" << while_get_array->shape();
-  // msg << "\n-> while_get_indices->shape()=" << while_get_indices->shape();
-  // msg << "\n-> final_sort->shape()=" << final_sort->shape();
-  // msg << "\n-> final_sort->name()=" << final_sort->name();
-
-  VLOG(3) << "Replacing instruction:";
-  VLOG(3) << "  old: " << sort->ToString();
-  VLOG(3) << "  new: " << final_sort->ToString();
-
-  HloInstruction* final_get_array =
-      sort_comp->AddInstruction(get_array->CloneWithNewOperands(
-          final_sort_shape.tuple_shapes(0), {sort}));
-  HloInstruction* final_get_indices =
-      sort_comp->AddInstruction(get_indices->CloneWithNewOperands(
-          final_sort_shape.tuple_shapes(1), {sort}));
-
-  TF_RETURN_IF_ERROR(get_array->parent()->ReplaceInstructionWithDifferentShape(
-      get_array, final_get_array));
-  TF_RETURN_IF_ERROR(
-      get_indices->parent()->ReplaceInstructionWithDifferentShape(
-          get_indices, final_get_indices));
-  TF_RETURN_IF_ERROR(
-      sort_comp->ReplaceInstructionWithDifferentShape(sort, final_sort));
-
-  // msg << "\n-> final_sort->operand(0)->name()=" <<
-  // final_sort->operand(0)->name(); msg << "\n->
-  // final_sort->operand(0)->shape()=" << final_sort->operand(0)->shape(); msg
-  // << "\n-> final_sort->operand(1)->name()=" <<
-  // final_sort->operand(1)->name(); msg << "\n->
-  // final_sort->operand(1)->shape()=" << final_sort->operand(1)->shape();
-
-  // msg << "\n-> final_sort->operand(0)->operand(0)->name()=" <<
-  // final_sort->operand(0)->operand(0)->name(); msg << "\n->
-  // final_sort->operand(0)->operand(0)->shape()=" <<
-  // final_sort->operand(0)->operand(0)->shape(); msg << "\n->
-  // final_sort->operand(1)->operand(0)->name()=" <<
-  // final_sort->operand(1)->operand(0)->name(); msg << "\n->
-  // final_sort->operand(1)->operand(0)->shape()=" <<
-  // final_sort->operand(1)->operand(0)->shape();
-
-  // msg << "\n-> After final_sort->users(0)->name()=" <<
-  // final_sort->users()[0]->name(); msg << "\n-> After
-  // final_sort->users(0)->shape()=" << final_sort->users()[0]->shape(); msg <<
-  // "\n-> After final_sort->users(1)->name()=" <<
-  // final_sort->users()[1]->name(); msg << "\n-> After
-  // final_sort->users(1)->shape()=" << final_sort->users()[1]->shape();
-
-  // msg << "\n\n-> final_sort after replacement=" << final_sort->ToString();
-  // LOG(INFO) << msg.str();
 
   changed_ = true;
   return Status::OK();
