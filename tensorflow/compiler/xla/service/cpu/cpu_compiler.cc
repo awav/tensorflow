@@ -329,7 +329,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<DynamicIndexSplitter>();
 
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<RceOptimizer>();
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();

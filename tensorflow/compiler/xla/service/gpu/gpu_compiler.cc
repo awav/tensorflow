@@ -341,7 +341,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<ZeroSizedHloElimination>();
 
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
-    pipeline.AddPass<RceOptimizer>();
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     // pipeline.AddPass<AlgebraicRewriter>();
