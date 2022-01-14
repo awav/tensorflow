@@ -2355,6 +2355,9 @@ cc_library(
     deps = [
         ":hlo_pass",
         ":hlo_creation_utils",
+        ":hlo_dce",
+        ":algebraic_simplifier",
+        ":hlo_pass_pipeline",
         ":pattern_matcher",
         "@com_google_absl//absl/algorithm:container",
     ],
