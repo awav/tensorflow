@@ -88,60 +88,83 @@ Status RceOptimizerVisitor::HandleTranspose(HloInstruction* transpose) {
 }
 
 Status RceOptimizerVisitor::HandleReshape(HloInstruction* reshape) {
-  HloInstruction* op = nullptr;
-  CHECK(Match(reshape, m::Reshape(m::Op(&op))));
+  HloInstruction* reshape_op = nullptr;
+  CHECK(Match(reshape, m::Reshape(m::Op(&reshape_op))));
 
   std::stringstream ss;
 
-  // ss << "\n.......................";
-  // ss << "\n...>> enter reshape=" << reshape->ToString();
-  // ss << "\n...>> enter reshape operand=" << op->ToString();
-  // ss << "\n...>> reshape->opcode()=" << reshape->opcode();
-  // ss << "\n...>> op->opcode()=" << op->opcode();
-  // ss << "\n...>> HloOpcode::kReshape=" << HloOpcode::kReshape;
+  ss << "\n.......................";
+  ss << "\n...>> enter reshape=" << reshape->ToString();
+  ss << "\n...>> enter reshape operand=" << reshape_op->ToString();
+  ss << "\n...>> reshape->opcode()=" << reshape->opcode();
+  ss << "\n...>> reshape_op->opcode()=" << reshape_op->opcode();
+  ss << "\n...>> reshape->user_count()=" << reshape->user_count();
+  ss << "\n...>> reshape_op->user_count()=" << reshape_op->user_count();
+  ss << "\n...>> HloOpcode::kReshape=" << HloOpcode::kReshape; //
+  ss << "\n";
 
   // TODO: Does the physical layout matter for reshapes? I don't
   // think it does, but this might be something to investigate in
   // the future if problems arise.
-  if (ShapeUtil::Equal(reshape->shape(), op->shape())) {
+  if (ShapeUtil::Equal(reshape->shape(), reshape_op->shape())) {
     // This reshape does nothing, remove it
-    // ss << "\n";
-    // ss << "\n...!! op=" << op->ToString();
-    // ss << "\n...>< reshape=" << reshape->ToString();
-    // ss << "\n...<-- replace_simple_case" << op->ToString();
-    // LOG(INFO) << ss.str();
-    return ReplaceInstruction(reshape, op);
+
+    ss << "\n ... check simple case ??";
+    ss << "\n...!! reshape_op=" << reshape_op->ToString();
+    ss << "\n...>< reshape=" << reshape->ToString();
+    ss << "\n...<-- replace_simple_case"; 
+    LOG(INFO) << ss.str();
+    return ReplaceInstruction(reshape, reshape_op);
   }
 
   HloInstruction* broadcast_operand = nullptr;
-  if (Match(op, m::Broadcast(m::Op(&broadcast_operand)))) {
-    const Shape& reshape_shape = reshape->shape();
-    const Shape& broadcast_operand_shape = broadcast_operand->shape();
+  if (Match(reshape_op, m::Broadcast(m::Op(&broadcast_operand)))) {
+    ss << "\n ... check broadcast ??";
+
+    auto reshape_shape = reshape->shape();
+    auto broadcast_operand_shape = broadcast_operand->shape();
     if (reshape_shape == broadcast_operand_shape) {
-      // ss << "\n ...<-- broadcast_reshape_case";
-      // LOG(INFO) << ss.str();
+      ss << "\n ...<-- broadcast_reshape_case";
+      LOG(INFO) << ss.str();
       return ReplaceInstruction(reshape, broadcast_operand);
     }
   }
 
-  // Remove a sequence of unnecessary reshapes.
-  if (Match(op, m::Reshape(m::Op()))) {
-    HloInstruction* next_op = op;
+  // Remove a chain of unnecessary reshapes.
+  if (Match(reshape_op, m::Reshape(m::Op()))) {
+    ss << "\n ... check reshape_chain ??";
+
+    HloInstruction* next_op = reshape_op;
     HloInstruction* current_op = nullptr;
     auto chain_len = 0;
+    bool is_chain = true;
     while (Match(next_op, m::Reshape(m::Op(&current_op)))) {
+      if (next_op->user_count() > 1) {
+        is_chain = false;
+        break;
+      }
       next_op = current_op;
-      current_op = next_op;
       chain_len++;
     }
 
-    // ss << "\n...<> next_op=" << next_op->ToString();
-    // ss << "\n...>< reshape=" << reshape->ToString();
+    ss << "\n...<> next_op=" << next_op->ToString();
+    ss << "\n...>< reshape=" << reshape->ToString();
 
-    if (ShapeUtil::Equal(next_op->shape(), reshape->shape())) {
-      // ss << "\n...!! replace_long_chain";
-      // LOG(INFO) << ss.str();
+    if (is_chain && ShapeUtil::Equal(next_op->shape(), reshape->shape())) {
+      ss << "\n...!! replace_long_chain";
+      LOG(INFO) << ss.str();
       return ReplaceInstruction(reshape, next_op);
+    }
+  }
+
+  // Remove "op (shape) -> reduce (shape - 1) -> reshape (shape)"
+  if (reshape_op->user_count() == 1 && Match(reshape_op, m::Reduce())) {
+    ss << "\n ... check reshape_reduce ??";
+    HloInstruction* reduce_op = reshape_op->mutable_operand(0);
+    if (ShapeUtil::Equal(reduce_op->shape(), reshape->shape())) {
+      ss << "\n ...!! replace_reshape_and_reduce";
+      LOG(INFO) << ss.str();
+      return ReplaceInstruction(reshape, reduce_op);
     }
   }
 
@@ -239,8 +262,8 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
       // LOG(INFO) << ss.str();
       // LOG(INFO) << "\n --> op_new_user=" << op->users()[0]->ToString();
     }
-    return Status::OK();
   }
+  return Status::OK();
 }
 
 

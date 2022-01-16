@@ -210,8 +210,6 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 }
 
 StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
-  // TODO: Make the size limit configurable + find a better default
-  // int64_t split_size = GetDebugOptionsFromFlags().xla_try_split_tensor_size();
   LOG(INFO) << "Running algebraic rewriter for '" << module->name() << "'";
   AlgebraicRewriterVisitor visitor;
   return visitor.RunOnModule(module);
