@@ -238,12 +238,6 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
       // for (auto n : input_indices) ss << n << ",";
       // ss << "}";
       // ss << "\n ==> old_reduce_shape=" << reduce->shape();
-
-      // TF_RETURN_IF_ERROR(comp->ReplaceInstruction(reduce, new_reshape));
-      // changed_ = true;
-
-      return ReplaceInstruction(reduce, new_reshape);
-
       // ss << "\n ==> op->user_count()=" << op->user_count();
       // ss << "\n ==> new_reduce_shape=" << new_reduce->shape();
       // ss << "\n ==> new_reshape_shape=" << new_reshape->shape();
@@ -261,6 +255,11 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
       // ss << "}";
       // LOG(INFO) << ss.str();
       // LOG(INFO) << "\n --> op_new_user=" << op->users()[0]->ToString();
+
+      // TF_RETURN_IF_ERROR(comp->ReplaceInstruction(reduce, new_reshape));
+      // changed_ = true;
+
+      return ReplaceInstruction(reduce, new_reshape);
     }
   }
   return Status::OK();
