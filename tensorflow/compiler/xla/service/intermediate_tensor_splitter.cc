@@ -2151,8 +2151,8 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleSort(
   auto slice_k = array_slice->shape().dimensions(last_dim);
   if (slice_k >= split_size) {
     LOG(WARNING) << "Splitting for '" << sort->name()
-                 << "' will not benefit user as the last dimension "
-                 << "is larger or equal to the split size " << split_size;
+                 << "' will not benefit user as the slicing dimension (" << slice_k << ") "
+                 << "is larger or equal to the split size (" << split_size << ")";
     return Status::OK();
   }
 
