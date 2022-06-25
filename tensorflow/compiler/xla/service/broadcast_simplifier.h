@@ -10,7 +10,7 @@ namespace xla {
 
 // A pass which removes unnecessary broadcasts, transposes, and
 // reshapes. Mainly used to simplify matching in passes
-// like intermediate_tensor_splitter.
+// like tensor_splitter.
 class BroadcastSimplifier : public HloModulePass {
  public:
   absl::string_view name() const override { return "broadcast-simplifier"; }

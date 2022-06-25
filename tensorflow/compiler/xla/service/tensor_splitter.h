@@ -8,7 +8,7 @@
 
 namespace xla {
 
-// A pass which splits intermediate tensor values
+// A pass which splits tensor values
 class TensorSplitter : public HloModulePass {
  public:
   absl::string_view name() const override { return "tensor-splitter"; }
@@ -21,4 +21,4 @@ class TensorSplitter : public HloModulePass {
 
 }  // namespace xla
 
-#endif  // TENSORFLOW_COMPILER_XLA_SERVICE_INTERMEDIATE_TENSOR_SPLITTER_
+#endif  // TENSORFLOW_COMPILER_XLA_SERVICE_TENSOR_SPLITTER_

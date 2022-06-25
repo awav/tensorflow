@@ -1,5 +1,5 @@
 // License TODO ....
-#include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
 
 #include <stdlib.h>
 
@@ -1233,7 +1233,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
        << split_rest;
 
     HloComputation::Builder body_builder(
-        "intermediate_tensor_splitter_dot_body");
+        "tensor_splitter_dot_body");
     Splitter splitter(body_builder, dot->parent(),
                       absl::MakeSpan(split_leafs_lhs));
 
@@ -1250,7 +1250,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     // build the condition
     HloComputation::Builder cond_builder(
-        "intermediate_tensor_splitter_dot_cond");
+        "tensor_splitter_dot_cond");
     HloInstruction* cond_param =
         cond_builder.AddInstruction(HloInstruction::CreateParameter(
             0, output_tuple->shape(), "loop_param"));
@@ -1281,7 +1281,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       return ReplaceInstruction(dot, result);
     } else {
       HloComputation::Builder rest_builder(
-          "intermediate_tensor_splitter_dot_rest");
+          "tensor_splitter_dot_rest");
       Splitter splitter(rest_builder, dot->parent(),
                         absl::MakeSpan(split_leafs_lhs),
                         main_split_size);
@@ -1347,7 +1347,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
        << " lhs and rhs will be split on contracted dimension with split size "
        << split_size << " and split rest " << split_rest;
 
-    HloComputation::Builder body_builder("intermediate_tensor_splitter_dot_body");
+    HloComputation::Builder body_builder("tensor_splitter_dot_body");
 
     for (HloInstruction* leaf : split_leafs_rhs) {
       split_leafs_lhs.push_back(leaf);
@@ -1374,7 +1374,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
         parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
 
     // build the condition
-    HloComputation::Builder cond_builder("intermediate_tensor_splitter_dot_cond");
+    HloComputation::Builder cond_builder("tensor_splitter_dot_cond");
     HloInstruction* cond_param =
         cond_builder.AddInstruction(HloInstruction::CreateParameter(
             0, output_tuple->shape(), "loop_param"));
@@ -1405,7 +1405,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       LOG(INFO) << ss.str();
       return ReplaceInstruction(dot, result);
     } else {
-      HloComputation::Builder rest_builder("intermediate_tensor_splitter_dot_rest");
+      HloComputation::Builder rest_builder("tensor_splitter_dot_rest");
       Splitter splitter(rest_builder, dot->parent(),
                         absl::MakeSpan(split_leafs_lhs),
                         main_split_size);
@@ -1472,7 +1472,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
        << split_size << " and rest size " << split_rest;
 
     HloComputation::Builder body_builder(
-        "intermediate_tensor_splitter_dot_body");
+        "tensor_splitter_dot_body");
     Splitter splitter(
         body_builder, dot->parent(),
         absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs));
@@ -1546,7 +1546,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
 
     // build the condition
     HloComputation::Builder cond_builder(
-        "intermediate_tensor_splitter_dot_cond");
+        "tensor_splitter_dot_cond");
     HloInstruction* cond_param =
         cond_builder.AddInstruction(HloInstruction::CreateParameter(
             0, output_tuple->shape(), "loop_param"));
@@ -1579,7 +1579,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleDot(
       return ReplaceInstruction(dot, result);
     } else {
       HloComputation::Builder rest_builder(
-          "intermediate_tensor_splitter_dot_rest");
+          "tensor_splitter_dot_rest");
       Splitter splitter(
           rest_builder, dot->parent(),
           absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs),
@@ -1795,7 +1795,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
      << split_rest;
 
   HloComputation::Builder body_builder(
-      "intermediate_tensor_splitter_reduce_body");
+      "tensor_splitter_reduce_body");
   Splitter splitter(body_builder, reduce->parent(),
                     absl::MakeSpan(split_leafs));
 
@@ -1872,7 +1872,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
   // build the condition
   HloComputation::Builder cond_builder(
-      "intermediate_tensor_splitter_reduce_cond");
+      "tensor_splitter_reduce_cond");
   HloInstruction* cond_param = cond_builder.AddInstruction(
       HloInstruction::CreateParameter(0, output_tuple->shape(), "loop_param"));
   HloInstruction* cond_offset =
@@ -1901,7 +1901,7 @@ Status IntermediateTensorSplitterRewriteVisitor::HandleReduce(
 
   if (split_rest > 0) {
     HloComputation::Builder rest_builder(
-        "intermediate_tensor_splitter_reduce_rest");
+        "tensor_splitter_reduce_rest");
     Splitter rest_splitter(rest_builder, reduce->parent(),
                            absl::MakeSpan(split_leafs),
                            main_split_size);

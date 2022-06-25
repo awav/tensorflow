@@ -1,6 +1,6 @@
 // License TODO ....
 
-#include "tensorflow/compiler/xla/service/intermediate_tensor_splitter.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
 
 #include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
@@ -14,10 +14,10 @@ namespace {
 
 namespace m = match;
 
-class IntermediateTensorSplitterTest : public HloTestBase {
+class TensorSplitterTest : public HloTestBase {
  protected:
   const int64_t max_size() {
-    return IntermediateTensorSplitter::SplitTensorBytes();
+    return TensorSplitter::SplitTensorBytes();
   }
 
   const int64_t large_dim() { return max_size() / 32 * 8 / 3; }
@@ -49,7 +49,7 @@ class IntermediateTensorSplitterTest : public HloTestBase {
 };
 
 // Test the most basic case: exp(AB^T)v
-TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
+TEST_F(TensorSplitterTest, BasicCaseLhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -87,7 +87,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -95,7 +95,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseLhs) {
 }
 
 // Test the most basic rhs case: exp(AB^T)v
-TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
+TEST_F(TensorSplitterTest, BasicCaseRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -133,7 +133,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -141,7 +141,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicCaseRhs) {
 }
 
 // Self dot: outer-product -> inner-product
-TEST_F(IntermediateTensorSplitterTest, BasicSelfDot) {
+TEST_F(TensorSplitterTest, BasicSelfDot) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -176,7 +176,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSelfDot) {
                            m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -185,7 +185,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSelfDot) {
 
 // Test the case where the to split dimension lies on the
 // rhs of the source dot
-TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
+TEST_F(TensorSplitterTest, BasicSplitDotOnRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -223,7 +223,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -231,7 +231,7 @@ TEST_F(IntermediateTensorSplitterTest, BasicSplitDotOnRhs) {
 }
 
 // Test broadcast instructions as source
-TEST_F(IntermediateTensorSplitterTest, Broadcast) {
+TEST_F(TensorSplitterTest, Broadcast) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -261,7 +261,7 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -270,7 +270,7 @@ TEST_F(IntermediateTensorSplitterTest, Broadcast) {
 
 // Test broadcast instructions as source when split dim
 // is a real dimension
-TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
+TEST_F(TensorSplitterTest, BroadcastSplitOnOperandDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -300,7 +300,7 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -308,7 +308,7 @@ TEST_F(IntermediateTensorSplitterTest, BroadcastSplitOnOperandDim) {
 }
 
 // Test iota with iota dimension along split
-TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongIotaDim) {
+TEST_F(TensorSplitterTest, IotaSplitAlongIotaDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -332,7 +332,7 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongIotaDim) {
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -340,7 +340,7 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongIotaDim) {
 }
 
 // Test iota with non-iota dimension along split
-TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
+TEST_F(TensorSplitterTest, IotaSplitAlongNonIotaDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -364,7 +364,7 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -372,7 +372,7 @@ TEST_F(IntermediateTensorSplitterTest, IotaSplitAlongNonIotaDim) {
 }
 
 // Test single argument reduce (e.g. max)
-TEST_F(IntermediateTensorSplitterTest, SingleOperandReduce) {
+TEST_F(TensorSplitterTest, SingleOperandReduce) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
   HloComputation::Builder max_builder(TestName() + ".max");
@@ -403,7 +403,7 @@ TEST_F(IntermediateTensorSplitterTest, SingleOperandReduce) {
                     m::Reduce(m::Op().Is(a), m::Op().Is(init))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -411,7 +411,7 @@ TEST_F(IntermediateTensorSplitterTest, SingleOperandReduce) {
 }
 
 // Test multi argument reduce (e.g. argmax)
-TEST_F(IntermediateTensorSplitterTest, MultiOperandReduce) {
+TEST_F(TensorSplitterTest, MultiOperandReduce) {
   const string module_str = R"(
 HloModule a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.35
 
@@ -465,7 +465,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 
   EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
@@ -473,7 +473,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 }
 
 // Test nested reduce
-TEST_F(IntermediateTensorSplitterTest, NestedReduce) {
+TEST_F(TensorSplitterTest, NestedReduce) {
   const string module_str = R"(
 HloModule a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.34
 
@@ -526,7 +526,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 
   EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
-  IntermediateTensorSplitter optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
