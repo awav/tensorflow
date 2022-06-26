@@ -577,7 +577,7 @@ int64_t TensorSplitterRewriteVisitor::BestEvenSplitSize(HloInstruction* inst,
   int64_t full_size_bytes =
       ShapeUtil::ByteSizeOfPrimitiveType(inst->shape().element_type()) *
       ShapeUtil::ElementsIn(inst->shape());
-  int64_t max_size = max_size_threshold * size / full_size_bytes;
+  int64_t max_size = target_split_size * size / full_size_bytes;
   int64_t factor = BestEvenSplitSizeFold(factors, 0, 1, size, size, max_size);
   return size / factor;
 }
@@ -588,7 +588,7 @@ SplitProperties TensorSplitterRewriteVisitor::DetermineSplitSize(
   int64_t best_even_split = BestEvenSplitSize(inst, split_dim);
   int64_t split_dim_size = inst_shape.dimensions(split_dim);
   int64_t max_elements =
-      max_size_threshold /
+      target_split_size /
       ShapeUtil::ByteSizeOfPrimitiveType(inst_shape.element_type());
   int64_t max_dim_size =
       max_elements * split_dim_size / ShapeUtil::ElementsIn(inst_shape);
