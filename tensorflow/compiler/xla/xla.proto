@@ -350,11 +350,16 @@ message DebugOptions {
   // logging a warning and proceeding with fallback.
   bool xla_gpu_strict_conv_algorithm_picker = 156;
 
-  // Try to split intermediate tensors which are larger than the
-  // provided size. E.g. 1GiB
-  string xla_try_split_tensor_size = 158;
+  // Threshold size for splitting compatible tensors
+  string xla_tensor_size_threshold = 158;
 
-  // Next id: 159
+  // The value in bytes for splitting size of compatible tensors.
+  // This value cannot be larger than xla_tensor_size_threshold option.
+  // By default it is set to 0 and xla_tensor_size_threshold used as
+  // the splitting size.
+  string xla_tensor_split_size = 159;
+
+  // Next id: 160
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

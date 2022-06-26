@@ -17,7 +17,7 @@ namespace m = match;
 class TensorSplitterTest : public HloTestBase {
  protected:
   const int64_t max_size() {
-    return TensorSplitter::SplitTensorBytes();
+    return std::get<0>(TensorSplitter::SplitSettings());
   }
 
   const int64_t large_dim() { return max_size() / 32 * 8 / 3; }

@@ -78,8 +78,9 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_cpu_enable_xprof_traceme(false);
   opts.set_xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found(false);
   opts.set_xla_multiheap_size_constraint_per_heap(-1);
-  opts.set_xla_try_split_tensor_size("1GB");  // TODO: It's set to one GB, is that good?
   opts.set_xla_detailed_logging_and_dumping(true);
+  opts.set_xla_tensor_size_threshold("1GB");
+  opts.set_xla_tensor_split_size("0B");
   return opts;
 }
 
@@ -673,10 +674,16 @@ static void AllocateFlags() {
       "If specified, dumps HLO before and after optimization passes in the "
       "pass pipelines that match this regular expression."));
   flag_objects->push_back(tensorflow::Flag(
-      "xla_try_split_tensor_size",
-      string_setter_for(&DebugOptions::set_xla_try_split_tensor_size),
-      flag_values->xla_try_split_tensor_size(),
-      "Try to split intermediate tensors which are larger than the set number of bytes."));
+      "xla_tensor_size_threshold",
+      string_setter_for(&DebugOptions::set_xla_tensor_size_threshold),
+      flag_values->xla_tensor_size_threshold()
+      "Threshold size in bytes for slitting compatible tensors."));
+  flag_objects->push_back(tensorflow::Flag(
+      "xla_tensor_split_size",
+      string_setter_for(&DebugOptions::set_xla_tensor_split_size),
+      flag_values->xla_tensor_split_size()
+      "The value in bytes for splitting size of tensors. When the value is 0, "
+      "the value of xla_tensor_size_threshold is be used instead."));
 
   ParseFlagsFromEnvAndDieIfUnknown("XLA_FLAGS", *flag_objects);
 }  // NOLINT(readability/fn_size)

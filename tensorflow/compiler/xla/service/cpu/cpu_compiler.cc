@@ -333,7 +333,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
-  pipeline.AddPass<IntermediateTensorSplitter>();
+  pipeline.AddPass<TensorSplitter>();
   pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
   pipeline.AddPass<ConditionalToSelect>();
