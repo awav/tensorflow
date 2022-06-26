@@ -587,9 +587,9 @@ SplitProperties TensorSplitterRewriteVisitor::DetermineSplitSize(
   const Shape& inst_shape = inst->shape();
   int64_t best_even_split = BestEvenSplitSize(inst, split_dim);
   int64_t split_dim_size = inst_shape.dimensions(split_dim);
-  int64_t max_elements =
-      target_split_size /
+  int64_t primitive_type_size =
       ShapeUtil::ByteSizeOfPrimitiveType(inst_shape.element_type());
+  int64_t max_elements = target_split_size / primitive_type_size;
   int64_t max_dim_size =
       max_elements * split_dim_size / ShapeUtil::ElementsIn(inst_shape);
 
