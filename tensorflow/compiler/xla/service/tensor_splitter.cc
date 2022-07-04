@@ -2465,7 +2465,7 @@ Status TensorSplitterRewriteVisitor::HandleSort(HloInstruction* sort) {
   return Status::OK();
 }
 
-bool endsWith(string& str, string pattern) {
+bool endsWith(const string& str, string pattern) {
   if (pattern.size() > str.size()) return false;
   for (int i = 1; i <= pattern.size(); i++) {
     if (pattern[pattern.size() - i] != str[str.size() - i]) return false;

@@ -676,12 +676,12 @@ static void AllocateFlags() {
   flag_objects->push_back(tensorflow::Flag(
       "xla_tensor_size_threshold",
       string_setter_for(&DebugOptions::set_xla_tensor_size_threshold),
-      flag_values->xla_tensor_size_threshold()
+      flag_values->xla_tensor_size_threshold(),
       "Threshold size in bytes for slitting compatible tensors."));
   flag_objects->push_back(tensorflow::Flag(
       "xla_tensor_split_size",
       string_setter_for(&DebugOptions::set_xla_tensor_split_size),
-      flag_values->xla_tensor_split_size()
+      flag_values->xla_tensor_split_size(),
       "The value in bytes for splitting size of tensors. When the value is 0, "
       "the value of xla_tensor_size_threshold is be used instead."));
 
