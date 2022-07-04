@@ -126,6 +126,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_sharding_metadata.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
@@ -439,6 +440,7 @@ Status GpuCompiler::OptimizeHloModule(
       // TODO(b/134075051): Re-enable after b/134075051 is fixed.
       // pipeline.AddPass<SliceSinker>();
 
+      pipeline.AddPass<HloMCO>();
       pipeline.AddPass<ReshapeMover>();
       pipeline.AddPass<HloConstantFolding>();
       pipeline.AddPass<ConditionalSimplifier>();
