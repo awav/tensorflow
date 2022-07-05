@@ -166,6 +166,7 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
       }
     }
   }
+  return Status::OK();
 }
 
 StatusOr<bool> DotOrderOptimizer::Run(HloModule* module) {
