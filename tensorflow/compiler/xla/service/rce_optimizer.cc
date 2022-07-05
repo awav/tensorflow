@@ -61,6 +61,7 @@ Status RceOptimizerVisitor::HandleGetTupleElement(HloInstruction* get_tuple_elem
       return ReplaceInstruction(get_tuple_element, op);
     }
   }
+  return Status::OK();
 }
 
 Status RceOptimizerVisitor::HandleBroadcast(HloInstruction* broadcast) {
@@ -72,10 +73,12 @@ Status RceOptimizerVisitor::HandleBroadcast(HloInstruction* broadcast) {
     // This broadcast does nothing, remove it
     return ReplaceInstruction(broadcast, op);
   }
+  return Status::OK();
 }
 
 Status RceOptimizerVisitor::HandleTranspose(HloInstruction* transpose) {
   HloInstruction* op;
+
   CHECK(Match(transpose, m::Transpose(m::Op(&op))));
 
   // We need to check the shape, since the transpose might modify the physical
@@ -85,6 +88,7 @@ Status RceOptimizerVisitor::HandleTranspose(HloInstruction* transpose) {
     // This transpose does nothing, remove it
     return ReplaceInstruction(transpose, op);
   }
+  return Status::OK();
 }
 
 Status RceOptimizerVisitor::HandleReshape(HloInstruction* reshape) {
@@ -265,7 +269,6 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
   return Status::OK();
 }
 
-
 Status RceOptimizerVisitor::HandleConvert(HloInstruction* convert) {
   HloInstruction* op;
   CHECK(Match(convert, m::Convert(m::Op(&op))));
@@ -274,8 +277,8 @@ Status RceOptimizerVisitor::HandleConvert(HloInstruction* convert) {
     // This convert does nothing, remove it
     return ReplaceInstruction(convert, op);
   }
+  return Status::OK();
 }
-
 
 StatusOr<bool> RceOptimizer::Run(HloModule* module) {
   RceOptimizerVisitor visitor;
