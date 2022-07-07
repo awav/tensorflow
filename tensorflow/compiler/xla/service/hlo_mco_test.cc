@@ -18,6 +18,9 @@ class HloMCOTest : public HloTestBase {
  protected:
   HloMCOTest() {}
 };
+
+std::string dot_dir = "~/test_output/";
+
 void DumpToFileInDirImpl(std::string dir, std::string filename,
                          std::string contents) {
   // const string& dir = opts.dump_to;
@@ -64,7 +67,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -77,8 +80,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -95,8 +98,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -118,7 +121,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -131,8 +134,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -149,8 +152,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -174,7 +177,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -187,8 +190,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -205,8 +208,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 TEST_F(HloMCOTest, MatrixVectorChainAsSubgraph) {
@@ -231,7 +234,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -244,8 +247,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -262,8 +265,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -292,7 +295,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -305,8 +308,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -323,8 +326,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -353,7 +356,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -366,8 +369,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -384,8 +387,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 TEST_F(HloMCOTest, ComplexChainWithRewrittenTranspose) {
@@ -416,7 +419,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -429,8 +432,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -447,8 +450,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 TEST_F(HloMCOTest, ComplexChainWithTranspose) {
@@ -480,7 +483,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -493,8 +496,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -511,8 +514,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -539,7 +542,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -552,8 +555,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -570,8 +573,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -594,7 +597,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -607,8 +610,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -625,8 +628,8 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
@@ -636,6 +639,13 @@ TEST_F(HloMCOTest, MatrixVectorTransDotChain) {
   auto builder = HloComputation::Builder(TestName());
   const std::string hlo_text = R"(
 HloModule MatrixVectorTransDotChain
+
+%Sum-reduction.11 (x.12: f32[], y.13: f32[]) -> f32[] {
+  %x.12 = f32[] parameter(0)
+  %y.13 = f32[] parameter(1)
+  ROOT %add.14 = f32[] add(f32[] %x.12, f32[] %y.13)
+}
+
 main{
   %arg3.4 = f32[10,30]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
   %arg2.3 = f32[40,30]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
@@ -649,7 +659,7 @@ main{
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
                           ParseAndReturnVerifiedModule(hlo_text));
-  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  
   std::string filename = TestName() + "_before_opotimization";
   // DebugOptions debug_options
   auto render_graph = [&](RenderedGraphFormat format) {
@@ -662,8 +672,8 @@ main{
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
@@ -680,8 +690,138 @@ main{
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << dir;
-  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, ReduceSumDotChain) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ReduceSumDotChain
+
+%Sum-reduction.11 (x.12: f32[], y.13: f32[]) -> f32[] {
+  %x.12 = f32[] parameter(0)
+  %y.13 = f32[] parameter(1)
+  ROOT %add.14 = f32[] add(f32[] %x.12, f32[] %y.13)
+}
+
+main{
+  %A = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %B = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot.52 = f32[20,10]{1,0} dot(f32[20,30]{1,0} %B, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %dot.53 = f32[40,10]{1,0} dot(f32[40,20]{1,0} %A, f32[20,10]{1,0} %dot.52), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %constant.9 = f32[] constant(0), metadata={op_type="Sum" op_name="Sum" source_file="/vol/bitbucket/ya321/codes/gambit/try.py" source_line=117}
+  ROOT %reduce.15 = f32[40]{0} reduce(f32[40,10]{1,0} %dot.53, f32[] %constant.9), dimensions={1}, to_apply=%Sum-reduction.11, metadata={op_type="Sum" op_name="Sum" source_file="/vol/bitbucket/ya321/codes/gambit/try.py" source_line=117}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  // AlgebraicSimplifierOptions default_options_;
+  // AlgebraicSimplifier simplifier(default_options_);
+  // simplifier.Run(m.get()).ValueOrDie();
+  // TransposeFolding transpose_folding;
+  // transpose_folding.Run(m.get()).ValueOrDie();
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, ReduceSumOuterDotChain) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ReduceSumOuterDotChain
+
+%Sum-reduction.12 (x.13: f32[], y.14: f32[]) -> f32[] {
+  %x.13 = f32[] parameter(0)
+  %y.14 = f32[] parameter(1)
+  ROOT %add.15 = f32[] add(f32[] %x.13, f32[] %y.14)
+}
+
+main (arg0.1: f32[40,20], arg1.2: f32[20,30], arg2.3: f32[30,10], arg3.4: f32[10]) -> f32[40,10] {
+  %arg0.1 = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %arg1.2 = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %arg2.3 = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot = f32[20,10]{1,0} dot(f32[20,30]{1,0} %arg1.2, f32[30,10]{1,0} %arg2.3), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %dot.1 = f32[40,10]{1,0} dot(f32[40,20]{1,0} %arg0.1, f32[20,10]{1,0} %dot), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_1" source_file="/vol/bitbucket/ya321/codes/gambit/try.py" source_line=118}
+  %constant.10 = f32[] constant(0), metadata={op_type="Sum" op_name="Sum" source_file="/vol/bitbucket/ya321/codes/gambit/try.py" source_line=118}
+  %reduce.16 = f32[40]{0} reduce(f32[40,10]{1,0} %dot.1, f32[] %constant.10), dimensions={1}, to_apply=%Sum-reduction.12, metadata={op_type="Sum" op_name="Sum" source_file="/vol/bitbucket/ya321/codes/gambit/try.py" source_line=118}
+  %reshape = f32[40,1]{1,0} reshape(f32[40]{0} %reduce.16)
+  %reshape.3 = f32[40]{0} reshape(f32[40,1]{1,0} %reshape)
+  %arg3.4 = f32[10]{0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.1 = f32[1,10]{1,0} reshape(f32[10]{0} %arg3.4)
+  %reshape.4 = f32[10]{0} reshape(f32[1,10]{1,0} %reshape.1)
+  ROOT %dot.3 = f32[40,10]{1,0} dot(f32[40]{0} %reshape.3, f32[10]{0} %reshape.4), lhs_contracting_dims={}, rhs_contracting_dims={}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  // AlgebraicSimplifierOptions default_options_;
+  // AlgebraicSimplifier simplifier(default_options_);
+  // simplifier.Run(m.get()).ValueOrDie();
+  // TransposeFolding transpose_folding;
+  // transpose_folding.Run(m.get()).ValueOrDie();
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dot_dir;
+  DumpToFileInDirImpl(dot_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 

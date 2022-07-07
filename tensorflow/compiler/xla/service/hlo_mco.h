@@ -62,7 +62,9 @@ class ChainRecorder : public DfsHloVisitorWithDefault {
   GetChainMap() {
     return chain_map;
   }
-  int64_t GetChainLength(HloInstruction* root) { return chain_map[root].size(); }
+  int64_t GetChainLength(HloInstruction* root) {
+    return chain_map[root].size();
+  }
   std::vector<HloInstruction*> GetChain(HloInstruction* root) {
     return chain_map[root];
   }
@@ -103,19 +105,21 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
 };
 
-class TransposeUnfolder : public DfsHloRewriteVisitor {
+class TransposeReduceSumUnfolder : public DfsHloRewriteVisitor {
  public:
   Status HandleDot(HloInstruction* reshape) override;
   Status HandleTranspose(HloInstruction* transpose) override;
+  Status HandleReduce(HloInstruction* reduce) override;
   bool OldNewMapContain(HloInstruction* old_inst);
   HloInstruction* GetNewInst(HloInstruction* old_inst);
   bool DeleteOldInst(HloInstruction* old_inst);
-private:
+
+ private:
   bool IsTransDot(const HloInstruction* hlo);
   bool IsRegularDot(const HloInstruction* hlo);
+  bool IsReduceSumDot(const HloInstruction* hlo);
   absl::flat_hash_map<HloInstruction*, HloInstruction*> old_new_inst_map;
   void InsertOldNewMap(HloInstruction* old_inst, HloInstruction* new_inst);
-  
 };
 
 }  // namespace xla

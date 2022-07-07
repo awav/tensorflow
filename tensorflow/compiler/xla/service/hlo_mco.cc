@@ -23,7 +23,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
-// #include "tensorflow/compiler/xla/service/hlo_instruction.cc"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
@@ -38,7 +37,8 @@ namespace {
 
 using DFSStack = absl::InlinedVector<std::pair<int, HloInstruction*>, 16>;
 void DebugPrint(std::string functionName, std::string content) {
-  std::cout << "[" << functionName << "]: " << content << std::endl;
+  // std::cout << "[" << functionName << "]: " << content << std::endl;
+  LOG(INFO) << "[" << functionName << "]: " << content;
 }
 void PrintCycle(const HloInstruction* child, DFSStack* dfs_stack) {
   // This set contains HloInstructions from the top of `DFSStack` that might
@@ -193,7 +193,8 @@ static Status DetectMatrixChainPreorderDFS(
 // perform a pre-order DFS and rewrite nodes during traversal
 // template <typename Visitor>
 static Status PreorderDFSRewriter(HloInstruction* root,
-                                  TransposeUnfolder* visitor, bool& changed,
+                                  TransposeReduceSumUnfolder* visitor,
+                                  bool& changed,
                                   bool ignore_control_predecessors = false) {
   // Calculating the instruction count within a module can be expensive on large
   // models so only do it if the visit state is empty. This will help when the
@@ -223,9 +224,9 @@ static Status PreorderDFSRewriter(HloInstruction* root,
     CHECK_GE(current_id, 0)
         << "[PreorderDFSRewriter] " << current_id << ": " << current_node
         << ": instruction may not have parent computation";
-    typename TransposeUnfolder::VisitState visit_state =
+    typename TransposeReduceSumUnfolder::VisitState visit_state =
         visitor->GetVisitState(current_id);
-    if (visit_state == TransposeUnfolder::kVisited) {
+    if (visit_state == TransposeReduceSumUnfolder::kVisited) {
       dfs_stack.pop_back();
       VLOG(3) << "[PreorderDFSRewriter] "
               << "Not visiting HLO (id = " << current_id
@@ -241,7 +242,7 @@ static Status PreorderDFSRewriter(HloInstruction* root,
                    " opcode = " + HloOpcodeString(current_node->opcode()));
     TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
     TF_RETURN_IF_ERROR(current_node->Visit(visitor));
-    visitor->SetVisitState(current_id, TransposeUnfolder::kVisited);
+    visitor->SetVisitState(current_id, TransposeReduceSumUnfolder::kVisited);
     TF_RETURN_IF_ERROR(visitor->Postprocess(current_node));
     if (visitor->OldNewMapContain(current_node)) {
       auto tmp = current_node;
@@ -290,36 +291,94 @@ static Status PreorderDFSRewriter(HloInstruction* root,
   return Status::OK();
 }
 
-Status PreOrderAccept(HloComputation* computation, TransposeUnfolder* visitor,
-                      bool& changed) {
+Status PreOrderAccept(HloComputation* computation,
+                      TransposeReduceSumUnfolder* visitor, bool& changed) {
   return PreorderDFSRewriter(computation->root_instruction(), visitor, changed);
+}
+
+StatusOr<Literal> CreateOneConstVector(const PrimitiveType primitive_type,
+                                       int64_t length) {
+  switch (primitive_type) {
+    case PrimitiveType::F16: {
+      std::vector<half> raw_zero_vector(length, half(1));
+      return LiteralUtil::CreateR1<half>(raw_zero_vector);
+    }
+    case PrimitiveType::BF16: {
+      std::vector<bfloat16> raw_zero_vector(length, bfloat16(1));
+      return LiteralUtil::CreateR1<bfloat16>(raw_zero_vector);
+    }
+    case PrimitiveType::F32: {
+      std::vector<float> raw_zero_vector(length, float(1));
+      return LiteralUtil::CreateR1<float>(raw_zero_vector);;
+    }
+    case PrimitiveType::F64: {
+      std::vector<double> raw_zero_vector(length, double(1));
+      return LiteralUtil::CreateR1<double>(raw_zero_vector);
+    }
+    case PrimitiveType::S8: {
+      std::vector<int8> raw_zero_vector(length, int8(1));
+      return LiteralUtil::CreateR1<int8>(raw_zero_vector);
+    }
+    case PrimitiveType::S16: {
+      std::vector<int16> raw_zero_vector(length, int16(1));
+      return LiteralUtil::CreateR1<int16>(raw_zero_vector);
+    }
+    case PrimitiveType::S32: {
+      std::vector<int32> raw_zero_vector(length, int32(1));
+      return LiteralUtil::CreateR1<int32>(raw_zero_vector);
+    }
+    case PrimitiveType::S64: {
+      std::vector<int64_t> raw_zero_vector(length, int64_t(1));
+      return LiteralUtil::CreateR1<int64_t>(raw_zero_vector);
+    }
+    case PrimitiveType::U8: {
+      std::vector<uint8> raw_zero_vector(length, uint8(1));
+      return LiteralUtil::CreateR1<uint8>(raw_zero_vector);
+    }
+    case PrimitiveType::U16: {
+      std::vector<uint16> raw_zero_vector(length, uint16(1));
+      return LiteralUtil::CreateR1<uint16>(raw_zero_vector);
+    }
+    case PrimitiveType::U32: {
+      std::vector<uint32> raw_zero_vector(length, uint32(1));
+      return LiteralUtil::CreateR1<uint32>(raw_zero_vector);
+    }
+    case PrimitiveType::U64: {
+      std::vector<uint64> raw_zero_vector(length, uint64(1));
+      return LiteralUtil::CreateR1<uint64>(raw_zero_vector);
+    }
+    default:
+      return tensorflow::errors::Internal(absl::StrCat(
+          "Unsupported type: ", PrimitiveType_Name(primitive_type)));
+  }
 }
 
 }  // namespace
 
-bool TransposeUnfolder::OldNewMapContain(HloInstruction* old_inst) {
-  DebugPrint("TransposeUnfolder::OldNewMapContain",
+bool TransposeReduceSumUnfolder::OldNewMapContain(HloInstruction* old_inst) {
+  DebugPrint("TransposeReduceSumUnfolder::OldNewMapContain",
              "LookUp " + old_inst->name());
   return old_new_inst_map.contains(old_inst);
 }
-HloInstruction* TransposeUnfolder::GetNewInst(HloInstruction* old_inst) {
+HloInstruction* TransposeReduceSumUnfolder::GetNewInst(
+    HloInstruction* old_inst) {
   return old_new_inst_map[old_inst];
 }
 
-bool TransposeUnfolder::DeleteOldInst(HloInstruction* old_inst) {
+bool TransposeReduceSumUnfolder::DeleteOldInst(HloInstruction* old_inst) {
   return old_new_inst_map.erase(old_inst);
 }
 
-void TransposeUnfolder::InsertOldNewMap(HloInstruction* old_inst,
-                                        HloInstruction* new_inst) {
+void TransposeReduceSumUnfolder::InsertOldNewMap(HloInstruction* old_inst,
+                                                 HloInstruction* new_inst) {
   if (old_new_inst_map.contains(old_inst)) {
-    DebugPrint("TransposeUnfolder::old_new_inst_map",
+    DebugPrint("TransposeReduceSumUnfolder::old_new_inst_map",
                "Error: already contains: " + old_inst->name());
   }
   old_new_inst_map.insert({old_inst, new_inst});
 }
 
-bool TransposeUnfolder::IsTransDot(const HloInstruction* hlo) {
+bool TransposeReduceSumUnfolder::IsTransDot(const HloInstruction* hlo) {
   if (hlo->opcode() != HloOpcode::kDot) {
     return false;
   }
@@ -357,7 +416,8 @@ bool TransposeUnfolder::IsTransDot(const HloInstruction* hlo) {
   }
   return false;
 }
-bool TransposeUnfolder::IsRegularDot(const HloInstruction* hlo) {
+
+bool TransposeReduceSumUnfolder::IsRegularDot(const HloInstruction* hlo) {
   if (hlo->opcode() != HloOpcode::kDot) {
     return false;
   }
@@ -378,7 +438,31 @@ bool TransposeUnfolder::IsRegularDot(const HloInstruction* hlo) {
   }
   return false;
 }
-Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
+
+bool TransposeReduceSumUnfolder::IsReduceSumDot(const HloInstruction* hlo) {
+  if (hlo->opcode() != HloOpcode::kReduce) {
+    return false;
+  }
+  HloInstruction* reduce_function = hlo->to_apply()->root_instruction();
+  if (reduce_function->opcode() != HloOpcode::kAdd || !hlo->shape().IsArray() ||
+      hlo->shape().dimensions_size() != 1) {
+    // only consider reduce_sum(matrix) -> vector
+    return false;
+  }
+  auto zero = LiteralUtil::CreateR0<float>(0);
+  if (hlo->operand(1)->opcode() != HloOpcode::kConstant ||
+      (hlo->operand(1)->literal() != zero)) {
+    // is it possible Reduce Sum has non-zero init_value? if so, such
+    // reduce sum cannot be target as matrix multiplication
+    return false;
+  }
+
+  DebugPrint("TransposeReduceSumUnfolder::IsReduceSumDot",
+             hlo->name() + " is reduce_sum");
+  return true;
+}
+
+Status TransposeReduceSumUnfolder::HandleDot(HloInstruction* dot) {
   if (IsTransDot(dot)) {
     const DotDimensionNumbers& dnums = dot->dot_dimension_numbers();
     if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
@@ -406,7 +490,7 @@ Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
           " operand2 = " + rhs_trans->name() +
           " shape = " + rhs_trans->shape().ToString() +
           " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
 
       status_or =
           MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
@@ -439,7 +523,7 @@ Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
           " operand2 = " + rhs_trans->name() +
           " shape = " + rhs_trans->shape().ToString() +
           " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
 
       status_or =
           MakeDotHlo(lhs, rhs_trans, dimension_numbers, dot->precision_config(),
@@ -472,7 +556,7 @@ Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
           " operand2 = " + rhs_trans->name() +
           " shape = " + rhs_trans->shape().ToString() +
           " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
 
       status_or =
           MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
@@ -484,7 +568,8 @@ Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
   }
   return Status::OK();
 }
-Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
+
+Status TransposeReduceSumUnfolder::HandleTranspose(HloInstruction* transpose) {
   if (IsTransDot(transpose->operand(0))) {
     HloInstruction* lhs = transpose->mutable_operand(0)->mutable_operand(1);
     HloInstruction* rhs = transpose->mutable_operand(0)->mutable_operand(0);
@@ -503,7 +588,7 @@ Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
         " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
         " shape = " + rhs->shape().ToString() +
         " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
 
     auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers,
                                 transpose->operand(0)->precision_config(),
@@ -514,7 +599,7 @@ Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
 
   } else if (IsRegularDot(transpose->operand(0))) {
     auto dnum_size = transpose->operand(0)->shape().dimensions_size();
-    DebugPrint("TransposeUnfolder::HandleTranspose",
+    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose",
                "IsRegularDot, dnum_size = " + std::to_string(dnum_size));
     if (dnum_size == 1) {
       // m-v dot, do not need to transpose
@@ -544,7 +629,7 @@ Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
           " operand2 = " + rhs_trans->name() +
           " shape = " + rhs_trans->shape().ToString() +
           " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+      DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
 
       status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
                              transpose->operand(0)->precision_config(),
@@ -559,12 +644,127 @@ Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
         "Operand IsTranspose, operand = : " +
         transpose->operand(0)->operand(0)->name() +
         " shape = " + transpose->operand(0)->operand(0)->shape().ToString();
-    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
     InsertOldNewMap(transpose,
                     transpose->mutable_operand(0)->mutable_operand(0));
     return ReplaceInstruction(
         transpose, transpose->mutable_operand(0)->mutable_operand(0));
   }
+  return Status::OK();
+}
+
+Status TransposeReduceSumUnfolder::HandleReduce(HloInstruction* reduce) {
+  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+             "Start " + reduce->ToString());
+  if (!IsReduceSumDot(reduce)) {
+    return Status::OK();
+  }
+  DebugPrint(
+      "TransposeReduceSumUnfolder::HandleReduce",
+      "Start " + reduce->name() + " dimension_size = " +
+          std::to_string(reduce->shape().dimensions_size()) +
+          " reduce_func = " +
+          HloOpcodeString(reduce->to_apply()->root_instruction()->opcode()) +
+          " operand.name = " + reduce->operand(0)->name() +
+          " operand.dimension_size = " +
+          std::to_string(reduce->operand(0)->shape().dimensions_size()) +
+          " init_value.name = " + reduce->operand(1)->name());
+
+  // replace reduce with dot
+  HloInstruction* operand = reduce->mutable_operand(0);
+  HloInstruction* init_value = reduce->mutable_operand(1);
+  PrecisionConfig precision_config;
+  precision_config.mutable_operand_precision()->Resize(
+      2, PrecisionConfig::DEFAULT);
+  auto reduce_dims = reduce->shape().dimensions(0);
+  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+             "reduce_dims = " + std::to_string(reduce_dims));
+  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+             "operand->dimensions(0) = " +
+                 std::to_string(operand->shape().dimensions(0)) +
+                 " operand->dimensions(1) = " +
+                 std::to_string(operand->shape().dimensions(1)));
+  if (reduce_dims == operand->shape().dimensions(0)) {
+    // M - v dot
+    // constants
+    DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+               "Is M-v dot, reduce_dims = " + std::to_string(reduce_dims));
+    auto raw_zero_vector_status_or = CreateOneConstVector(
+        reduce->shape().element_type(), operand->shape().dimensions(1));
+    auto raw_zero_vector = std::move(raw_zero_vector_status_or).ValueOrDie();
+    auto zero_vector_inst = reduce->parent()->AddInstruction(
+        HloInstruction::CreateConstant(std::move(raw_zero_vector)));
+    DebugPrint(
+        "TransposeReduceSumUnfolder::HandleReduce",
+        "Is M-v dot, zero_vector_inst = " + zero_vector_inst->ToString());
+    auto lhs = reduce->mutable_operand(0);
+    auto rhs = zero_vector_inst;
+    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+
+    const Shape lhs_shape = lhs->shape();
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(
+        lhs_shape.dimensions_size() == 1 ? 0 : 1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+
+    auto shape_status_or = ShapeInference::InferDotOpShape(
+        lhs->shape(), rhs->shape(), dimension_numbers,
+        reduce->shape().element_type());
+    Shape output_shape = std::move(shape_status_or).ValueOrDie();
+    std::string temp_string =
+        "M - v dot, InferDotOpShape:  operand1 = " + lhs->name() +
+        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
+        " shape = " + rhs->shape().ToString() +
+        " inferred_output_shape = " + output_shape.ToString();
+    DebugPrint("TransposeReduceSumUnfolder::HandleReduce", temp_string);
+
+    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
+                                reduce->shape().element_type());
+    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+    InsertOldNewMap(reduce, new_dot);
+    return ReplaceInstruction(reduce, new_dot);
+
+  } else if (reduce_dims == operand->shape().dimensions(1)) {
+    // v^T - M dot
+    DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+               "Is v^T-M dot, reduce_dims = " + std::to_string(reduce_dims));
+    auto raw_zero_vector_status_or = CreateOneConstVector(
+        reduce->shape().element_type(), operand->shape().dimensions(0));
+    auto raw_zero_vector = std::move(raw_zero_vector_status_or).ValueOrDie();
+    auto zero_vector_inst = reduce->parent()->AddInstruction(
+        HloInstruction::CreateConstant(std::move(raw_zero_vector)));
+    DebugPrint(
+        "TransposeReduceSumUnfolder::HandleReduce",
+        "Is v^T-M dot, zero_vector_inst = " + zero_vector_inst->ToString());
+    auto lhs = zero_vector_inst;
+    auto rhs = reduce->mutable_operand(0);
+    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+
+    const Shape lhs_shape = lhs->shape();
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(
+        lhs_shape.dimensions_size() == 1 ? 0 : 1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+
+    auto shape_status_or = ShapeInference::InferDotOpShape(
+        lhs->shape(), rhs->shape(), dimension_numbers,
+        reduce->shape().element_type());
+    Shape output_shape = std::move(shape_status_or).ValueOrDie();
+    std::string temp_string =
+        "v^T - M dot, InferDotOpShape:  operand1 = " + lhs->name() +
+        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
+        " shape = " + rhs->shape().ToString() +
+        " inferred_output_shape = " + output_shape.ToString();
+    DebugPrint("TransposeReduceSumUnfolder::HandleReduce", temp_string);
+
+    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
+                                reduce->shape().element_type());
+    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+    InsertOldNewMap(reduce, new_dot);
+    return ReplaceInstruction(reduce, new_dot);
+  }
+  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
+             "END " + reduce->ToString());
   return Status::OK();
 }
 
@@ -611,15 +811,23 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
   }
 
   const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
-
   if (dnums.lhs_contracting_dimensions_size() != 1 ||
       dnums.rhs_contracting_dimensions_size() != 1 ||
       dnums.lhs_batch_dimensions_size() != 0 ||
       dnums.rhs_batch_dimensions_size() != 0 ||
-      *(dnums.lhs_contracting_dimensions().begin()) != 1 ||
-      *(dnums.rhs_contracting_dimensions().begin()) != 0 ||
       hlo->shape().dimensions_size() > 2 ||
       hlo->shape().dimensions_size() == 0) {
+    // not m-m, m-v dot
+    // do not need to handle v-v inner/outer product, since both of them won't
+    // lead to better solution for inner-product, the result is a scalar for
+    // outer-product, although the result is a matrix, but if we split the chain
+    // from here and let two vector enter 2 sub-chain, the optimal solution is
+    // the same
+    return false;
+  }
+
+  if (*(dnums.lhs_contracting_dimensions().begin()) != 1 ||
+      *(dnums.rhs_contracting_dimensions().begin()) != 0) {
     // since transpose op may be rewritten to dot op with
     // lhs_contracting_dimension = {0} rhs_contracting_dimension = {1}
     // such dot is actuall a tranpose and is not associative with other dots.
@@ -635,12 +843,12 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
 
     return false;
   }
+  DebugPrint("MatrixChainDetector::CheckRealDot",
+             "End check dot op: " + hlo->name() + " True");
   return true;
 }
 Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
-  DebugPrint("MatrixChainDetector::Preprocess",
-             "inst.name:" + hlo->name() +
-                 " opcode = " + HloOpcodeString(hlo->opcode()));
+  DebugPrint("MatrixChainDetector::Preprocess", "Start " + hlo->ToString());
   // skip 2D dot op but if it is the root_instruction, then it must be the root
   // of a matrix chain
 
@@ -937,7 +1145,7 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
     // CleanupVisitor cleanup_visitor;
     // TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
 
-    TransposeUnfolder transpose_unfolder;
+    TransposeReduceSumUnfolder transpose_unfolder;
     DebugPrint("HloMCO::Run", "start transpose_unfolder");
     PreOrderAccept(computation, &transpose_unfolder, changed);
     DebugPrint("HloMCO::Run", "start matriox_chain_detector");
