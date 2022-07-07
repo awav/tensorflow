@@ -1691,6 +1691,7 @@ Status TensorSplitterRewriteVisitor::HandleDot(HloInstruction* dot) {
 
   ss << "\n ----< Exit HandleDot for '" << dot->name() << "' with no splitting";
   LOG(INFO) << ss.str();
+  return Status::OK();
 }
 
 Status TensorSplitterRewriteVisitor::HandleReduce(HloInstruction* reduce) {

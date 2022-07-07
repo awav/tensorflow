@@ -204,7 +204,7 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
       reduce->parent()->AddInstruction(HloInstruction::CreateBinary(
           xy->shape(), HloOpcode::kAdd, x_broadcast, y_broadcast));
 
-  ReplaceInstruction(
+  return ReplaceInstruction(
       reduce, reduce->parent()->AddInstruction(HloInstruction::CreateBinary(
                   xy->shape(), HloOpcode::kAdd, x_y_sum, xy)));
 }
