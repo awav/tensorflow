@@ -2333,6 +2333,43 @@ tf_cc_test(
         "//tensorflow/compiler/xla/tests:xla_internal_test_main",
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
+        "//tensorflow/compiler/jit:xla_cpu_jit",
+        "//tensorflow/compiler/xla:xla_data_proto_cc",
+        "//tensorflow/compiler/xla:shape_util",
+        "//tensorflow/compiler/xla:types",
+    ],
+)
+
+cc_library(
+    name = "tensor_splitter_v2",
+    srcs = ["tensor_splitter_v2.cc"],
+    hdrs = ["tensor_splitter_v2.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":call_inliner",
+        ":pattern_matcher",
+        "@com_google_absl//absl/algorithm:container",
+    ],
+)
+
+tf_cc_test(
+    name = "tensor_splitter_v2_test",
+    srcs = ["tensor_splitter_v2_test.cc"],
+    deps = [
+        ":tensor_splitter_v2",
+        ":hlo",
+        ":hlo_creation_utils",
+        ":pattern_matcher",
+        "//tensorflow/compiler/xla:test",
+        "//tensorflow/compiler/xla/tests:hlo_test_base",
+        "//tensorflow/compiler/xla/tests:xla_internal_test_main",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "//tensorflow/compiler/jit:xla_cpu_jit",
+        "//tensorflow/compiler/xla:xla_data_proto_cc",
+        "//tensorflow/compiler/xla:shape_util",
+        "//tensorflow/compiler/xla:types",
     ],
 )
 

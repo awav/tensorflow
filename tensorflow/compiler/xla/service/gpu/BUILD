@@ -1689,6 +1689,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:hlo_subcomputation_unification",
         "//tensorflow/compiler/xla/service:hlo_verifier",
         "//tensorflow/compiler/xla/service:tensor_splitter",
+        "//tensorflow/compiler/xla/service:tensor_splitter_v2",
         "//tensorflow/compiler/xla/service:broadcast_simplifier",
         "//tensorflow/compiler/xla/service:rce_optimizer",
         "//tensorflow/compiler/xla/service:algebraic_rewriter",
