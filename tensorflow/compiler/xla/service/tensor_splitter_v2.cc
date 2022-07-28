@@ -195,6 +195,10 @@ class SplittablePathRecorder : public SplitDeterminer {
   GetWhileLoopNumToStartNode() {
     return while_loop_num_to_start_node;
   }
+  absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
+  GetWhileLoopNumToInstructions() {
+    return while_loop_num_to_instructions;
+  }
 
  private:
   int64_t GenerateNewWhileLoopNum() { return while_loop_num_counter++; }
@@ -220,6 +224,9 @@ class SplittablePathRecorder : public SplitDeterminer {
                         const std::vector<size_t>& first_path_indices,
                         const std::vector<size_t>& second_path_indices);
 
+  // Reocrd all instructions in all while_loops
+  Status RecordInstructionsInWhileLoop();
+
   HloModule* parent_module;
   // starting_node -> all possbile best splittable paths of the node (pre-order)
   absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>
@@ -227,9 +234,13 @@ class SplittablePathRecorder : public SplitDeterminer {
   absl::flat_hash_map<SplitNodeKey, HloInstruction*> start_node_to_start_inst;
   // starting_node -> while_loop_num
   absl::flat_hash_map<SplitNodeKey, int64_t> start_node_to_while_loop_num;
-  // while_loop_num -> all starting_nodes inclluded in the while_loop
+  // while_loop_num -> all starting_nodes included in the while_loop
   absl::flat_hash_map<int64_t, std::vector<SplitNodeKey>>
       while_loop_num_to_start_node;
+  // while_loop_num -> all instructions(including starting_nodes) included in
+  // the while_loop
+  absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>
+      while_loop_num_to_instructions;
   // // node -> while_loop_nums where the node is included
   // absl::flat_hash_map<SplitNodeVal, std::vector<int64_t>>
   //     node_to_while_loop_nums;
@@ -247,12 +258,15 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       const absl::flat_hash_map<SplitNodeKey, int64_t>&
           input_start_node_to_while_loop_num,
       absl::flat_hash_map<int64_t, std::vector<SplitNodeKey>>&
-          input_while_loop_num_to_start_node)
+          input_while_loop_num_to_start_node,
+      absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
+          input_while_loop_num_to_instructions)
       : SplitDeterminer(max_size_threshold, target_split_size),
         parent_module(input_parent_module),
         start_node_to_splittable_paths(input_start_node_to_splittable_paths),
         start_node_to_while_loop_num(input_start_node_to_while_loop_num),
-        while_loop_num_to_start_node(input_while_loop_num_to_start_node) {
+        while_loop_num_to_start_node(input_while_loop_num_to_start_node),
+        while_loop_num_to_instructions(input_while_loop_num_to_instructions) {
     while_loop_num_to_info.clear();
   }
 
@@ -360,6 +374,12 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     std::vector<HloInstruction*> while_rest_parameters;
     std::vector<HloInstruction*> while_loop_output_elements;
     std::vector<HloInstruction*> while_rest_output_elements;
+    // used in while-loop
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>
+        starting_node_inst_to_cloned_inst;
+    // used in the rest part
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>
+        rest_starting_node_inst_to_cloned_inst;
     int64_t while_loop_num;
     int64_t split_rest;
     int64_t split_size;
@@ -381,6 +401,8 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     absl::Span<HloInstruction*> leafs_;
     absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>&
         visited_instructions_;
+    absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
+        while_loop_num_to_instructions_;
 
     bool merged_splitter_flag;
     WhileLoopInfo* while_loop_info;
@@ -396,6 +418,8 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
         absl::Span<HloInstruction*> leafs,
         absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>&
             visited_instructions,
+        absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
+            while_loop_num_to_instructions,
         int64_t offset = 0)
         : merged_splitter_flag(merged_flag),
           parameters_(loop_parameters),
@@ -403,7 +427,8 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
           while_loop_output_elements(loop_output_elements),
           builder_(builder),
           leafs_(leafs),
-          visited_instructions_(visited_instructions) {
+          visited_instructions_(visited_instructions),
+          while_loop_num_to_instructions_(while_loop_num_to_instructions) {
       std::stringstream msg;
 
       msg << "@@@ leafs=[";
@@ -497,6 +522,35 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     // is passed, it will also create an accessor for the parameter.
     int64_t AddParameter(HloInstruction* inst,
                          HloInstruction** get_tuple = nullptr) {
+      if (merged_splitter_flag &&
+          while_loop_info->starting_node_inst_to_cloned_inst.contains(inst)) {
+        // for the  while-loop
+        LOG(INFO)
+            << "[AddParameter] While-loop Use an in-loop-inst="
+            << while_loop_info->starting_node_inst_to_cloned_inst[inst]->name()
+            << " to replace in_loop starting_node=" << inst->name();
+        *get_tuple = while_loop_info->starting_node_inst_to_cloned_inst[inst];
+        // * for now it is safe since all places ussing the return index are to
+        // add a newly created
+        // * instruction, so cannot get into this if statement.
+        return -1;
+      } else if (!merged_splitter_flag &&
+                 while_loop_info->rest_starting_node_inst_to_cloned_inst
+                     .contains(inst)) {
+        // for the  rest_part
+        // for the  while-loop
+        LOG(INFO) << "[AddParameter] RestPart Use an in-remainder-inst="
+                  << while_loop_info
+                         ->rest_starting_node_inst_to_cloned_inst[inst]
+                         ->name()
+                  << " to replace in_loop starting_node=" << inst->name();
+        *get_tuple =
+            while_loop_info->rest_starting_node_inst_to_cloned_inst[inst];
+        // * for now it is safe since all places ussing the return index are to
+        // add a newly created
+        // * instruction, so cannot get into this if statement.
+        return -1;
+      }
       int64_t idx = parameters_size();
       parameters_.push_back(inst);
       param_->mutable_shape()->mutable_tuple_shapes()->push_back(inst->shape());
@@ -568,6 +622,10 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
   // record how many staring_nodes have been procesed for a while-loop
   absl::flat_hash_map<int64_t, int64_t> while_loop_num_to_processed_count;
   absl::flat_hash_map<int64_t, WhileLoopInfo> while_loop_num_to_info;
+  // while_loop_num -> all instructions(including starting_nodes) included in
+  // the while_loop
+  absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>
+      while_loop_num_to_instructions;
 };
 
 }  // namespace
@@ -1683,6 +1741,33 @@ Status SplittablePathRecorder::MergeWhileLoop(
   return Status::OK();
 }
 
+Status SplittablePathRecorder::RecordInstructionsInWhileLoop() {
+  std::string prefix = "[RecordInstructionsInWhileLoop] ";
+  // first init all starting_node with a unique while_loop
+  LOG(INFO) << prefix << "Start Recording";
+  for (auto kv : while_loop_num_to_start_node) {
+    int64_t while_loop_num = kv.first;
+    while_loop_num_to_instructions[while_loop_num] = {};
+    for (auto start_node_key : while_loop_num_to_start_node[while_loop_num]) {
+      // add starting_node
+      while_loop_num_to_instructions[while_loop_num].insert(
+          start_node_to_start_inst[start_node_key]);
+      // we will use the first path from now on
+      std::vector<SplitNodeVal>& final_path =
+          start_node_to_splittable_paths[start_node_key][0];
+      for (auto& node_val : final_path) {
+        while_loop_num_to_instructions[while_loop_num].insert(
+            std::get<0>(node_val));
+      }
+    }
+    LOG(INFO) << prefix << "Finish recording, while_loop_num=" << while_loop_num
+              << " instructions.size="
+              << while_loop_num_to_instructions[while_loop_num].size();
+  }
+
+  return Status::OK();
+}
+
 Status SplittablePathRecorder::InitWhileLoops() {
   std::string prefix = "[InitWhileLoops] ";
   LOG(INFO) << prefix << "Start InitWhileLoops";
@@ -1754,6 +1839,7 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
                      best_lcs_path_indices_first, best_lcs_path_indices_second);
     }
   }
+  RecordInstructionsInWhileLoop();
   LOG(INFO) << prefix << "Finish AllocateWhileLoops";
   return Status::OK();
 }
@@ -2257,6 +2343,15 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildRestOutputTuple(
         builder_.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
             output->shape(), output, part, start_indices));
   }
+  LOG(INFO) << "[BuildRestOutputTuple] "
+            << "original.name=" << original->name()
+            << " offset_=" << offset_->name()
+            << " Create updated_output=" << updated_output->name()
+            << " shape=" << updated_output->shape().ToString();
+  // use the updated_output directly in the remainder in order to
+  // avoid cycles
+  while_loop_info->rest_starting_node_inst_to_cloned_inst[original] =
+      updated_output;
 
   // since this is for rest function call, doesn't have to have the same shape
   // with parameters, so just add the real output
@@ -2326,13 +2421,57 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
     updated_output =
         builder_.AddInstruction(HloInstruction::CreateDynamicUpdateSlice(
             output->shape(), output, part, start_indices));
-    LOG(INFO) << "[BuildMergedLoopOutput] "
-              << "original.name=" << original->name()
-              << " offset_=" << offset_->name()
-              << " Create updated_output_slice: slice.name="
-              << updated_output->name()
-              << " slice_shape=" << updated_output->shape().ToString();
   }
+  LOG(INFO) << "[BuildMergedLoopOutput] "
+            << "original.name=" << original->name()
+            << " offset_=" << offset_->name()
+            << " Create updated_output=" << updated_output->name()
+            << " shape=" << updated_output->shape().ToString();
+  // use the updated_output directly in the whilel_loop in order to
+  // avoid cycles
+  while_loop_info->starting_node_inst_to_cloned_inst[original] = updated_output;
+
+  // std::vector<HloInstruction*> in_loop_users{};
+  // for (auto orig_user : original->users()) {
+  //   if
+  //   (this->while_loop_num_to_instructions_[while_loop_info->while_loop_num]
+  //           .contains(orig_user)) {
+  //     in_loop_users.push_back(orig_user);
+  //   }
+  // }
+  // if (in_loop_users.size() > 0) {
+  //   LOG(INFO) << "[BuildMergedLoopOutput] "
+  //             << "original.name=" << original->name()
+  //             << " in_loop_users.size=" << in_loop_users.size()
+  //             << " Before replace, orig.users.size="
+  //             << original->users().size();
+  //   // let all in_loop_users to use the new cloned instruction
+  //   // and the cloned instruction will not be added into the final output of
+  //   // while_loop thus remove the cycle in the final while-loop.
+
+  //   for (auto in_loop_user : in_loop_users) {
+  //     LOG(INFO) << "[BuildMergedLoopOutput] "
+  //               << "original.name=" << original->name() << " let
+  //               in_loop_user"
+  //               << in_loop_user->name() << " use cloned_insruction"
+  //               << updated_output_clone->name();
+  //     auto status =
+  //         original->ReplaceUseWith(in_loop_user, updated_output_clone);
+  //     if (status != Status::OK()) {
+  //       LOG(INFO) << "[BuildMergedLoopOutput] "
+  //                 << "FAILED l: original.name=" << original->name()
+  //                 << " let in_loop_user=" << in_loop_user->name()
+  //                 << " use cloned_insruction=" <<
+  //                 updated_output_clone->name();
+  //       CHECK(false);
+  //     }
+  //   }
+  //   LOG(INFO) << "[BuildMergedLoopOutput] "
+  //             << "original.name=" << original->name()
+  //             << " After replace, orig.users.size=" <<
+  //             original->users().size();
+  // }
+
   // TODO:
   // 这里也是利用param_start_index判断，如果是0则创建这个updated_index并插入输出
   // 否则就不创建，也不插入输出
@@ -2488,7 +2627,7 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
             false, &loop_info, loop_info.while_rest_parameters,
             loop_info.while_rest_output_elements, rest_builder, sort_comp,
             absl::MakeSpan(sub_info.sort_split_leafs), visited_instructions,
-            main_split_size);
+            this->while_loop_num_to_instructions, main_split_size);
 
         TF_ASSIGN_OR_RETURN(HloInstruction * rest_array,
                             rest_splitter.SplitInstruction(
@@ -2530,24 +2669,29 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
     }
   }
 
-  // after the first loop, we can build the fianal rest computation
-  HloInstruction* rest_output_tuple =
-      loop_info.while_rest_builder->AddInstruction(
-          HloInstruction::CreateTuple(loop_info.while_rest_output_elements));
-  LOG(INFO) << prefix << "Final restoutput_tuple.shape="
-            << rest_output_tuple->shape().ToString();
-  HloComputation* rest_body = parent_module->AddEmbeddedComputation(
-      loop_info.while_rest_builder->Build(rest_output_tuple));
-  int64_t main_split_size = loop_info.split_count * loop_info.split_size;
-  HloComputation* parent_comp = loop_info.final_sub_main_output_elements.front()
-                                    .starting_node_inst->parent();
-  loop_info.while_rest_parameters[0] =
-      parent_comp->AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
-  HloInstruction* args = parent_comp->AddInstruction(
-      HloInstruction::CreateTuple(loop_info.while_rest_parameters));
-  HloInstruction* rest_result =
-      parent_comp->AddInstruction(HloInstruction::CreateCall(
-          rest_output_tuple->shape(), {args}, rest_body));
+  HloInstruction* rest_result = nullptr;
+  if (loop_info.split_rest > 0) {
+    // after the first loop, we can build the fianal rest computation
+    HloInstruction* rest_output_tuple =
+        loop_info.while_rest_builder->AddInstruction(
+            HloInstruction::CreateTuple(loop_info.while_rest_output_elements));
+    LOG(INFO) << prefix << "Final restoutput_tuple.shape="
+              << rest_output_tuple->shape().ToString();
+    HloComputation* rest_body = parent_module->AddEmbeddedComputation(
+        loop_info.while_rest_builder->Build(rest_output_tuple));
+    int64_t main_split_size = loop_info.split_count * loop_info.split_size;
+    HloComputation* parent_comp =
+        loop_info.final_sub_main_output_elements.front()
+            .starting_node_inst->parent();
+    loop_info.while_rest_parameters[0] =
+        parent_comp->AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
+    HloInstruction* args = parent_comp->AddInstruction(
+        HloInstruction::CreateTuple(loop_info.while_rest_parameters));
+    rest_result = parent_comp->AddInstruction(HloInstruction::CreateCall(
+        rest_output_tuple->shape(), {args}, rest_body));
+  } else {
+    LOG(INFO) << prefix << " has no split_rest";
+  }
 
   // second for-loop to build final output
   for (auto& sub_info : loop_info.final_sub_main_output_elements) {
@@ -2977,7 +3121,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
         while_loop_num_to_info[while_loop_num].while_loop_parameters,
         while_loop_num_to_info[while_loop_num].while_loop_output_elements,
         body_builder, dot->parent(), absl::MakeSpan(split_leafs_lhs),
-        visited_instructions);
+        visited_instructions, this->while_loop_num_to_instructions);
 
     TF_ASSIGN_OR_RETURN(HloInstruction * split_lhs,
                         splitter.SplitInstruction(lhs, split_dim, split_size));
@@ -3013,7 +3157,8 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
           while_loop_num_to_info[while_loop_num].while_rest_parameters,
           while_loop_num_to_info[while_loop_num].while_rest_output_elements,
           rest_builder, dot->parent(), absl::MakeSpan(split_leafs_lhs),
-          visited_instructions, main_split_size);
+          visited_instructions, this->while_loop_num_to_instructions,
+          main_split_size);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
@@ -3120,7 +3265,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
         while_loop_num_to_info[while_loop_num].while_loop_parameters,
         while_loop_num_to_info[while_loop_num].while_loop_output_elements,
         body_builder, dot->parent(), absl::MakeSpan(split_leafs_lhs),
-        visited_instructions);
+        visited_instructions, this->while_loop_num_to_instructions);
 
     ss << "\n> Split LHS '" << lhs->name() << "'";
     TF_ASSIGN_OR_RETURN(
@@ -3167,7 +3312,8 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
           while_loop_num_to_info[while_loop_num].while_rest_parameters,
           while_loop_num_to_info[while_loop_num].while_rest_output_elements,
           rest_builder, dot->parent(), absl::MakeSpan(split_leafs_lhs),
-          visited_instructions, main_split_size);
+          visited_instructions, this->while_loop_num_to_instructions,
+          main_split_size);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * rest_lhs,
@@ -3284,7 +3430,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
         while_loop_num_to_info[while_loop_num].while_loop_output_elements,
         body_builder, dot->parent(),
         absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs),
-        visited_instructions);
+        visited_instructions, this->while_loop_num_to_instructions);
 
     TF_ASSIGN_OR_RETURN(
         HloInstruction * comp_root,
@@ -3387,7 +3533,8 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
           while_loop_num_to_info[while_loop_num].while_rest_output_elements,
           rest_builder, dot->parent(),
           absl::MakeSpan(split_is_lhs ? split_leafs_lhs : split_leafs_rhs),
-          visited_instructions, main_split_size);
+          visited_instructions, this->while_loop_num_to_instructions,
+          main_split_size);
 
       TF_ASSIGN_OR_RETURN(
           HloInstruction * comp_root,
@@ -3587,7 +3734,7 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
       while_loop_num_to_info[while_loop_num].while_loop_parameters,
       while_loop_num_to_info[while_loop_num].while_loop_output_elements,
       body_builder, reduce->parent(), absl::MakeSpan(split_leafs),
-      visited_instructions);
+      visited_instructions, this->while_loop_num_to_instructions);
 
   std::vector<HloInstruction*> operands;
   for (int64_t i = 0; i < op_count; i++) {
@@ -3673,7 +3820,8 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
         while_loop_num_to_info[while_loop_num].while_rest_parameters,
         while_loop_num_to_info[while_loop_num].while_rest_output_elements,
         rest_builder, reduce->parent(), absl::MakeSpan(split_leafs),
-        visited_instructions, main_split_size);
+        visited_instructions, this->while_loop_num_to_instructions,
+        main_split_size);
 
     std::vector<HloInstruction*> operands;
     for (int64_t i = 0; i < op_count; i++) {
@@ -3906,7 +4054,7 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
       while_loop_num_to_info[while_loop_num].while_loop_parameters,
       while_loop_num_to_info[while_loop_num].while_loop_output_elements,
       body_builder, sort_comp, absl::MakeSpan(split_leafs),
-      visited_instructions);
+      visited_instructions, this->while_loop_num_to_instructions);
 
   TF_ASSIGN_OR_RETURN(
       HloInstruction * body_array,
@@ -4364,7 +4512,8 @@ StatusOr<bool> TensorSplitterV2::Run(HloModule* module) {
       size_threshold, split_size, module,
       recorder.GetStartNodeToSplittablePaths(),
       recorder.GetStartNodeToWhileLoopNum(),
-      recorder.GetWhileLoopNumToStartNode());
+      recorder.GetWhileLoopNumToStartNode(),
+      recorder.GetWhileLoopNumToInstructions());
   LOG(INFO) << "[TensorSplitterV2::Run] Running tensor splitter for '"
             << module->name() << "'";
   LOG(INFO) << "[TensorSplitterV2::Run] split_size_threshold=" << size_threshold
