@@ -82,6 +82,51 @@ class TensorSplitterV2Test : public HloTestBase {
   }
 };
 
+// Test multi argument reduce (e.g. argmax)
+TEST_F(TensorSplitterV2Test, BasicCaseLhsAfter) {
+  const string module_str = R"(
+HloModule BasicCaseLhsAfter
+
+ENTRY %BasicCaseLhs (a: f32[83333333,2], b: f32[83333333,2], v: f32[83333333]) -> f32[83333333] {
+  %constant = s64[] constant(0)
+  %a = f32[83333333,2]{1,0} parameter(0)
+  %b = f32[83333333,2]{1,0} parameter(1)
+  %v = f32[83333333]{0} parameter(2)
+  %constant.1 = f32[] constant(0)
+  %broadcast = f32[83333333]{0} broadcast(f32[] %constant.1), dimensions={}
+  %tuple = (s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) tuple(s64[] %constant, f32[83333333,2]{1,0} %a, f32[83333333,2]{1,0} %b, f32[83333333]{0} %v, f32[83333333]{0} %broadcast)
+  %tuple.3 = ((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) tuple((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) %tuple)
+  %while = ((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) while(((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) %tuple.3), condition=%tensor_splitter_dot_cond, body=%merged_while_loop_0
+  %get-tuple-element.9 = (s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) get-tuple-element(((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) %while), index=0
+  ROOT %get-tuple-element.10 = f32[83333333]{0} get-tuple-element((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) %get-tuple-element.9), index=4
+}
+
+)";
+
+  string module_with_big_dims = replace_all_in_string(
+      module_str, "1000", std::to_string(large_dim() / 1000));
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_with_big_dims));
+
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph = RenderGraph(
+        *module->entry_computation(),
+        /*label=*/filename, module->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  printf("After opotimization:\n %s\n", m->ToString().c_str())<<std::endl;
+  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+
+}
+
 // Test the most basic case: exp(AB^T)v
 TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
   auto m = CreateNewVerifiedModule();
@@ -128,7 +173,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -143,9 +188,9 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -196,7 +241,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -211,9 +256,9 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -261,7 +306,7 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -276,9 +321,9 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -330,7 +375,7 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -345,9 +390,9 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -391,7 +436,7 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -405,9 +450,9 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -452,7 +497,7 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -466,9 +511,9 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -506,7 +551,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -520,9 +565,9 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -560,7 +605,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -574,9 +619,9 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -621,7 +666,7 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -635,9 +680,9 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
 
-  printf("After opotimization:\n %f\n", m->ToString().c_str());
+  printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -705,7 +750,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -721,7 +766,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 
   printf("After opotimization:\n %f\n", module->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
@@ -788,7 +833,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -804,7 +849,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 
   printf("After opotimization:\n %f\n", module->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  std::cout << "Start Dumping " << filename << " to " << splitter_dir;
+  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
