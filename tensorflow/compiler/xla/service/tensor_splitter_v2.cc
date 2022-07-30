@@ -70,10 +70,6 @@ using TensorSplitProperties = std::tuple<int64_t, int64_t, int64_t>;
 // path, not included in the split_path
 using SplitNodeKey = int64_t;
 // <inst,split_dim,split_size,parent_inst>
-// ! Wait, since we record the split_dim for each operand, so I think what we
-// cannot do is ! when deciding merging, return a flag if 2 instructions have a
-// common instruction_node ! but with different split_dim, it means we cannot
-// merge the two paths
 using SplitNodeVal =
     std::tuple<HloInstruction*, int64_t, int64_t, HloInstruction*>;
 
@@ -230,6 +226,12 @@ class SplittablePathRecorder : public SplitDeterminer {
   Status FindAllDescdantStartNodes(SplitNodeKey start_node_key);
   // check whether the two key's while_loops can be merged
   bool HasDesedantRelationship(SplitNodeKey first_key, SplitNodeKey second_key);
+  // Try to merge two while_loops with some relative relationshiops
+  Status TryMergableRelativeWhileLoop(
+      SplitNodeKey first_key, SplitNodeKey second_key,
+      const std::vector<size_t>& first_path_indices,
+      const std::vector<size_t>& second_path_indices);
+  Status RecordUnmergableWhileLoops(int64_t first_num, int64_t second_num);
   // Check whether second_key can be merged into first_key's while_loop
   bool SizeCanMerge(SplitNodeKey first_key, SplitNodeKey second_key);
 
@@ -243,6 +245,8 @@ class SplittablePathRecorder : public SplitDeterminer {
   bool ShouldMerge(int64_t lcs_len, int64_t first_path_len,
                    int64_t second_path_len);
 
+  Status UpdateNewPaths(SplitNodeKey node_key,
+                        const std::vector<size_t>& path_indices);
   // Merge the two while_loops
   Status MergeWhileLoop(SplitNodeKey first_key, SplitNodeKey second_key,
                         const std::vector<size_t>& first_path_indices,
@@ -253,6 +257,7 @@ class SplittablePathRecorder : public SplitDeterminer {
 
   HloModule* parent_module;
   // starting_node -> all possbile best splittable paths of the node (pre-order)
+  // splittable_paths doesn't contain start_node itself
   absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>
       start_node_to_splittable_paths;
   absl::flat_hash_map<SplitNodeKey, HloInstruction*> start_node_to_start_inst;
@@ -270,6 +275,9 @@ class SplittablePathRecorder : public SplitDeterminer {
   // the while_loop
   absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>
       while_loop_num_to_instructions;
+  // record how many staring_nodes have been procesed for a while-loop
+  absl::flat_hash_map<int64_t, absl::flat_hash_set<int64_t>>
+      while_loop_num_to_unmegerable_while_loop_num;
   // // node -> while_loop_nums where the node is included
   // absl::flat_hash_map<SplitNodeVal, std::vector<int64_t>>
   //     node_to_while_loop_nums;
@@ -645,6 +653,7 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
   Status CreateSingleWhileLoopForSort(HloInstruction* sort);
 
   HloModule* parent_module;
+  // splittable_paths doesn't contain start_node itself
   absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>
       start_node_to_splittable_paths;
   absl::flat_hash_map<SplitNodeKey, int64_t> start_node_to_while_loop_num;
@@ -1757,31 +1766,348 @@ int64_t SplittablePathRecorder::LCS(
   }
   return dp[m];
 }
+Status SplittablePathRecorder::RecordUnmergableWhileLoops(int64_t first_num,
+                                                          int64_t second_num) {
+  if (!while_loop_num_to_unmegerable_while_loop_num.contains(first_num)) {
+    while_loop_num_to_unmegerable_while_loop_num[first_num] = {};
+  }
+  if (!while_loop_num_to_unmegerable_while_loop_num.contains(second_num)) {
+    while_loop_num_to_unmegerable_while_loop_num[second_num] = {};
+  }
+
+  while_loop_num_to_unmegerable_while_loop_num[first_num].insert(second_num);
+  while_loop_num_to_unmegerable_while_loop_num[second_num].insert(first_num);
+  return Status::OK();
+}
+Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
+    SplitNodeKey first_key, SplitNodeKey second_key,
+    const std::vector<size_t>& first_path_indices,
+    const std::vector<size_t>& second_path_indices) {
+  std::string prefix = "[TryMergableRelativeWhileLoop] ";
+  // a set to record all start_nodes has descendant relationships
+  absl::flat_hash_set<SplitNodeKey> descendant_start_nodes = {};
+  int64_t orig_first_while_loop_num = start_node_to_while_loop_num[first_key];
+  int64_t orig_second_while_loop_num = start_node_to_while_loop_num[second_key];
+  // new generated descendant relationship
+  for (auto first_start_node_key :
+       while_loop_num_to_start_node[orig_first_while_loop_num]) {
+    for (auto second_start_node_key :
+         while_loop_num_to_start_node[orig_second_while_loop_num]) {
+      if (start_node_to_decendant_start_nodes[first_start_node_key].contains(
+              second_start_node_key) ||
+          start_node_to_decendant_start_nodes[second_start_node_key].contains(
+              first_start_node_key)) {
+        descendant_start_nodes.insert(first_start_node_key);
+        descendant_start_nodes.insert(second_start_node_key);
+      }
+    }
+  }
+  // record all root nodes of all descendant chains
+  absl::flat_hash_set<SplitNodeKey> chain_root_nodes(descendant_start_nodes);
+  for (auto first_start_node_key : descendant_start_nodes) {
+    for (auto second_start_node_key : descendant_start_nodes) {
+      if (first_start_node_key == second_start_node_key) {
+        continue;
+      }
+      if (start_node_to_decendant_start_nodes[first_start_node_key].contains(
+              second_start_node_key)) {
+        chain_root_nodes.erase(second_start_node_key);
+      } else if (start_node_to_decendant_start_nodes[second_start_node_key]
+                     .contains(first_start_node_key)) {
+        chain_root_nodes.erase(first_start_node_key);
+      }
+    }
+  }
+  LOG(INFO) << prefix << "descendant_start_nodes_set.size="
+            << descendant_start_nodes.size()
+            << " chain_root_nodes_set.size=" << chain_root_nodes.size();
+
+  // chain_nodes include chain_root itself
+  absl::flat_hash_map<SplitNodeKey, absl::flat_hash_set<SplitNodeKey>>
+      chain_root_to_chain_nodes;
+  for (auto chain_root_node : chain_root_nodes) {
+    chain_root_to_chain_nodes[chain_root_node] = {chain_root_node};
+    for (auto node : descendant_start_nodes) {
+      if (start_node_to_decendant_start_nodes[chain_root_node].contains(node)) {
+        chain_root_to_chain_nodes[chain_root_node].insert(node);
+      }
+    }
+  }
+  absl::flat_hash_map<SplitNodeKey, std::vector<size_t>>
+      chain_root_to_new_chain_path_indices;
+  // try to find a path in a chain with split_dim in non-reduce/non-contracting
+  // dimensions
+  // TODO: 现在不work的一个可能原因是，path只记录到了leaf
+  for (auto chain_root_node : chain_root_nodes) {
+    std::vector<size_t> new_chain_path_indices = {};
+    for (auto i = 0; i < start_node_to_splittable_paths[chain_root_node].size();
+         ++i) {
+      absl::flat_hash_set<SplitNodeKey> chain_nodes(
+          chain_root_to_chain_nodes[chain_root_node]);
+
+      // since splittable_paths doesn't contain start_node itself.
+      chain_nodes.erase(chain_root_node);
+      LOG(INFO) << prefix << " chain_root_node.name="
+                << start_node_to_start_inst[chain_root_node]->name()
+                << " try use cur_path_index=" << i << " cur_path_size="
+                << start_node_to_splittable_paths[chain_root_node][i].size()
+                << " in_path_start_node.size=" << chain_nodes.size();
+      // * 需要判断chain_root的split_dim也符合要求吗？
+      // * 感觉不需要，因为能作为chain_root就代表没有被loop内的其他node使用
+      for (auto j = 0;
+           j < start_node_to_splittable_paths[chain_root_node][i].size(); j++) {
+        auto cur_node_val =
+            start_node_to_splittable_paths[chain_root_node][i][j];
+        HloInstruction* cur_node_inst = std::get<0>(cur_node_val);
+        SplitNodeKey cur_node_key = MakeSplitNodeKey(cur_node_inst);
+        int64_t cur_node_split_dim = std::get<1>(cur_node_val);
+
+        if (!chain_nodes.contains(cur_node_key)) {
+          LOG(INFO) << prefix << " chain_root_node.name="
+                    << start_node_to_start_inst[chain_root_node]->name()
+                    << " cur_path_index=" << i << " cur_path_index.index=" << j
+                    << " skip cur_node.name=" << cur_node_inst->name()
+                    << " split_dim=" << cur_node_split_dim
+                    << " in_path_start_node.size=" << chain_nodes.size();
+          continue;
+        }
+
+        // find a chain node
+
+        LOG(INFO) << prefix << " chain_root_node.name="
+                  << start_node_to_start_inst[chain_root_node]->name()
+                  << " cur_path_index=" << i << " cur_path_index.index=" << j
+                  << " encourter chain_start_node.name="
+                  << cur_node_inst->name()
+                  << " split_dim=" << cur_node_split_dim
+                  << " in_path_start_node.size=" << chain_nodes.size();
+        if (cur_node_inst->opcode() == HloOpcode::kDot) {
+          auto& dnums = cur_node_inst->dot_dimension_numbers();
+          if (absl::c_linear_search(dnums.lhs_contracting_dimensions(),
+                                    cur_node_split_dim) ||
+              absl::c_linear_search(dnums.rhs_contracting_dimensions(),
+                                    cur_node_split_dim)) {
+            // merged descedant chain cannot split on a contracting dimsions
+            LOG(INFO) << prefix << " chain_root_node.name="
+                      << start_node_to_start_inst[chain_root_node]->name()
+                      << " cur_path_index=" << i
+                      << " Cannot use the path, in_path_start_node="
+                      << cur_node_inst->name()
+                      << " split_dim=" << cur_node_split_dim
+                      << " is contractint dim";
+            break;
+          }
+        } else if (cur_node_inst->opcode() == HloOpcode::kReduce) {
+          if (absl::c_linear_search(cur_node_inst->dimensions(),
+                                    cur_node_split_dim)) {
+            LOG(INFO) << prefix << " chain_root_node.name="
+                      << start_node_to_start_inst[chain_root_node]->name()
+                      << " cur_path_index=" << i
+                      << " Cannot use the path, in_path_start_node="
+                      << cur_node_inst->name()
+                      << " split_dim=" << cur_node_split_dim
+                      << " is reduce dim";
+            break;
+          }
+        }
+        chain_nodes.erase(cur_node_key);
+        LOG(INFO) << prefix << " chain_root_node.name="
+                  << start_node_to_start_inst[chain_root_node]->name()
+                  << " try use cur_path_index=" << i
+                  << " remove in_path_start_node.name=" << cur_node_inst->name()
+                  << " in_path_start_node.size=" << chain_nodes.size();
+      }
+
+      if (chain_nodes.empty()) {
+        // can use current path
+        new_chain_path_indices.push_back(i);
+        LOG(INFO) << prefix << " chain_root_node.name="
+                  << start_node_to_start_inst[chain_root_node]->name()
+                  << " can use cur_path_index=" << i
+                  << " new_chain_path_indices.size="
+                  << new_chain_path_indices.size();
+      }
+    }
+    if (new_chain_path_indices.empty()) {
+      // cannot find a useable path for the root
+      // thus cannot merge the two loops
+      // TODO: 用一个map记录互相不能合并的loop_num
+      LOG(INFO) << prefix
+                << " Cannot merge while_loop_1=" << orig_first_while_loop_num
+                << " while_loop_2=" << orig_second_while_loop_num
+                << " because cannot find a usable path for chain_root="
+                << start_node_to_start_inst[chain_root_node]->name();
+      RecordUnmergableWhileLoops(orig_first_while_loop_num,
+                                 orig_second_while_loop_num);
+      // do not perform merging, return
+      return Status::OK();
+    } else {
+      chain_root_to_new_chain_path_indices[chain_root_node] =
+          new_chain_path_indices;
+    }
+  }
+
+  // TODO:
+  // 这里有问题，还应该判断下让它只包括和best_lcs_split_dim的交集，如果交集不为空才可以合并
+  // 因为有可能直接找到的结果中，两个while_loop的chain完全没有公共路径，这种就不应该合并
+  // 确实得调用update？
+
+  // mergable split_dim should be the intersection of chain_root_path_indices
+  // and lcs_indices
+  std::vector<size_t> first_lcs_indices(first_path_indices);
+  std::vector<size_t> second_lcs_indices(second_path_indices);
+  for (auto chain_root_node : chain_root_nodes) {
+    bool is_first_loop;
+    if (start_node_to_while_loop_num[chain_root_node] ==
+        orig_first_while_loop_num) {
+      is_first_loop = true;
+    } else {
+      is_first_loop = false;
+    }
+    std::vector<size_t> new_chain_path_indices = {};
+    for (auto lcs_index :
+         (is_first_loop ? first_lcs_indices : second_lcs_indices)) {
+      for (auto root_path_index :
+           chain_root_to_new_chain_path_indices[chain_root_node]) {
+        if (lcs_index == root_path_index) {
+          // take the intersection of chain_path_indices and lcs_indices
+          new_chain_path_indices.push_back(lcs_index);
+        }
+      }
+    }
+    if (new_chain_path_indices.empty()) {
+      // cannot find usable path, cannot merge
+      LOG(INFO) << prefix
+                << " Cannot merge while_loop_1=" << orig_first_while_loop_num
+                << " while_loop_2=" << orig_second_while_loop_num
+                << " because cannot find a intersection between lcs_indices "
+                   "and mergable_indices"
+                << start_node_to_start_inst[chain_root_node]->name();
+      RecordUnmergableWhileLoops(orig_first_while_loop_num,
+                                 orig_second_while_loop_num);
+      // do not perform merging, return
+      return Status::OK();
+    } else {
+      // use the intersection
+      if (is_first_loop) {
+        first_lcs_indices = new_chain_path_indices;
+      } else {
+        second_lcs_indices = new_chain_path_indices;
+      }
+    }
+  }
+
+  LOG(INFO) << prefix << " Before intersection, first_lcs_indices"
+            << first_path_indices.size() << " second_lcs_indices"
+            << second_path_indices.size()
+            << " After intersection, first_lcs_indices"
+            << first_lcs_indices.size() << " second_lcs_indices"
+            << second_lcs_indices.size();
+  TF_RETURN_IF_ERROR(UpdateNewPaths(first_key, first_lcs_indices));
+  TF_RETURN_IF_ERROR(UpdateNewPaths(second_key, second_lcs_indices));
+  // all chains can find splittable paths, can merge the two loops
+  // update all new_paths of all chain_nodes
+  //* 这里只更新这些可以吗? 因为这里的node还可能包含在一些本来各自loop中就含有的
+  // chain中，因此也需要找到这些chain，所以前面就不能只找两个loop新形成的chain，原来的
+  // 也要包含进去
+  //* 这样是可以的，因为在前面找新形成的descendant的关系时，只要会被这个更新影响到的node都会
+  // 被包含进descendant_start_nodes，所以也只需要更新这里有的部分
+  // for (auto chain_root_node : chain_root_nodes) {
+  //   for (auto node : chain_root_to_chain_nodes[chain_root_node]) {
+  //     std::vector<std::vector<SplitNodeVal>> node_new_paths;
+  //     node_new_paths.reserve(
+  //         chain_root_to_new_chain_path_indices[chain_root_node].size());
+  //     for (auto index :
+  //     chain_root_to_new_chain_path_indices[chain_root_node]) {
+  //       node_new_paths.emplace_back(
+  //           start_node_to_splittable_paths[node][index]);
+  //     }
+  //     start_node_to_splittable_paths[node] = node_new_paths;
+  //   }
+  // }
+
+  // merge all starting_nodes in the second while_loop into the first while_loop
+  for (auto start_node :
+       while_loop_num_to_start_node[orig_second_while_loop_num]) {
+    start_node_to_while_loop_num[start_node] = orig_first_while_loop_num;
+    while_loop_num_to_start_node[orig_first_while_loop_num].emplace_back(
+        start_node);
+  }
+  // delete second_while_loop
+  while_loop_num_to_start_node.erase(orig_second_while_loop_num);
+  LOG(INFO) << prefix << " Merge while_loop_1=" << orig_first_while_loop_num
+            << " while_loop_2=" << orig_second_while_loop_num;
+  return Status::OK();
+}
+
+Status SplittablePathRecorder::UpdateNewPaths(
+    SplitNodeKey node_key, const std::vector<size_t>& path_indices) {
+  int64_t orig_while_loop_num = start_node_to_while_loop_num[node_key];
+  // a set to record all start_nodes has descendant relationships with
+  // first_key.
+  // TODO：这里找所有chain的方法也不对，可能找不全所有设计的
+  //    A
+  // B      C
+  // 更新BA的时候哦，其实C也应该需要更新，但下面的做法并不能找到C，比如下面的算法
+  // 这种情况就找不到C
+  // 所以不应该是只更新chain，而是应该更新所有的start_node？
+  // 感觉没错，应该是所有的start_node，因为包含在一个loop里的所有start_node一定是含有一部分公共的
+  // 所以都会受到影响
+  // need to updates paths of all nodes in loop_descendant_chain_nodes
+  for (SplitNodeKey start_node_key :
+       while_loop_num_to_start_node[orig_while_loop_num]) {
+    std::vector<std::vector<SplitNodeVal>> new_paths;
+    new_paths.reserve(path_indices.size());
+    for (auto index : path_indices) {
+      new_paths.emplace_back(
+          start_node_to_splittable_paths[start_node_key][index]);
+    }
+    // update all possible paths
+    start_node_to_splittable_paths[start_node_key] = new_paths;
+  }
+  // absl::flat_hash_set<SplitNodeKey> loop_descendant_chain_nodes = {node_key};
+  // for (auto first_start_node_key :
+  //      while_loop_num_to_start_node[orig_while_loop_num]) {
+  //   for (auto chain_node : loop_descendant_chain_nodes) {
+  //     if (start_node_to_decendant_start_nodes[first_start_node_key].contains(
+  //             chain_node) ||
+  //         start_node_to_decendant_start_nodes[chain_node].contains(
+  //             first_start_node_key)) {
+  //       loop_descendant_chain_nodes.insert(first_start_node_key);
+  //     }
+  //   }
+  // }
+  // LOG(INFO) << "[UpdateNewPaths] "
+  //           << "while_loop_num=" << orig_while_loop_num
+  //           << " node_key=" << start_node_to_start_inst[node_key]->name()
+  //           << " descendant_start_nodes_set.size="
+  //           << loop_descendant_chain_nodes.size() << " orig_path.size="
+  //           << start_node_to_splittable_paths[node_key].size()
+  //           << " new_path.size=" << path_indices.size();
+  // // need to updates paths of all nodes in loop_descendant_chain_nodes
+  // for (SplitNodeKey start_node_key : loop_descendant_chain_nodes) {
+  //   std::vector<std::vector<SplitNodeVal>> new_paths;
+  //   new_paths.reserve(path_indices.size());
+  //   for (auto index : path_indices) {
+  //     new_paths.emplace_back(
+  //         start_node_to_splittable_paths[start_node_key][index]);
+  //   }
+  //   // update all possible paths
+  //   start_node_to_splittable_paths[start_node_key] = new_paths;
+  // }
+  return Status::OK();
+}
 
 Status SplittablePathRecorder::MergeWhileLoop(
     SplitNodeKey first_key, SplitNodeKey second_key,
     const std::vector<size_t>& first_path_indices,
     const std::vector<size_t>& second_path_indices) {
-  std::vector<std::vector<SplitNodeVal>> first_new_paths;
-  std::vector<std::vector<SplitNodeVal>> second_new_paths;
-  first_new_paths.reserve(first_path_indices.size());
-  second_new_paths.reserve(second_path_indices.size());
-
-  for (auto index : first_path_indices) {
-    first_new_paths.emplace_back(
-        start_node_to_splittable_paths[first_key][index]);
-  }
-  for (auto index : second_path_indices) {
-    second_new_paths.emplace_back(
-        start_node_to_splittable_paths[second_key][index]);
-  }
-  // update all possible paths
-  start_node_to_splittable_paths[first_key] = first_new_paths;
-  start_node_to_splittable_paths[second_key] = second_new_paths;
-
-  // merge all starting_nodes in the second while_loop into the first while_loop
-  int64_t orig_second_while_loop_num = start_node_to_while_loop_num[second_key];
+  // set new splittable paths for all start_nodes in the 2 while-loops
   int64_t orig_first_while_loop_num = start_node_to_while_loop_num[first_key];
+  int64_t orig_second_while_loop_num = start_node_to_while_loop_num[second_key];
+  TF_RETURN_IF_ERROR(UpdateNewPaths(first_key, first_path_indices));
+  TF_RETURN_IF_ERROR(UpdateNewPaths(second_key, second_path_indices));
+  // merge all starting_nodes in the second while_loop into the first while_loop
   for (auto start_node :
        while_loop_num_to_start_node[orig_second_while_loop_num]) {
     start_node_to_while_loop_num[start_node] = orig_first_while_loop_num;
@@ -1872,8 +2198,7 @@ bool SplittablePathRecorder::HasDesedantRelationship(SplitNodeKey first_key,
               second_start_node_key) ||
           start_node_to_decendant_start_nodes[second_start_node_key].contains(
               first_start_node_key)) {
-        // these two while_loop has starting_nodes are descedant of the other,
-        // thus cannot be merged
+        // these two while_loop has starting_nodes are descedant of the other
         return true;
       }
     }
@@ -1912,12 +2237,24 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
           !SizeCanMerge(first_kv.first, second_kv.first)) {
         continue;
       }
-      if (HasDesedantRelationship(first_kv.first, second_kv.first)) {
-        LOG(INFO) << prefix
-                  << "Cannot merge two relative nodes: first_start_node_inst="
-                  << start_node_to_start_inst[first_kv.first]->name()
-                  << " second_start_node_inst="
-                  << start_node_to_start_inst[second_kv.first]->name();
+      if (start_node_to_start_inst[first_kv.first]->opcode() ==
+              HloOpcode::kSort ||
+          start_node_to_start_inst[second_kv.first]->opcode() ==
+              HloOpcode::kSort) {
+        continue;
+      }
+      int64_t first_while_loop_num =
+          start_node_to_while_loop_num[first_kv.first];
+      int64_t second_while_loop_num =
+          start_node_to_while_loop_num[second_kv.first];
+      if (while_loop_num_to_unmegerable_while_loop_num.contains(
+              first_while_loop_num) &&
+          while_loop_num_to_unmegerable_while_loop_num[first_while_loop_num]
+              .contains(second_while_loop_num)) {
+        // donn't need to check
+        // while_loop_num_to_unmegerable_while_loop_num[second_while_loop_num]
+        // since they must be contain to each other's
+        // while_loop_num_to_unmegerable_while_loop_num
         continue;
       }
       LOG(INFO) << prefix << "Determine merge first_start_node_inst="
@@ -1944,7 +2281,8 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
           } else if (cur_lcs_len == best_lcs_len &&
                      ShouldMerge(cur_lcs_len, first_kv.second[i].size(),
                                  second_kv.second[j].size())) {
-            // need to record all possible best_merge_paths
+            // need to record all possible best_merge_paths, the compatiable
+            // paths have the same index.
             best_lcs_path_indices_first.emplace_back(i);
             best_lcs_path_indices_second.emplace_back(j);
           }
@@ -1952,13 +2290,27 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
       }
 
       if (best_lcs_len == 0) continue;
-      // should merge the two while_loops
-      LOG(INFO) << prefix << "Start merge first_start_node_inst="
-                << start_node_to_start_inst[first_kv.first]->name()
-                << " second_start_node_inst="
-                << start_node_to_start_inst[second_kv.first]->name();
-      MergeWhileLoop(first_kv.first, second_kv.first,
-                     best_lcs_path_indices_first, best_lcs_path_indices_second);
+      if (HasDesedantRelationship(first_kv.first, second_kv.first)) {
+        LOG(INFO) << prefix << "Try merge first_start_node_inst="
+                  << start_node_to_start_inst[first_kv.first]->name()
+                  << " second_start_node_inst="
+                  << start_node_to_start_inst[second_kv.first]->name();
+        // Don't need to Update NewPaths using given lcs_indices since if we can
+        // merge the two loops, the fianl usable paths must be a subset of
+        // lcs_indices
+        TryMergableRelativeWhileLoop(first_kv.first, second_kv.first,
+                                     best_lcs_path_indices_first,
+                                     best_lcs_path_indices_second);
+      } else {
+        // should merge the two while_loops
+        LOG(INFO) << prefix << "Start merge first_start_node_inst="
+                  << start_node_to_start_inst[first_kv.first]->name()
+                  << " second_start_node_inst="
+                  << start_node_to_start_inst[second_kv.first]->name();
+        MergeWhileLoop(first_kv.first, second_kv.first,
+                       best_lcs_path_indices_first,
+                       best_lcs_path_indices_second);
+      }
     }
   }
   RecordInstructionsInWhileLoop();
@@ -2552,47 +2904,6 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
   // use the updated_output directly in the whilel_loop in order to
   // avoid cycles
   while_loop_info->starting_node_inst_to_cloned_inst[original] = updated_output;
-
-  // std::vector<HloInstruction*> in_loop_users{};
-  // for (auto orig_user : original->users()) {
-  //   if
-  //   (this->while_loop_num_to_instructions_[while_loop_info->while_loop_num]
-  //           .contains(orig_user)) {
-  //     in_loop_users.push_back(orig_user);
-  //   }
-  // }
-  // if (in_loop_users.size() > 0) {
-  //   LOG(INFO) << "[BuildMergedLoopOutput] "
-  //             << "original.name=" << original->name()
-  //             << " in_loop_users.size=" << in_loop_users.size()
-  //             << " Before replace, orig.users.size="
-  //             << original->users().size();
-  //   // let all in_loop_users to use the new cloned instruction
-  //   // and the cloned instruction will not be added into the final output of
-  //   // while_loop thus remove the cycle in the final while-loop.
-
-  //   for (auto in_loop_user : in_loop_users) {
-  //     LOG(INFO) << "[BuildMergedLoopOutput] "
-  //               << "original.name=" << original->name() << " let
-  //               in_loop_user"
-  //               << in_loop_user->name() << " use cloned_insruction"
-  //               << updated_output_clone->name();
-  //     auto status =
-  //         original->ReplaceUseWith(in_loop_user, updated_output_clone);
-  //     if (status != Status::OK()) {
-  //       LOG(INFO) << "[BuildMergedLoopOutput] "
-  //                 << "FAILED l: original.name=" << original->name()
-  //                 << " let in_loop_user=" << in_loop_user->name()
-  //                 << " use cloned_insruction=" <<
-  //                 updated_output_clone->name();
-  //       CHECK(false);
-  //     }
-  //   }
-  //   LOG(INFO) << "[BuildMergedLoopOutput] "
-  //             << "original.name=" << original->name()
-  //             << " After replace, orig.users.size=" <<
-  //             original->users().size();
-  // }
 
   // TODO:
   // 这里也是利用param_start_index判断，如果是0则创建这个updated_index并插入输出
