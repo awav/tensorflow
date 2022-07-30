@@ -176,6 +176,76 @@ Status RceOptimizerVisitor::HandleReshape(HloInstruction* reshape) {
   return Status::OK();
 }
 
+Status RceOptimizerVisitor::HandleDot(HloInstruction* dot) {
+  CHECK(Match(reduce, m::Dot()));
+  HloInstruction* lhs;
+  HloInstruction* rhs;
+
+  std::stringstream ss;
+
+  if (Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))) && dot->user_count() == 1) {
+    if (lhs->opcode() == HloOpcode::kReshape) {
+
+    }
+    auto reshape = reduce->operand(0);
+    // Case 1: op (shape) -> reshape (1, shape, 1) -> reduce added dims (shape)
+    //         action: remove reshape
+    if (ShapeUtil::Equal(reduce->shape(), op->shape())) {
+      return ReplaceInstruction(reduce, op);
+    }
+
+    if (ShapeUtil::Equal(reshape->shape(), op->shape())) {
+      return Status::OK();
+    }
+    // Case 2: op (shape) -> reshape (1, shape, 1) -> reduce whole shape or part of it (1, shape-1)
+    //         action: 1. remove reshape,
+    //                 2. reduce on original indices
+    //                 3. add reshape afterwards to correct output of the new reshape
+
+    // ss << "\n ===> reduce_op=" << reduce->ToString();
+    // ss << "\n ---> reduce_op_operator=" << reduce->operand(0)->ToString();
+    // ss << "\n";
+
+    std::stringstream ss;
+    auto operand_shape = op->operand(0)->shape();
+    auto reshape_shape = op->shape();
+    auto reduce_shape = reduce->shape();
+    std::vector<int64_t> input_indices(operand_shape.dimensions_size());
+    absl::c_iota(input_indices, 0);
+
+    auto optional_reshaped_indices = ShapeUtil::ReshapeLeavesDimensionsUnmodified(
+        operand_shape, reshape_shape, input_indices);
+    if (optional_reshaped_indices.has_value()) {
+      auto reshaped_indices = *optional_reshaped_indices;
+      auto reduce_indices = reduce->dimensions();
+      std::vector<int64_t> reduce_dims_array;
+      for (auto i = 0; i < reshaped_indices.size(); i++) {
+        if (absl::c_linear_search(reduce_indices, reshaped_indices[i])) {
+          reduce_dims_array.push_back(i);
+        }
+      }
+
+      auto new_reduce_shape = ShapeUtil::FilterDimensions(
+          [&](const auto dim) {
+            return !absl::c_linear_search(reduce_dims_array, dim);
+          },
+          operand_shape);
+
+      HloComputation* comp = reduce->parent();
+      auto new_reduce = comp->AddInstruction(
+          reduce->CloneWithNewOperands(new_reduce_shape, {op, init_value}));
+      auto* new_reduce_dims = new_reduce->mutable_dimensions();
+      new_reduce_dims->clear();
+      absl::c_copy(reduce_dims_array, std::back_inserter(*new_reduce_dims));
+      auto new_reshape = comp->AddInstruction(
+          HloInstruction::CreateReshape(reduce->shape(), new_reduce));
+
+      return ReplaceInstruction(reduce, new_reshape);
+    }
+  }
+  return Status::OK();
+}
+
 Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
   CHECK(Match(reduce, m::Reduce()));
   HloInstruction* op; 
