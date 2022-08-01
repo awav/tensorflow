@@ -262,10 +262,6 @@ class SplittablePathRecorder : public SplitDeterminer {
       SplitNodeKey node_key, const std::vector<size_t>& path_indices,
       absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
           input_start_node_to_splittable_paths);
-  // Merge the two while_loops
-  Status MergeWhileLoop(SplitNodeKey first_key, SplitNodeKey second_key,
-                        const std::vector<size_t>& first_path_indices,
-                        const std::vector<size_t>& second_path_indices);
 
   // Reocrd all instructions in all while_loops
   Status RecordInstructionsInWhileLoop();
@@ -337,7 +333,6 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
 
   Status HandleSort(HloInstruction* sort) override;
   using VisitedInstructionKey = std::tuple<int, int64_t, int64_t>;
-  // TODO: 这里应该是对于一个while——loop有一个visited_instructions
   // for each while_loop create a visited_instructions
   absl::flat_hash_map<
       int64_t, absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>>
@@ -416,8 +411,6 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     // staring_nodes included in the while-loop
     std::vector<SubOutputInfo> final_sub_main_output_elements;
     std::unique_ptr<HloComputation::Builder> while_builder;
-    // TODO:
-    // 目前想的是在最后判定有没有rest的时候或许可以用while_loop_rest_output_elements是否为空判断
     std::unique_ptr<HloComputation::Builder> while_rest_builder;
     // single tuple param instruction
     HloInstruction* while_loop_param;
@@ -493,11 +486,6 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       msg << "]";
       LOG(INFO) << "\n> " << msg.str();
       param_start_index = parameters_.size();
-      // int64_t idx = parameters_size();
-      // TODO:
-      // 如果只对第一个创建offset用来控制while_loop的话，这里应该也是要添加对于idx
-      // 的判断，如果为0就创建init_offset，并插入parameters
-      // 否则就不创建init_offset也不插入parameters_，然后offset_直接创建对parameters_[0]的get_tuple
       auto tmp_offset = CREATE_CONSTANT_INT64(offset);
       Shape param_shape = ShapeUtil::MakeTupleShape({tmp_offset->shape()});
       if (merged_splitter_flag) {
@@ -1970,7 +1958,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
   absl::flat_hash_set<SplitNodeKey> descendant_start_nodes = {};
   int64_t orig_first_while_loop_num = start_node_to_while_loop_num[first_key];
   int64_t orig_second_while_loop_num = start_node_to_while_loop_num[second_key];
-  // 应该把所有的start_node都加进去
   for (auto first_start_node_key :
        while_loop_num_to_start_node[orig_first_while_loop_num]) {
     descendant_start_nodes.insert(first_start_node_key);
@@ -1979,20 +1966,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
        while_loop_num_to_start_node[orig_second_while_loop_num]) {
     descendant_start_nodes.insert(second_start_node_key);
   }
-  // // new generated descendant relationship
-  // for (auto first_start_node_key :
-  //      while_loop_num_to_start_node[orig_first_while_loop_num]) {
-  //   for (auto second_start_node_key :
-  //        while_loop_num_to_start_node[orig_second_while_loop_num]) {
-  //     if (start_node_to_decendant_start_nodes[first_start_node_key].contains(
-  //             second_start_node_key) ||
-  //         start_node_to_decendant_start_nodes[second_start_node_key].contains(
-  //             first_start_node_key)) {
-  //       descendant_start_nodes.insert(first_start_node_key);
-  //       descendant_start_nodes.insert(second_start_node_key);
-  //     }
-  //   }
-  // }
   // record all root nodes of all descendant chains
   absl::flat_hash_set<SplitNodeKey> chain_root_nodes(descendant_start_nodes);
   for (auto first_start_node_key : descendant_start_nodes) {
@@ -2053,16 +2026,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
       chain_root_to_new_chain_path_indices;
   // try to find a path in a chain with split_dim in non-reduce/non-contracting
   // dimensions
-  // TODO: 1. 现在不work的一个可能原因是，path只记录到了leaf
-  // 下一步，尝试使用一个queue之类的来遍历path上的node，当到达path结尾的时候判断
-  // 是否能用在chain上的start_node来扩展当前的path，如果可以则执行扩展并继续
-  // TODO: 2. 下面在path内check start_node的方法也不对
-  // 首先问题是因为现在只记录到split_leaf，path中不可能包含其他的start_node；
-  // 二是这些有可能可以合并的start_node在split后的split_dim也是需要推算的
-  // * 所以真实的做法应该是从root开始去尝试拼接，如果可以把所有的都拼接，说明这是可以合并的
-  // TODO: 3.
-  // 应该把与best_lcs的交集合并放到前面来，这样才能保证这些chain的path在拼接的时候
-  // 使用的是正确的对应path进行拼接？也就是修改先修改两个while_loop中能用的path为best_lcs中选出的path
 
   for (auto chain_root_node : chain_root_nodes) {
     std::vector<size_t> new_chain_path_indices = {};
@@ -2070,9 +2033,8 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
          i < tmp_start_node_to_splittable_paths[chain_root_node].size(); ++i) {
       absl::flat_hash_set<SplitNodeKey> chain_nodes(
           chain_root_to_chain_nodes[chain_root_node]);
-      // * 需要判断chain_root的split_dim也符合要求吗？
-      // * 感觉不需要，因为能作为chain_root就代表没有被loop内的其他node使用
-      // skip chain_root
+      // skip chain_root, since it will not be used by other node in the
+      // while-loop
       chain_nodes.erase(chain_root_node);
       LOG(INFO) << prefix << " chain_root_node.name="
                 << start_node_to_start_inst[chain_root_node]->name()
@@ -2093,7 +2055,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
                 << " path_node_que.init_size=" << path_node_que.size();
       int counter = 0;
       while (!path_node_que.empty()) {
-        // 也不需要判断末尾才添加，因为可能path中包含多分叉，如果遇到了且符合就可以添加
         auto cur_node_val = path_node_que.front();
         path_node_que.pop();
         ++counter;
@@ -2137,8 +2098,8 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
                     << " remove in_path_start_node.name="
                     << cur_node_inst->name()
                     << " in_path_start_node.size=" << chain_nodes.size();
-          // can extend the path
-          // skip the start node
+          // since paths can have branches, so once we meet an extendable
+          // node,extend the path(skip cur_node)
           for (auto k = 1;
                k < tmp_start_node_to_splittable_paths[cur_node_key][i].size();
                k++) {
@@ -2172,7 +2133,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
     if (new_chain_path_indices.empty()) {
       // cannot find a useable path for the root
       // thus cannot merge the two loops
-      // TODO: 用一个map记录互相不能合并的loop_num
       LOG(INFO) << prefix
                 << " Cannot merge while_loop_1=" << orig_first_while_loop_num
                 << " while_loop_2=" << orig_second_while_loop_num
@@ -2187,11 +2147,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
           new_chain_path_indices;
     }
   }
-
-  // TODO:
-  // 这里有问题，还应该判断下让它只包括和best_lcs_split_dim的交集，如果交集不为空才可以合并
-  // 因为有可能直接找到的结果中，两个while_loop的chain完全没有公共路径，这种就不应该合并
-  // 确实得调用update？
 
   // mergable split_dim should be the intersection of chain_root_path_indices
   // and lcs_indices
@@ -2249,28 +2204,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
                                     start_node_to_splittable_paths));
   TF_RETURN_IF_ERROR(UpdateNewPaths(second_key, second_lcs_indices,
                                     start_node_to_splittable_paths));
-  // all chains can find splittable paths, can merge the two loops
-  // update all new_paths of all chain_nodes
-  //* 这里只更新这些可以吗?
-  //因为这里的node还可能包含在一些本来各自loop中就含有的
-  // chain中，因此也需要找到这些chain，所以前面就不能只找两个loop新形成的chain，原来的
-  // 也要包含进去
-  //* 这样是可以的，因为在前面找新形成的descendant的关系时，只要会被这个更新影响到的node都会
-  // 被包含进descendant_start_nodes，所以也只需要更新这里有的部分
-  // for (auto chain_root_node : chain_root_nodes) {
-  //   for (auto node : chain_root_to_chain_nodes[chain_root_node]) {
-  //     std::vector<std::vector<SplitNodeVal>> node_new_paths;
-  //     node_new_paths.reserve(
-  //         chain_root_to_new_chain_path_indices[chain_root_node].size());
-  //     for (auto index :
-  //     chain_root_to_new_chain_path_indices[chain_root_node]) {
-  //       node_new_paths.emplace_back(
-  //           start_node_to_splittable_paths[node][index]);
-  //     }
-  //     start_node_to_splittable_paths[node] = node_new_paths;
-  //   }
-  // }
-
   // merge all starting_nodes in the second while_loop into the first
   // while_loop
   for (auto start_node :
@@ -2293,17 +2226,10 @@ Status SplittablePathRecorder::UpdateNewPaths(
     absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
         input_start_node_to_splittable_paths) {
   int64_t orig_while_loop_num = start_node_to_while_loop_num[node_key];
-  // a set to record all start_nodes has descendant relationships with
-  // first_key.
-  // TODO：这里找所有chain的方法也不对，可能找不全所有设计的
-  //    A
-  // B      C
-  // 更新BA的时候哦，其实C也应该需要更新，但下面的做法并不能找到C，比如下面的算法
-  // 这种情况就找不到C
-  // 所以不应该是只更新chain，而是应该更新所有的start_node？
-  // 感觉没错，应该是所有的start_node，因为包含在一个loop里的所有start_node一定是含有一部分公共的
-  // 所以都会受到影响
-  // need to updates paths of all nodes in loop_descendant_chain_nodes
+  // we need to update all noeds because 2 while-loops can be merged means they
+  // have some nodes in common, and those common must have other nodes in common
+  // in their own loops, so we need to updates paths of all start nodes in
+  // current while-loop
   for (SplitNodeKey start_node_key :
        while_loop_num_to_start_node[orig_while_loop_num]) {
     std::vector<std::vector<SplitNodeVal>> new_paths;
@@ -2315,63 +2241,9 @@ Status SplittablePathRecorder::UpdateNewPaths(
     // update all possible paths
     input_start_node_to_splittable_paths[start_node_key] = new_paths;
   }
-  // absl::flat_hash_set<SplitNodeKey> loop_descendant_chain_nodes =
-  // {node_key}; for (auto first_start_node_key :
-  //      while_loop_num_to_start_node[orig_while_loop_num]) {
-  //   for (auto chain_node : loop_descendant_chain_nodes) {
-  //     if
-  //     (start_node_to_decendant_start_nodes[first_start_node_key].contains(
-  //             chain_node) ||
-  //         start_node_to_decendant_start_nodes[chain_node].contains(
-  //             first_start_node_key)) {
-  //       loop_descendant_chain_nodes.insert(first_start_node_key);
-  //     }
-  //   }
-  // }
-  // LOG(INFO) << "[UpdateNewPaths] "
-  //           << "while_loop_num=" << orig_while_loop_num
-  //           << " node_key=" << start_node_to_start_inst[node_key]->name()
-  //           << " descendant_start_nodes_set.size="
-  //           << loop_descendant_chain_nodes.size() << " orig_path.size="
-  //           << start_node_to_splittable_paths[node_key].size()
-  //           << " new_path.size=" << path_indices.size();
-  // // need to updates paths of all nodes in loop_descendant_chain_nodes
-  // for (SplitNodeKey start_node_key : loop_descendant_chain_nodes) {
-  //   std::vector<std::vector<SplitNodeVal>> new_paths;
-  //   new_paths.reserve(path_indices.size());
-  //   for (auto index : path_indices) {
-  //     new_paths.emplace_back(
-  //         start_node_to_splittable_paths[start_node_key][index]);
-  //   }
-  //   // update all possible paths
-  //   start_node_to_splittable_paths[start_node_key] = new_paths;
-  // }
   return Status::OK();
 }
 
-Status SplittablePathRecorder::MergeWhileLoop(
-    SplitNodeKey first_key, SplitNodeKey second_key,
-    const std::vector<size_t>& first_path_indices,
-    const std::vector<size_t>& second_path_indices) {
-  // set new splittable paths for all start_nodes in the 2 while-loops
-  int64_t orig_first_while_loop_num = start_node_to_while_loop_num[first_key];
-  int64_t orig_second_while_loop_num = start_node_to_while_loop_num[second_key];
-  TF_RETURN_IF_ERROR(UpdateNewPaths(first_key, first_path_indices,
-                                    start_node_to_splittable_paths));
-  TF_RETURN_IF_ERROR(UpdateNewPaths(second_key, second_path_indices,
-                                    start_node_to_splittable_paths));
-  // merge all starting_nodes in the second while_loop into the first
-  // while_loop
-  for (auto start_node :
-       while_loop_num_to_start_node[orig_second_while_loop_num]) {
-    start_node_to_while_loop_num[start_node] = orig_first_while_loop_num;
-    while_loop_num_to_start_node[orig_first_while_loop_num].emplace_back(
-        start_node);
-  }
-  // delete second_while_loop
-  while_loop_num_to_start_node.erase(orig_second_while_loop_num);
-  return Status::OK();
-}
 
 Status SplittablePathRecorder::RecordInstructionsInWhileLoop() {
   std::string prefix = "[RecordInstructionsInWhileLoop] ";
@@ -2466,13 +2338,6 @@ Status SplittablePathRecorder::InitWhileLoops() {
     auto while_loop_num = GenerateNewWhileLoopNum();
     start_node_to_while_loop_num[kv.first] = while_loop_num;
     while_loop_num_to_start_node[while_loop_num] = {kv.first};
-    // LOG(INFO) << prefix << "Init start_node_key=" << kv.first
-    //           << " , start_node_inst.name="
-    //           << start_node_to_start_inst[kv.first]
-    //           << " with while_loop_num=" << while_loop_num
-    //           << " while_loop_num_to_start_node[" << while_loop_num <<
-    //           "].size="
-    //           << while_loop_num_to_start_node[while_loop_num].size();
   }
   LOG(INFO) << prefix << "Finish InitWhileLoops";
   return Status::OK();
@@ -2548,36 +2413,9 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
                 << start_node_to_start_inst[first_kv.first]->name()
                 << " second_start_node_inst="
                 << start_node_to_start_inst[second_kv.first]->name();
-      // Don't need to Update NewPaths using given lcs_indices since if we
-      // can merge the two loops, the fianl usable paths must be a subset of
-      // lcs_indices
       TryMergableRelativeWhileLoop(first_kv.first, second_kv.first,
                                    best_lcs_path_indices_first,
                                    best_lcs_path_indices_second);
-
-      // if (HasDesedantRelationship(first_kv.first, second_kv.first)) {
-      //   LOG(INFO) << prefix << "Try merge first_start_node_inst="
-      //             << start_node_to_start_inst[first_kv.first]->name()
-      //             << " second_start_node_inst="
-      //             << start_node_to_start_inst[second_kv.first]->name();
-      //   // Don't need to Update NewPaths using given lcs_indices since if we
-      //   // can merge the two loops, the fianl usable paths must be a subset
-      //   of
-      //   // lcs_indices
-      //   TryMergableRelativeWhileLoop(first_kv.first, second_kv.first,
-      //                                best_lcs_path_indices_first,
-      //                                best_lcs_path_indices_second);
-      // } else {
-      //   // should merge the two while_loops
-      //   // 因为path的多分叉特性，所以所有的都要走tryMergable
-      //   LOG(INFO) << prefix << "Start merge first_start_node_inst="
-      //             << start_node_to_start_inst[first_kv.first]->name()
-      //             << " second_start_node_inst="
-      //             << start_node_to_start_inst[second_kv.first]->name();
-      //   MergeWhileLoop(first_kv.first, second_kv.first,
-      //                  best_lcs_path_indices_first,
-      //                  best_lcs_path_indices_second);
-      // }
     }
   }
   RecordInstructionsInWhileLoop();
@@ -3172,9 +3010,6 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
   // avoid cycles
   while_loop_info->starting_node_inst_to_cloned_inst[original] = updated_output;
 
-  // TODO:
-  // 这里也是利用param_start_index判断，如果是0则创建这个updated_index并插入输出
-  // 否则就不创建，也不插入输出
   // add split size to index
   std::vector<HloInstruction*>& output_elements = while_loop_output_elements;
   int64_t output_index_offset = 0;
@@ -3199,10 +3034,6 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
   for (int64_t i = param_start_index + output_index_offset;
        i < param_->shape().tuple_shapes_size(); i++) {
     if (i != output_idx) {
-      // TODO:
-      // 这里会不会有问题，如果多个param的话，由于已经添加的param不会重复添加，
-      // 所以会不会导致output_elements的shape和parameters不一致？
-      // 感觉应不会，因为这里也是从param_start_index开始的，也就是只会添加新的param
       HloInstruction* get_tuple =
           builder_.AddInstruction(HloInstruction::CreateGetTupleElement(
               param_->shape().tuple_shapes(i), param_, i));
@@ -3318,8 +3149,6 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
         CHECK(while_get_array->shape().dimensions(split_dim) == slice_k);
         CHECK(while_get_indices->shape().dimensions(split_dim) == slice_k);
 
-        // auto rest_builder_name = "splitter_rest_sort";
-        // HloComputation::Builder rest_builder(rest_builder_name);
         HloComputation::Builder& rest_builder = *loop_info.while_rest_builder;
         int64_t main_split_size = loop_info.split_count * loop_info.split_size;
 
@@ -3664,8 +3493,6 @@ Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
   WhileLoopInfo& loop_info = while_loop_num_to_info[while_loop_num];
 
   HloComputation::Builder& body_builder = *loop_info.while_builder;
-  // TODO:
-  // 获取这个while_loop所在的computation，这么做感觉没问题，但可能得确定下
   HloComputation* while_parent_comp =
       loop_info.final_sub_main_output_elements.front()
           .starting_node_inst->parent();
@@ -3708,7 +3535,6 @@ Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
           ComparisonDirection::kLt));
   HloComputation* cond =
       parent_module->AddEmbeddedComputation(cond_builder.Build(compare));
-  // 送给while 循环的初始值
   HloInstruction* init = while_parent_comp->AddInstruction(
       HloInstruction::CreateTuple(loop_info.while_loop_parameters));
   HloInstruction* loop = while_parent_comp->AddInstruction(
@@ -3836,10 +3662,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
 
     int64_t output_index = splitter.BuildMergedLoopOutput(
         -1, split_size, dot, part, /*combine_with_sum =*/true);
-    // HloComputation* body =
-    //     parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
-    // HloInstruction* main_init = dot->parent()->AddInstruction(
-    //     HloInstruction::CreateTuple(splitter.parameters()));
     if (split_rest == 0) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
@@ -3875,16 +3697,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
                                     .while_rest_output_elements.size();
       while_loop_num_to_info[while_loop_num]
           .while_rest_output_elements.push_back(rest_part);
-      // HloComputation* rest_body =
-      //     parent_module->AddEmbeddedComputation(rest_builder.Build(rest_part));
-
-      // splitter.parameters()[0] =
-      //     dot->parent()->AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
-      // HloInstruction* args = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateTuple(splitter.parameters()));
-      // HloInstruction* rest_result = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateCall(rest_part->shape(), {args},
-      //     rest_body));
 
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
@@ -3962,7 +3774,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
           "size "
        << split_size << " and split rest " << split_rest;
 
-    // HloComputation::Builder body_builder("tensor_splitter_dot_body");
     HloComputation::Builder& body_builder =
         *while_loop_num_to_info[while_loop_num].while_builder;
     for (HloInstruction* leaf : split_leafs_rhs) {
@@ -3991,10 +3802,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
 
     int64_t output_index = splitter.BuildMergedLoopOutput(
         -1, split_size, dot, part, /*combine_with_sum =*/true);
-    // HloComputation* body =
-    //     parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
-    // HloInstruction* main_init = dot->parent()->AddInstruction(
-    //     HloInstruction::CreateTuple(splitter.parameters()));
 
     if (split_rest == 0) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
@@ -4011,7 +3818,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
       }
       return Status::OK();
     } else {
-      // HloComputation::Builder rest_builder("tensor_splitter_dot_rest");
       HloComputation::Builder& rest_builder =
           *while_loop_num_to_info[while_loop_num].while_rest_builder;
       std::vector<HloInstruction*> splitter_parameters;
@@ -4037,16 +3843,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
                                     .while_rest_output_elements.size();
       while_loop_num_to_info[while_loop_num]
           .while_rest_output_elements.push_back(rest_part);
-
-      // HloComputation* rest_body =
-      //     parent_module->AddEmbeddedComputation(rest_builder.Build(rest_part));
-
-      // splitter.parameters()[0] =
-      //     dot->parent()->AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
-      // HloInstruction* args = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateTuple(splitter.parameters()));
-      // HloInstruction* rest_result = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateCall(part->shape(), {args}, rest_body));
 
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
@@ -4131,7 +3927,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
        << (split_is_lhs ? "lhs" : "rhs") << " will be split on " << split_dim
        << " with split size " << split_size << " and rest size " << split_rest;
 
-    // HloComputation::Builder body_builder("tensor_splitter_dot_body");
     HloComputation::Builder& body_builder =
         *while_loop_num_to_info[while_loop_num].while_builder;
     Splitter splitter(
@@ -4213,10 +4008,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
 
     int64_t output_index = splitter.BuildMergedLoopOutput(
         dot_split_dim, split_size, dot, part, combine_parts_with_sum);
-    // HloComputation* body =
-    //     parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
-    // HloInstruction* main_init = dot->parent()->AddInstruction(
-    //     HloInstruction::CreateTuple(splitter.parameters()));
 
     if (split_rest == 0) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
@@ -4233,7 +4024,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
       return Status::OK();
 
     } else {
-      // HloComputation::Builder rest_builder("tensor_splitter_dot_rest");
       HloComputation::Builder& rest_builder =
           *while_loop_num_to_info[while_loop_num].while_rest_builder;
       std::vector<HloInstruction*> splitter_parameters;
@@ -4320,16 +4110,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
       while_loop_num_to_info[while_loop_num]
           .while_rest_output_elements.push_back(part);
 
-      // HloComputation* rest_body =
-      //     parent_module->AddEmbeddedComputation(rest_builder.Build(part));
-
-      // splitter.parameters()[0] =
-      //     dot->parent()->AddInstruction(HloInstruction::CreateConstant(
-      //         LiteralUtil::CreateR0<int64_t>(main_split_size)));
-      // HloInstruction* args = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateTuple(splitter.parameters()));
-      // HloInstruction* rest_result = dot->parent()->AddInstruction(
-      //     HloInstruction::CreateCall(part->shape(), {args}, rest_body));
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
       std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
@@ -4438,7 +4218,6 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
      << " operands will be split at dimension " << split_dim
      << " with split size " << split_size << " and rest size " << split_rest;
 
-  // HloComputation::Builder body_builder("tensor_splitter_reduce_body");
   HloComputation::Builder& body_builder =
       *while_loop_num_to_info[while_loop_num].while_builder;
   Splitter splitter(
@@ -4517,17 +4296,10 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   int64_t output_index = splitter.BuildMergedLoopOutput(
       reduce_split_dim, split_size, old_output, output_part, false,
       split_along_reduce_dim);
-  // HloComputation* body =
-  //     parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
-  // HloInstruction* main_init = reduce->parent()->AddInstruction(
-  //     HloInstruction::CreateTuple(splitter.parameters()));
 
   if (split_rest > 0) {
-    // HloComputation::Builder rest_builder("tensor_splitter_reduce_rest");
     HloComputation::Builder& rest_builder =
         *while_loop_num_to_info[while_loop_num].while_rest_builder;
-    // std::vector<HloInstruction*> splitter_parameters;
-    // std::vector<HloInstruction*> splitter_output_elements;
     Splitter rest_splitter(
         false, &while_loop_num_to_info[while_loop_num],
         while_loop_num_to_info[while_loop_num].while_rest_parameters,
@@ -4599,19 +4371,9 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
     int64_t rest_output_idx = rest_splitter.BuildRestOutputTuple(
         reduce_split_dim, split_rest, old_output, output_part, false,
         split_along_reduce_dim);
-    // HloComputation* rest =
-    //     parent_module->AddEmbeddedComputation(rest_builder.Build(output_tuple));
-
-    // int64_t output_idx = output_tuple->shape().tuple_shapes().size() - 1;
-    // HloInstruction* init = reduce->parent()->AddInstruction(
-    //     HloInstruction::CreateTuple(rest_splitter.parameters()));
-    // HloInstruction* call = reduce->parent()->AddInstruction(
-    //     HloInstruction::CreateCall(output_tuple->shape(), {init}, rest));
-    // HloInstruction* result_rest =
-    //     reduce->parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
-    //         old_output->shape(), call, output_idx));
     std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
     std::vector<HloInstruction*> empty_leafs;
+
     while_loop_num_to_info[while_loop_num].AddSubOutput(SubOutputInfo(
         output_index, reduce, split_dim, empty_id_shapes, empty_leafs,
         split_rest, rest_output_idx, false, split_along_reduce_dim));
@@ -4759,8 +4521,6 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
 
   absl::c_move(indices_split_leafs, std::back_inserter(split_leafs));
 
-  // auto builder_name = "splitter_body_sort";
-  // HloComputation::Builder body_builder(builder_name);
   HloComputation::Builder& body_builder =
       *while_loop_num_to_info[while_loop_num].while_builder;
   Splitter body_splitter(
@@ -4974,24 +4734,8 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
     }
   }
 
-  // HloInstruction* body_parameter_updates = body_builder.AddInstruction(
-  //     HloInstruction::CreateTuple(while_parameter_updates));
-  // HloComputation* body = parent_module->AddEmbeddedComputation(
-  //     body_builder.Build(body_parameter_updates));
-
-  // Create While loop, including condition for While loop.
-  // auto parameters_shape = body_parameter_updates->shape();
-  // HloComputation* condition = CreateWhileSplitCondition(
-  //     "splitter_condition_sort", parameters_shape, main_split_size);
-  // auto results = CreateWhileSplitWithResults(
-  //     sort_comp, condition, body, body_splitter.parameters(),
-  //     {std::make_tuple(body_acc_parameter_id, body_acc_shape)});
-
   std::vector<std::tuple<int64_t, Shape>> ids_and_shapes = {
       std::make_tuple(body_acc_parameter_id, body_acc_shape)};
-  // Create init and loop
-  // HloInstruction* main_init = sort_comp->AddInstruction(
-  //     HloInstruction::CreateTuple(body_splitter.parameters()));
 
   if (split_rest == 0) {
     std::vector<HloInstruction*> empty_leafs;
