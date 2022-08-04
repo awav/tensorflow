@@ -53,6 +53,7 @@ Status BroadcastSimplifierVisitor::HandleBroadcast(HloInstruction* broadcast) {
     // This broadcast does nothing, remove it
     return ReplaceInstruction(broadcast, op);
   }
+  return Status::OK();
 }
 
 Status BroadcastSimplifierVisitor::HandleTranspose(HloInstruction* transpose) {
@@ -66,6 +67,7 @@ Status BroadcastSimplifierVisitor::HandleTranspose(HloInstruction* transpose) {
     // This transpose does nothing, remove it
     return ReplaceInstruction(transpose, op);
   }
+  return Status::OK();
 }
 
 Status BroadcastSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
@@ -99,6 +101,7 @@ Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
     // This convert does nothing, remove it
     return ReplaceInstruction(convert, op);
   }
+  return Status::OK();
 }
 
 StatusOr<bool> BroadcastSimplifier::Run(HloModule* module) {

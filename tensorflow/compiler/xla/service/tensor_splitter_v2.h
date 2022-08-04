@@ -16,9 +16,9 @@ class TensorSplitterV2 : public HloModulePass {
   StatusOr<bool> Run(HloModule* module) override;
 
   // Use this to retreive the configured split size in bytes.
-  static int64_t TensorBytes(const string& option);
+  static int64_t TensorBytes(const std::string& option);
   static std::tuple<int64_t, int64_t> SplitSettings();
-  static bool endsWith(const string& str, string pattern);
+  static bool endsWith(const std::string& str, std::string pattern);
 };
 
 

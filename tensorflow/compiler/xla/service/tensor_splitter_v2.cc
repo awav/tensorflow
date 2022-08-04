@@ -67,7 +67,7 @@ using TensorSplitProperties = std::tuple<int64_t, int64_t, int64_t>;
   HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(number))
 
 // SplitNodeKey = inst_id where inst_id is the final result node of the
-// path, not included in the split_path
+// path
 using SplitNodeKey = int64_t;
 // <inst,split_dim,split_size,parent_inst>
 using SplitNodeVal =
@@ -1388,7 +1388,10 @@ Status SplittablePathRecorder::HandleDot(HloInstruction* dot) {
     LOG(INFO) << ss.str();
     return Status::OK();
   }
-
+  LOG(INFO) << "\n ----< [SplittablePathRecorder]  HandleDot for '"
+            << dot->name() << " dot.shape=" << dot->shape().ToString()
+            << "' dot.byte_size=" << ShapeUtil::ByteSizeOfElements(dot->shape())
+            << " max_size_threshold= " << max_size_threshold;
   // TODO: Handle the case where both operands can be
   //       split in a better way.
 
@@ -1573,7 +1576,7 @@ Status SplittablePathRecorder::HandleDot(HloInstruction* dot) {
     }
   }
 
-  ss << "\n ----< Exit HandleDot for '" << dot->name() << "' with no splitting";
+  ss << "\n ----< Exit HandleDot for '" << dot->name();
   LOG(INFO) << ss.str();
   return Status::OK();
 }
@@ -1593,6 +1596,11 @@ Status SplittablePathRecorder::HandleReduce(HloInstruction* reduce) {
   if (!OperandShouldBeSplit(reduce->mutable_operand(0))) {
     ss << "\n<<< Reduce '" << reduce->name()
        << "' cannot be split. Something is not splittable on the way up.";
+    ss << "\noperand.name=" << reduce->mutable_operand(0)->name()
+       << " shape=" << reduce->mutable_operand(0)->shape().ToString()
+       << " byte_size="
+       << ShapeUtil::ByteSizeOfElements(reduce->mutable_operand(0)->shape())
+       << " max_size_threshold=" << max_size_threshold;
     ss << "\n <---- Exit HandleReduce for '" << reduce->name() << "' FAILURE";
     LOG(INFO) << ss.str();
     return Status::OK();
@@ -1895,6 +1903,7 @@ bool SplittablePathRecorder::ShouldMerge(int64_t lcs_len,
                                          int64_t second_path_len) {
   // two path should be merged iff the common path len is greather than
   // half length of each path length.
+  if ((!first_path_len) || (!second_path_len)) return false;
   return float(lcs_len) / float(first_path_len) > lcs_merge_threshold &&
          float(lcs_len) / float(second_path_len) > lcs_merge_threshold;
 }
@@ -2244,7 +2253,6 @@ Status SplittablePathRecorder::UpdateNewPaths(
   return Status::OK();
 }
 
-
 Status SplittablePathRecorder::RecordInstructionsInWhileLoop() {
   std::string prefix = "[RecordInstructionsInWhileLoop] ";
   // first init all starting_node with a unique while_loop
@@ -2277,10 +2285,14 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
   std::string prefix = "[FindAllDescdantStartNodes] ";
   start_node_to_decendant_start_nodes[start_node_key] = {};
   HloInstruction* cur_start_inst = start_node_to_start_inst[start_node_key];
+  LOG(INFO) << prefix << " Start: starting_node=" << cur_start_inst->name();
   std::queue<HloInstruction*> descdant_que;
+  absl::flat_hash_set<HloInstruction*> descendant_inst_set;
   for (auto operand_inst : cur_start_inst->operands()) {
     descdant_que.push(operand_inst);
+    descendant_inst_set.insert(operand_inst);
   }
+
   while (!descdant_que.empty()) {
     HloInstruction* cur_descdant_inst = descdant_que.front();
     descdant_que.pop();
@@ -2288,12 +2300,29 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
     if (start_node_set.contains(cur_descdant_key)) {
       start_node_to_decendant_start_nodes[start_node_key].insert(
           cur_descdant_key);
-      LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
-                << " has descdant_start_node=" << cur_descdant_inst->name();
+      // LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
+      //           << " has descdant_start_node=" << cur_descdant_inst->name()
+      //           << cur_start_inst->name() << ".descendant.size="
+      //           <<
+      //           start_node_to_decendant_start_nodes[start_node_key].size();
     }
     for (auto operand_inst : cur_descdant_inst->operands()) {
-      descdant_que.push(operand_inst);
+      if (!descendant_inst_set.contains(operand_inst)) {
+        descdant_que.push(operand_inst);
+        descendant_inst_set.insert(operand_inst);
+      } else {
+        LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
+                  << " cur_descdant_start_node=" << cur_descdant_inst->name()
+                  << " has duplicate descendant_operand"
+                  << operand_inst->name();
+      }
     }
+    // LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
+    //           << " cur_descdant_start_node=" << cur_descdant_inst->name() <<
+    //           " "
+    //           << cur_descdant_inst->name()
+    //           << ".operands.size=" << cur_descdant_inst->operands().size();
+    // << " descdant_que.size=" << descdant_que.size();
   }
   return Status::OK();
 }
@@ -2378,8 +2407,10 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
       }
       LOG(INFO) << prefix << "Determine merge first_start_node_inst="
                 << start_node_to_start_inst[first_kv.first]->name()
+                << " toatal_path_num=" << first_kv.second.size()
                 << " second_start_node_inst="
-                << start_node_to_start_inst[second_kv.first]->name();
+                << start_node_to_start_inst[second_kv.first]->name()
+                << " toatal_path_num=" << second_kv.second.size();
       int64_t best_lcs_len = 0;
       std::vector<size_t> best_lcs_path_indices_first = {};
       std::vector<size_t> best_lcs_path_indices_second = {};
@@ -2390,7 +2421,9 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
                     << start_node_to_start_inst[first_kv.first]->name()
                     << " second_start_node_inst="
                     << start_node_to_start_inst[second_kv.first]->name()
-                    << " LCS(" << i << "," << j << ")" << cur_lcs_len;
+                    << " LCS(" << i << "," << j << ")" << cur_lcs_len
+                    << " best_lcs_len=" << best_lcs_len;
+          if (cur_lcs_len == 0) continue;
           if (cur_lcs_len > best_lcs_len &&
               ShouldMerge(cur_lcs_len, first_kv.second[i].size(),
                           second_kv.second[j].size())) {
@@ -3479,7 +3512,8 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
   LOG(INFO) << prefix << " Finish building "
             << "loop.parent = " << loop->parent()->name()
             << " instructions.size=" << loop->parent()->instruction_count();
-  LOG(INFO) << prefix << " Final computation:\n" << loop->parent()->ToString();
+  // LOG(INFO) << prefix << " Final computation:\n" <<
+  // loop->parent()->ToString();
 
   return Status::OK();
 }
@@ -4784,6 +4818,10 @@ Status TensorSplitterRewriteVisitorV2::HandleDot(HloInstruction* dot) {
     LOG(INFO) << ss.str();
     return Status::OK();
   }
+  LOG(INFO) << "\n ----< [TensorSplitterRewriteVisitorV2]  HandleDot for '"
+            << dot->name() << " dot.shape=" << dot->shape().ToString()
+            << "' dot.byte_size=" << ShapeUtil::ByteSizeOfElements(dot->shape())
+            << " max_size_threshold= " << max_size_threshold;
 
   auto path_key = MakeSplitNodeKey(dot);
   if (!start_node_to_splittable_paths.contains(path_key)) {
@@ -4911,7 +4949,7 @@ Status TensorSplitterRewriteVisitorV2::HandleSort(HloInstruction* sort) {
   }
 }
 
-bool TensorSplitterV2::endsWith(const string& str, string pattern) {
+bool TensorSplitterV2::endsWith(const std::string& str, std::string pattern) {
   if (pattern.size() > str.size()) return false;
   for (int i = 1; i <= pattern.size(); i++) {
     if (pattern[pattern.size() - i] != str[str.size() - i]) return false;
@@ -4934,7 +4972,7 @@ std::tuple<int64_t, int64_t> TensorSplitterV2::SplitSettings() {
   return std::make_tuple(size_threshold, split_size);
 }
 
-int64_t TensorSplitterV2::TensorBytes(const string& option) {
+int64_t TensorSplitterV2::TensorBytes(const std::string& option) {
   int64_t raw = (int64_t)atoi(option.c_str());
   LOG(INFO) << "[TensorSplitterV2::TensorBytes] option= '" << option.c_str()
             << "'";
