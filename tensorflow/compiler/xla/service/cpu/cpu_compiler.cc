@@ -333,6 +333,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<HloPassFix<RceOptimizer>>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloMCO>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<TensorSplitter>();
   pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
@@ -413,7 +414,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     // TODO(b/134075051): Re-enable after b/134075051 is fixed.
     // pipeline.AddPass<SliceSinker>();
 
-    pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloDCE>();
     pipeline.AddPass<ReshapeMover>();
     pipeline.AddPass<HloConstantFolding>();

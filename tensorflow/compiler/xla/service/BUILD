@@ -2371,7 +2371,9 @@ cc_library(
         ":hlo",
         ":hlo_creation_utils",
         ":hlo_pass",
-        
+        ":pattern_matcher",
+        ":call_inliner",
+        ":shape_inference",
         "@com_google_absl//absl/algorithm:container",
     ],
 )

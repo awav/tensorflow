@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
+#include "tensorflow/compiler/xla/service/pattern_matcher.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -34,6 +35,7 @@ limitations under the License.
 namespace xla {
 
 namespace {
+namespace m = match;
 
 using DFSStack = absl::InlinedVector<std::pair<int, HloInstruction*>, 16>;
 void DebugPrint(std::string functionName, std::string content) {
@@ -137,16 +139,11 @@ static Status DetectMatrixChainPreorderDFS(
         visitor->GetVisitState(current_id);
     if (visit_state == Visitor::kVisited) {
       dfs_stack.pop_back();
-      VLOG(3) << "[DetectMatrixChainPreorderDFS] "
-              << "Not visiting HLO (id = " << current_id
-              << ") as it was already visited.";
       continue;
     }
 
     dfs_stack.pop_back();
     bool is_matmul_node = MatrixChainDetector::CheckRealDot(current_node);
-    VLOG(2) << "[DetectMatrixChainPreorderDFS] "
-            << "Visiting HLO %" << current_node->name();
     DebugPrint("DetectMatrixChainPreorderDFS",
                "Visiting HLO = " + current_node->name() +
                    " opcode = " + HloOpcodeString(current_node->opcode()) +
@@ -190,162 +187,57 @@ static Status DetectMatrixChainPreorderDFS(
   return Status::OK();
 }
 
-// perform a pre-order DFS and rewrite nodes during traversal
-// template <typename Visitor>
-static Status PreorderDFSRewriter(HloInstruction* root,
-                                  TransposeReduceSumUnfolder* visitor,
-                                  bool& changed,
-                                  bool ignore_control_predecessors = false) {
-  // Calculating the instruction count within a module can be expensive on large
-  // models so only do it if the visit state is empty. This will help when the
-  // same visitor is reused across many computations of a single module.
-  if (visitor->VisitStateCapacity() == 0) {
-    visitor->ReserveVisitStates(root->GetModule()->instruction_count());
-  }
-
-  // dfs_stack holds pairs of <HloInstruction*->unique_id(), HloInstruction*>.
-  //
-  // We need to keep track of both the id and the instruction because
-  // instructions can get deleted while they are on the stack, so we
-  // can't always use the (potentially dead) instruction object to grab
-  // its id.
-  DFSStack dfs_stack;
-  dfs_stack.emplace_back(root->unique_id(), root);
-  // used to record roots of new copied chains
-  DebugPrint("PreorderDFSRewriter",
-             "Start, root = " + root->name() +
-                 "opcode = " + HloOpcodeString(root->opcode()));
-
-  do {
-    DCHECK(!dfs_stack.empty());
-
-    int current_id = dfs_stack.back().first;
-    HloInstruction* current_node = dfs_stack.back().second;
-    CHECK_GE(current_id, 0)
-        << "[PreorderDFSRewriter] " << current_id << ": " << current_node
-        << ": instruction may not have parent computation";
-    typename TransposeReduceSumUnfolder::VisitState visit_state =
-        visitor->GetVisitState(current_id);
-    if (visit_state == TransposeReduceSumUnfolder::kVisited) {
-      dfs_stack.pop_back();
-      VLOG(3) << "[PreorderDFSRewriter] "
-              << "Not visiting HLO (id = " << current_id
-              << ") as it was already visited.";
-      continue;
-    }
-
-    dfs_stack.pop_back();
-    VLOG(2) << "[PreorderDFSRewriter] "
-            << "Visiting HLO %" << current_node->name();
-    DebugPrint("PreorderDFSRewriter",
-               "Visiting HLO = " + current_node->name() +
-                   " opcode = " + HloOpcodeString(current_node->opcode()));
-    TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
-    TF_RETURN_IF_ERROR(current_node->Visit(visitor));
-    visitor->SetVisitState(current_id, TransposeReduceSumUnfolder::kVisited);
-    TF_RETURN_IF_ERROR(visitor->Postprocess(current_node));
-    if (visitor->OldNewMapContain(current_node)) {
-      auto tmp = current_node;
-      DebugPrint("PreorderDFSRewriter",
-                 "Before replace current_node = " + current_node->name() +
-                     " opcode = " + HloOpcodeString(current_node->opcode()) +
-                     " OldNewMapContain() = " +
-                     std::to_string(visitor->OldNewMapContain(tmp)));
-      current_node = visitor->GetNewInst(current_node);
-      visitor->DeleteOldInst(tmp);
-      DebugPrint("PreorderDFSRewriter",
-                 "Before replace current_node = " + current_node->name() +
-                     " opcode = " + HloOpcodeString(current_node->opcode()) +
-                     " OldNewMapContain() = " +
-                     std::to_string(visitor->OldNewMapContain(tmp)));
-      changed |= true;
-    }
-    DebugPrint(
-        "PreorderDFSRewriter",
-        "current_node = " + current_node->name() +
-            " opcode = " + HloOpcodeString(current_node->opcode()) +
-            " users.size = " + std::to_string(current_node->users().size()));
-
-    const size_t old_dfs_stack_size = dfs_stack.size();
-    for (HloInstruction* child : current_node->operands()) {
-      if (!TF_PREDICT_TRUE(PushDFSChild(visitor, &dfs_stack, child))) {
-        PrintCycle(child, &dfs_stack);
-        return FailedPrecondition(
-            "PreorderDFSRewriter A cycle is detected while "
-            "visiting "
-            "instruction %s",
-            current_node->ToString());
-      }
-      DebugPrint("PreorderDFSRewriter",
-                 "current_node = " + current_node->name() +
-                     " opcode = " + HloOpcodeString(current_node->opcode()) +
-                     " Add Child " + child->name() +
-                     " opcode = " + HloOpcodeString(child->opcode()));
-    }
-
-    // This makes the traversal order the same as what you'd expect
-    // out of a recursive algorithm.
-    std::reverse(dfs_stack.begin() + old_dfs_stack_size, dfs_stack.end());
-  } while (!dfs_stack.empty());
-
-  return Status::OK();
-}
-
-Status PreOrderAccept(HloComputation* computation,
-                      TransposeReduceSumUnfolder* visitor, bool& changed) {
-  return PreorderDFSRewriter(computation->root_instruction(), visitor, changed);
-}
-
 StatusOr<Literal> CreateOneConstVector(const PrimitiveType primitive_type,
                                        int64_t length) {
   switch (primitive_type) {
     case PrimitiveType::F16: {
-      std::vector<half> raw_zero_vector(length, half(1));
-      return LiteralUtil::CreateR1<half>(raw_zero_vector);
+      std::vector<half> raw_one_vector(length, half(1));
+      return LiteralUtil::CreateR1<half>(raw_one_vector);
     }
     case PrimitiveType::BF16: {
-      std::vector<bfloat16> raw_zero_vector(length, bfloat16(1));
-      return LiteralUtil::CreateR1<bfloat16>(raw_zero_vector);
+      std::vector<bfloat16> raw_one_vector(length, bfloat16(1));
+      return LiteralUtil::CreateR1<bfloat16>(raw_one_vector);
     }
     case PrimitiveType::F32: {
-      std::vector<float> raw_zero_vector(length, float(1));
-      return LiteralUtil::CreateR1<float>(raw_zero_vector);;
+      std::vector<float> raw_one_vector(length, float(1));
+      return LiteralUtil::CreateR1<float>(raw_one_vector);
+      ;
     }
     case PrimitiveType::F64: {
-      std::vector<double> raw_zero_vector(length, double(1));
-      return LiteralUtil::CreateR1<double>(raw_zero_vector);
+      std::vector<double> raw_one_vector(length, double(1));
+      return LiteralUtil::CreateR1<double>(raw_one_vector);
     }
     case PrimitiveType::S8: {
-      std::vector<int8> raw_zero_vector(length, int8(1));
-      return LiteralUtil::CreateR1<int8>(raw_zero_vector);
+      std::vector<int8_t> raw_one_vector(length, int8_t(1));
+      return LiteralUtil::CreateR1<int8_t>(raw_one_vector);
     }
     case PrimitiveType::S16: {
-      std::vector<int16> raw_zero_vector(length, int16(1));
-      return LiteralUtil::CreateR1<int16>(raw_zero_vector);
+      std::vector<int16_t> raw_one_vector(length, int16_t(1));
+      return LiteralUtil::CreateR1<int16_t>(raw_one_vector);
     }
     case PrimitiveType::S32: {
-      std::vector<int32> raw_zero_vector(length, int32(1));
-      return LiteralUtil::CreateR1<int32>(raw_zero_vector);
+      std::vector<int32_t> raw_one_vector(length, int32_t(1));
+      return LiteralUtil::CreateR1<int32_t>(raw_one_vector);
     }
     case PrimitiveType::S64: {
-      std::vector<int64_t> raw_zero_vector(length, int64_t(1));
-      return LiteralUtil::CreateR1<int64_t>(raw_zero_vector);
+      std::vector<int64_t> raw_one_vector(length, int64_t(1));
+      return LiteralUtil::CreateR1<int64_t>(raw_one_vector);
     }
     case PrimitiveType::U8: {
-      std::vector<uint8> raw_zero_vector(length, uint8(1));
-      return LiteralUtil::CreateR1<uint8>(raw_zero_vector);
+      std::vector<uint8_t> raw_one_vector(length, uint8_t(1));
+      return LiteralUtil::CreateR1<uint8_t>(raw_one_vector);
     }
     case PrimitiveType::U16: {
-      std::vector<uint16> raw_zero_vector(length, uint16(1));
-      return LiteralUtil::CreateR1<uint16>(raw_zero_vector);
+      std::vector<uint16_t> raw_one_vector(length, uint16_t(1));
+      return LiteralUtil::CreateR1<uint16_t>(raw_one_vector);
     }
     case PrimitiveType::U32: {
-      std::vector<uint32> raw_zero_vector(length, uint32(1));
-      return LiteralUtil::CreateR1<uint32>(raw_zero_vector);
+      std::vector<uint32_t> raw_one_vector(length, uint32_t(1));
+      return LiteralUtil::CreateR1<uint32_t>(raw_one_vector);
     }
     case PrimitiveType::U64: {
-      std::vector<uint64> raw_zero_vector(length, uint64(1));
-      return LiteralUtil::CreateR1<uint64>(raw_zero_vector);
+      std::vector<uint64_t> raw_one_vector(length, uint64_t(1));
+      return LiteralUtil::CreateR1<uint64_t>(raw_one_vector);
     }
     default:
       return tensorflow::errors::Internal(absl::StrCat(
@@ -354,419 +246,6 @@ StatusOr<Literal> CreateOneConstVector(const PrimitiveType primitive_type,
 }
 
 }  // namespace
-
-bool TransposeReduceSumUnfolder::OldNewMapContain(HloInstruction* old_inst) {
-  DebugPrint("TransposeReduceSumUnfolder::OldNewMapContain",
-             "LookUp " + old_inst->name());
-  return old_new_inst_map.contains(old_inst);
-}
-HloInstruction* TransposeReduceSumUnfolder::GetNewInst(
-    HloInstruction* old_inst) {
-  return old_new_inst_map[old_inst];
-}
-
-bool TransposeReduceSumUnfolder::DeleteOldInst(HloInstruction* old_inst) {
-  return old_new_inst_map.erase(old_inst);
-}
-
-void TransposeReduceSumUnfolder::InsertOldNewMap(HloInstruction* old_inst,
-                                                 HloInstruction* new_inst) {
-  if (old_new_inst_map.contains(old_inst)) {
-    DebugPrint("TransposeReduceSumUnfolder::old_new_inst_map",
-               "Error: already contains: " + old_inst->name());
-  }
-  old_new_inst_map.insert({old_inst, new_inst});
-}
-
-bool TransposeReduceSumUnfolder::IsTransDot(const HloInstruction* hlo) {
-  if (hlo->opcode() != HloOpcode::kDot) {
-    return false;
-  }
-  const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
-  if (dnums.lhs_contracting_dimensions_size() != 1 ||
-      dnums.rhs_contracting_dimensions_size() != 1 ||
-      dnums.lhs_batch_dimensions_size() != 0 ||
-      dnums.rhs_batch_dimensions_size() != 0 ||
-      hlo->shape().dimensions_size() > 2 ||
-      hlo->shape().dimensions_size() == 0) {
-    // not m-m, m-v dot
-    // donot need to handle v-v dot
-    return false;
-  }
-  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
-      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
-    // regular m-m or m-v dot
-    return false;
-  }
-
-  if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
-      *(dnums.rhs_contracting_dimensions().begin()) == 1) {
-    // m-m actual expression : N transdot M = N^T @ M^T
-    return true;
-  }
-  if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
-      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
-    // m-v trans dot actual expression : v transdot M = M^T @ v
-    return true;
-  }
-  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
-      *(dnums.rhs_contracting_dimensions().begin()) == 1) {
-    // m-m actual expression : M transdot N = M @ N^T
-    return true;
-  }
-  return false;
-}
-
-bool TransposeReduceSumUnfolder::IsRegularDot(const HloInstruction* hlo) {
-  if (hlo->opcode() != HloOpcode::kDot) {
-    return false;
-  }
-  const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
-
-  if (dnums.lhs_contracting_dimensions_size() != 1 ||
-      dnums.rhs_contracting_dimensions_size() != 1 ||
-      dnums.lhs_batch_dimensions_size() != 0 ||
-      dnums.rhs_batch_dimensions_size() != 0 ||
-      hlo->shape().dimensions_size() > 2 ||
-      hlo->shape().dimensions_size() == 0) {
-    return false;
-  }
-  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
-      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
-    // m-m or m-v dot
-    return true;
-  }
-  return false;
-}
-
-bool TransposeReduceSumUnfolder::IsReduceSumDot(const HloInstruction* hlo) {
-  if (hlo->opcode() != HloOpcode::kReduce) {
-    return false;
-  }
-  HloInstruction* reduce_function = hlo->to_apply()->root_instruction();
-  if (reduce_function->opcode() != HloOpcode::kAdd || !hlo->shape().IsArray() ||
-      hlo->shape().dimensions_size() != 1) {
-    // only consider reduce_sum(matrix) -> vector
-    return false;
-  }
-  auto zero = LiteralUtil::CreateR0<float>(0);
-  if (hlo->operand(1)->opcode() != HloOpcode::kConstant ||
-      (hlo->operand(1)->literal() != zero)) {
-    // is it possible Reduce Sum has non-zero init_value? if so, such
-    // reduce sum cannot be target as matrix multiplication
-    return false;
-  }
-
-  DebugPrint("TransposeReduceSumUnfolder::IsReduceSumDot",
-             hlo->name() + " is reduce_sum");
-  return true;
-}
-
-Status TransposeReduceSumUnfolder::HandleDot(HloInstruction* dot) {
-  if (IsTransDot(dot)) {
-    const DotDimensionNumbers& dnums = dot->dot_dimension_numbers();
-    if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
-        *(dnums.rhs_contracting_dimensions().begin()) == 0) {
-      // actual expression : v transdot M = M^T @ v
-      StatusOr<HloInstruction*> status_or =
-          MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
-      auto lhs_trans = std::move(status_or).ValueOrDie();
-      status_or = MakeTransposeHlo(dot->mutable_operand(0), {0});
-      auto rhs_trans = std::move(status_or).ValueOrDie();
-
-      const Shape lhs_shape = lhs_trans->shape();
-      DotDimensionNumbers dimension_numbers;
-      dimension_numbers.add_lhs_contracting_dimensions(
-          lhs_shape.dimensions_size() == 1 ? 0 : 1);
-      dimension_numbers.add_rhs_contracting_dimensions(0);
-
-      auto shape_status_or = ShapeInference::InferDotOpShape(
-          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers,
-          dot->shape().element_type());
-      Shape output_shape = std::move(shape_status_or).ValueOrDie();
-      std::string temp_string =
-          "IsTransDot, (M*v)^T InferDotOpShape:  operand1 = " +
-          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
-          " operand2 = " + rhs_trans->name() +
-          " shape = " + rhs_trans->shape().ToString() +
-          " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
-
-      status_or =
-          MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
-                     dot->precision_config(), dot->shape().element_type());
-      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-      InsertOldNewMap(dot, new_dot);
-      return ReplaceInstruction(dot, new_dot);
-
-    } else if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
-               *(dnums.rhs_contracting_dimensions().begin()) == 1) {
-      // m-m actual expression : M transdot N = M @ N^T
-      auto lhs = dot->mutable_operand(0);
-      auto status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
-      auto rhs_trans = std::move(status_or).ValueOrDie();
-      // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
-
-      const Shape lhs_shape = lhs->shape();
-      DotDimensionNumbers dimension_numbers;
-      dimension_numbers.add_lhs_contracting_dimensions(
-          lhs_shape.dimensions_size() == 1 ? 0 : 1);
-      dimension_numbers.add_rhs_contracting_dimensions(0);
-
-      auto shape_status_or = ShapeInference::InferDotOpShape(
-          lhs->shape(), rhs_trans->shape(), dimension_numbers,
-          dot->shape().element_type());
-      Shape output_shape = std::move(shape_status_or).ValueOrDie();
-      std::string temp_string =
-          "IsTransDot, (M*N)^T InferDotOpShape:  operand1 = " + lhs->name() +
-          " shape = " + lhs->shape().ToString() +
-          " operand2 = " + rhs_trans->name() +
-          " shape = " + rhs_trans->shape().ToString() +
-          " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
-
-      status_or =
-          MakeDotHlo(lhs, rhs_trans, dimension_numbers, dot->precision_config(),
-                     dot->shape().element_type());
-      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-      InsertOldNewMap(dot, new_dot);
-      return ReplaceInstruction(dot, new_dot);
-    } else {
-      // m-m actual expression : N transdot M = N^T @ M^T
-      StatusOr<HloInstruction*> status_or =
-          MakeTransposeHlo(dot->mutable_operand(0), {1, 0});
-      auto lhs_trans = std::move(status_or).ValueOrDie();
-      status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
-      auto rhs_trans = std::move(status_or).ValueOrDie();
-      // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
-
-      const Shape lhs_shape = lhs_trans->shape();
-      DotDimensionNumbers dimension_numbers;
-      dimension_numbers.add_lhs_contracting_dimensions(
-          lhs_shape.dimensions_size() == 1 ? 0 : 1);
-      dimension_numbers.add_rhs_contracting_dimensions(0);
-
-      auto shape_status_or = ShapeInference::InferDotOpShape(
-          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers,
-          dot->shape().element_type());
-      Shape output_shape = std::move(shape_status_or).ValueOrDie();
-      std::string temp_string =
-          "IsTransDot, (M*N)^T InferDotOpShape:  operand1 = " +
-          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
-          " operand2 = " + rhs_trans->name() +
-          " shape = " + rhs_trans->shape().ToString() +
-          " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeReduceSumUnfolder::HandleDot", temp_string);
-
-      status_or =
-          MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
-                     dot->precision_config(), dot->shape().element_type());
-      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-      InsertOldNewMap(dot, new_dot);
-      return ReplaceInstruction(dot, new_dot);
-    }
-  }
-  return Status::OK();
-}
-
-Status TransposeReduceSumUnfolder::HandleTranspose(HloInstruction* transpose) {
-  if (IsTransDot(transpose->operand(0))) {
-    HloInstruction* lhs = transpose->mutable_operand(0)->mutable_operand(1);
-    HloInstruction* rhs = transpose->mutable_operand(0)->mutable_operand(0);
-    const Shape lhs_shape = lhs->shape();
-    DotDimensionNumbers dimension_numbers;
-    dimension_numbers.add_lhs_contracting_dimensions(
-        lhs_shape.dimensions_size() == 1 ? 0 : 1);
-    dimension_numbers.add_rhs_contracting_dimensions(0);
-
-    auto shape_status_or = ShapeInference::InferDotOpShape(
-        lhs->shape(), rhs->shape(), dimension_numbers,
-        transpose->shape().element_type());
-    Shape output_shape = std::move(shape_status_or).ValueOrDie();
-    std::string temp_string =
-        "Operand IsTransDot, InferDotOpShape:  operand1 = " + lhs->name() +
-        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
-        " shape = " + rhs->shape().ToString() +
-        " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
-
-    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers,
-                                transpose->operand(0)->precision_config(),
-                                transpose->shape().element_type());
-    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-    InsertOldNewMap(transpose, new_dot);
-    return ReplaceInstruction(transpose, new_dot);
-
-  } else if (IsRegularDot(transpose->operand(0))) {
-    auto dnum_size = transpose->operand(0)->shape().dimensions_size();
-    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose",
-               "IsRegularDot, dnum_size = " + std::to_string(dnum_size));
-    if (dnum_size == 1) {
-      // m-v dot, do not need to transpose
-      return ReplaceInstruction(transpose, transpose->mutable_operand(0));
-    } else {
-      // m-m dot
-      StatusOr<HloInstruction*> status_or = MakeTransposeHlo(
-          transpose->mutable_operand(0)->mutable_operand(1), {1, 0});
-      auto lhs_trans = std::move(status_or).ValueOrDie();
-      status_or = MakeTransposeHlo(
-          transpose->mutable_operand(0)->mutable_operand(0), {1, 0});
-      auto rhs_trans = std::move(status_or).ValueOrDie();
-
-      const Shape lhs_shape = lhs_trans->shape();
-      DotDimensionNumbers dimension_numbers;
-      dimension_numbers.add_lhs_contracting_dimensions(
-          lhs_shape.dimensions_size() == 1 ? 0 : 1);
-      dimension_numbers.add_rhs_contracting_dimensions(0);
-
-      auto shape_status_or = ShapeInference::InferDotOpShape(
-          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers,
-          transpose->shape().element_type());
-      Shape output_shape = std::move(shape_status_or).ValueOrDie();
-      std::string temp_string =
-          "Operand IsRegularDot, InferDotOpShape:  operand1 = " +
-          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
-          " operand2 = " + rhs_trans->name() +
-          " shape = " + rhs_trans->shape().ToString() +
-          " inferred_output_shape = " + output_shape.ToString();
-      DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
-
-      status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
-                             transpose->operand(0)->precision_config(),
-                             transpose->shape().element_type());
-      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-      InsertOldNewMap(transpose, new_dot);
-      return ReplaceInstruction(transpose, new_dot);
-    }
-
-  } else if (transpose->operand(0)->opcode() == HloOpcode::kTranspose) {
-    std::string temp_string =
-        "Operand IsTranspose, operand = : " +
-        transpose->operand(0)->operand(0)->name() +
-        " shape = " + transpose->operand(0)->operand(0)->shape().ToString();
-    DebugPrint("TransposeReduceSumUnfolder::HandleTranspose", temp_string);
-    InsertOldNewMap(transpose,
-                    transpose->mutable_operand(0)->mutable_operand(0));
-    return ReplaceInstruction(
-        transpose, transpose->mutable_operand(0)->mutable_operand(0));
-  }
-  return Status::OK();
-}
-
-Status TransposeReduceSumUnfolder::HandleReduce(HloInstruction* reduce) {
-  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-             "Start " + reduce->ToString());
-  if (!IsReduceSumDot(reduce)) {
-    return Status::OK();
-  }
-  DebugPrint(
-      "TransposeReduceSumUnfolder::HandleReduce",
-      "Start " + reduce->name() + " dimension_size = " +
-          std::to_string(reduce->shape().dimensions_size()) +
-          " reduce_func = " +
-          HloOpcodeString(reduce->to_apply()->root_instruction()->opcode()) +
-          " operand.name = " + reduce->operand(0)->name() +
-          " operand.dimension_size = " +
-          std::to_string(reduce->operand(0)->shape().dimensions_size()) +
-          " init_value.name = " + reduce->operand(1)->name());
-
-  // replace reduce with dot
-  HloInstruction* operand = reduce->mutable_operand(0);
-  HloInstruction* init_value = reduce->mutable_operand(1);
-  PrecisionConfig precision_config;
-  precision_config.mutable_operand_precision()->Resize(
-      2, PrecisionConfig::DEFAULT);
-  auto reduce_dims = reduce->shape().dimensions(0);
-  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-             "reduce_dims = " + std::to_string(reduce_dims));
-  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-             "operand->dimensions(0) = " +
-                 std::to_string(operand->shape().dimensions(0)) +
-                 " operand->dimensions(1) = " +
-                 std::to_string(operand->shape().dimensions(1)));
-  if (reduce_dims == operand->shape().dimensions(0)) {
-    // M - v dot
-    // constants
-    DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-               "Is M-v dot, reduce_dims = " + std::to_string(reduce_dims));
-    auto raw_zero_vector_status_or = CreateOneConstVector(
-        reduce->shape().element_type(), operand->shape().dimensions(1));
-    auto raw_zero_vector = std::move(raw_zero_vector_status_or).ValueOrDie();
-    auto zero_vector_inst = reduce->parent()->AddInstruction(
-        HloInstruction::CreateConstant(std::move(raw_zero_vector)));
-    DebugPrint(
-        "TransposeReduceSumUnfolder::HandleReduce",
-        "Is M-v dot, zero_vector_inst = " + zero_vector_inst->ToString());
-    auto lhs = reduce->mutable_operand(0);
-    auto rhs = zero_vector_inst;
-    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
-
-    const Shape lhs_shape = lhs->shape();
-    DotDimensionNumbers dimension_numbers;
-    dimension_numbers.add_lhs_contracting_dimensions(
-        lhs_shape.dimensions_size() == 1 ? 0 : 1);
-    dimension_numbers.add_rhs_contracting_dimensions(0);
-
-    auto shape_status_or = ShapeInference::InferDotOpShape(
-        lhs->shape(), rhs->shape(), dimension_numbers,
-        reduce->shape().element_type());
-    Shape output_shape = std::move(shape_status_or).ValueOrDie();
-    std::string temp_string =
-        "M - v dot, InferDotOpShape:  operand1 = " + lhs->name() +
-        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
-        " shape = " + rhs->shape().ToString() +
-        " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeReduceSumUnfolder::HandleReduce", temp_string);
-
-    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
-                                reduce->shape().element_type());
-    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-    InsertOldNewMap(reduce, new_dot);
-    return ReplaceInstruction(reduce, new_dot);
-
-  } else if (reduce_dims == operand->shape().dimensions(1)) {
-    // v^T - M dot
-    DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-               "Is v^T-M dot, reduce_dims = " + std::to_string(reduce_dims));
-    auto raw_zero_vector_status_or = CreateOneConstVector(
-        reduce->shape().element_type(), operand->shape().dimensions(0));
-    auto raw_zero_vector = std::move(raw_zero_vector_status_or).ValueOrDie();
-    auto zero_vector_inst = reduce->parent()->AddInstruction(
-        HloInstruction::CreateConstant(std::move(raw_zero_vector)));
-    DebugPrint(
-        "TransposeReduceSumUnfolder::HandleReduce",
-        "Is v^T-M dot, zero_vector_inst = " + zero_vector_inst->ToString());
-    auto lhs = zero_vector_inst;
-    auto rhs = reduce->mutable_operand(0);
-    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
-
-    const Shape lhs_shape = lhs->shape();
-    DotDimensionNumbers dimension_numbers;
-    dimension_numbers.add_lhs_contracting_dimensions(
-        lhs_shape.dimensions_size() == 1 ? 0 : 1);
-    dimension_numbers.add_rhs_contracting_dimensions(0);
-
-    auto shape_status_or = ShapeInference::InferDotOpShape(
-        lhs->shape(), rhs->shape(), dimension_numbers,
-        reduce->shape().element_type());
-    Shape output_shape = std::move(shape_status_or).ValueOrDie();
-    std::string temp_string =
-        "v^T - M dot, InferDotOpShape:  operand1 = " + lhs->name() +
-        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
-        " shape = " + rhs->shape().ToString() +
-        " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeReduceSumUnfolder::HandleReduce", temp_string);
-
-    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
-                                reduce->shape().element_type());
-    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-    InsertOldNewMap(reduce, new_dot);
-    return ReplaceInstruction(reduce, new_dot);
-  }
-  DebugPrint("TransposeReduceSumUnfolder::HandleReduce",
-             "END " + reduce->ToString());
-  return Status::OK();
-}
 
 Status ChainRecorder::Preprocess(HloInstruction* hlo) {
   if (!MatrixChainDetector::CheckRealDot(hlo)) {
@@ -809,7 +288,13 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
   if (hlo->opcode() != HloOpcode::kDot) {
     return false;
   }
-
+  HloInstruction *lhs, *rhs;
+  Match(hlo, m::Dot(m::Op(&lhs), m::Op(&rhs)));
+  if (lhs->shape().dimensions_size() == 1 &&
+      rhs->shape().dimensions_size() == 1) {
+    // skip v-v dot
+    return false;
+  }
   const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
   if (dnums.lhs_contracting_dimensions_size() != 1 ||
       dnums.rhs_contracting_dimensions_size() != 1 ||
@@ -869,51 +354,44 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
   }
 
   for (auto op : hlo->operands()) {
-    DebugPrint("MatrixChainDetector::Preprocess",
-               "operand.name:" + op->name() +
-                   " opcode = " + HloOpcodeString(op->opcode()));
-    if (!CheckRealDot(op)) {
-      // Only consider 2D dot product for now
-      VLOG(10) << "[MatrixChainDetector]: Can only optimize 2D, non-batch dot "
-                  "operations.";
+    if (Match(op, m::Dot())) {
       DebugPrint("MatrixChainDetector::Preprocess",
-                 "Can only optimize 2D non-batch dot operations.");
-      continue;
+                 "operand.name:" + op->name() +
+                     " opcode = " + HloOpcodeString(op->opcode()));
+      if (!CheckRealDot(op)) {
+        // Only consider 2D dot product for now
+        DebugPrint("MatrixChainDetector::Preprocess",
+                   "Can only optimize 2D non-batch dot operations.");
+        continue;
+      }
+      // current node != kDot, child op = kDot, child op is the root of a matrix
+      // chain
+      if (chain_map.contains(op)) {
+        // find a reused chain which has already been added into chain_map
+        continue;
+      }
+      TF_RETURN_IF_ERROR(DetectMatrixChain(op));
+      DebugPrint(
+          "MatrixChainDetector::Preprocess",
+          "After DetectMatrixChain(" + op->name() +
+              ") chain_map.size() = " + std::to_string(chain_map.size()));
     }
-    // current node != kDot, child op = kDot, child op is the root of a matrix
-    // chain
-    if (chain_map.contains(op)) {
-      // find a reused chain which has already been added into chain_map
-      continue;
-    }
-    TF_RETURN_IF_ERROR(DetectMatrixChain(op));
-    DebugPrint("MatrixChainDetector::Preprocess",
-               "After DetectMatrixChain(" + op->name() +
-                   ") chain_map.size() = " + std::to_string(chain_map.size()));
   }
-
   return Status::OK();
-}
-
-StatusOr<HloInstruction*> HloMCO::CopyResuableSubgraph(HloInstruction* inst) {
-  // deprecated
-  std::vector<HloInstruction*> users;
-  users.assign(inst->users().begin() + 1, inst->users().end());
-  HloInstruction* new_inst = inst->parent()->AddInstruction(inst->Clone());
-  inst->ReplaceUsesWith(users, new_inst);
-  return new_inst;
 }
 
 StatusOr<HloInstruction*> HloMCO::ConstructOptimalChain(
     HloInstruction* orig_root, std::vector<std::vector<int64_t>>& solution,
-    std::vector<HloInstruction*>& chain_instructions) {
+    std::vector<HloInstruction*>& chain_instructions,
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+        reduce_one_vector_to_orig_init_val) {
   DebugPrint("HloMCO::ConstructOptimalChain",
              "Start, root = " + orig_root->name());
   HloInstruction* optimal_root = nullptr;
   std::vector<HloInstruction*> subgraph_stack;
   TF_RETURN_IF_ERROR(ConstructOptimalChainHelper(
       orig_root, solution, chain_instructions, 0, chain_instructions.size() - 1,
-      subgraph_stack));
+      subgraph_stack, reduce_one_vector_to_orig_init_val));
   DebugPrint("HloMCO::ConstructOptimalChain",
              "subgraph_stack.size = " + std::to_string(subgraph_stack.size()));
   CHECK_EQ(subgraph_stack.size(), 1);
@@ -924,7 +402,9 @@ StatusOr<HloInstruction*> HloMCO::ConstructOptimalChain(
 Status HloMCO::ConstructOptimalChainHelper(
     HloInstruction* orig_root, std::vector<std::vector<int64_t>>& solution,
     std::vector<HloInstruction*>& chain_instructions, int64_t start_index,
-    int64_t end_index, std::vector<HloInstruction*>& subgraph_stack) {
+    int64_t end_index, std::vector<HloInstruction*>& subgraph_stack,
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+        reduce_one_vector_to_orig_init_val) {
   DebugPrint(
       "HloMCO::ConstructOptimalChainHelper",
       "Start, root = " + orig_root->name() + " (start,end) = (" +
@@ -986,11 +466,79 @@ Status HloMCO::ConstructOptimalChainHelper(
     DebugPrint("HloMCO::ConstructOptimalChainHelper",
                "Add single matmul: " + chain_instructions[start_index]->name() +
                    " * " + chain_instructions[end_index]->name());
-    create_dot(chain_instructions[start_index], chain_instructions[end_index]);
-    DebugPrint("HloMCO::ConstructOptimalChainHelper",
-               "After insert single matmul subgraph_stack.size= " +
-                   std::to_string(subgraph_stack.size()) +
-                   " top = " + subgraph_stack.back()->name());
+    if (reduce_one_vector_to_orig_init_val.contains(
+            chain_instructions[start_index])) {
+      if (chain_instructions[start_index]->shape().dimensions(0) ==
+          chain_instructions[end_index]->shape().dimensions(0)) {
+        auto init_val =
+            reduce_one_vector_to_orig_init_val[chain_instructions[start_index]];
+        std::vector<int64_t> reduce_dims;
+        reduce_dims.push_back(0);
+        LOG(INFO) << "reduce.operand="
+                  << chain_instructions[end_index]->ToString()
+                  << " reduce.dim=" << 0
+                  << " reduce.init_val=" << init_val->ToString();
+        TF_ASSIGN_OR_RETURN(
+            auto new_reduce,
+            MakeReduceHlo(chain_instructions[end_index], init_val, reduce_dims,
+                          HloOpcode::kAdd));
+        subgraph_stack.emplace_back(new_reduce);
+      } else {
+        auto init_val =
+            reduce_one_vector_to_orig_init_val[chain_instructions[start_index]];
+        std::vector<int64_t> reduce_dims;
+        reduce_dims.push_back(1);
+        LOG(INFO) << "reduce.operand="
+                  << chain_instructions[end_index]->ToString()
+                  << " reduce.dim=" << 1
+                  << " reduce.init_val=" << init_val->ToString();
+        TF_ASSIGN_OR_RETURN(
+            auto new_reduce,
+            MakeReduceHlo(chain_instructions[end_index], init_val, reduce_dims,
+                          HloOpcode::kAdd));
+        subgraph_stack.emplace_back(new_reduce);
+      }
+    } else if (reduce_one_vector_to_orig_init_val.contains(
+                   chain_instructions[end_index])) {
+      if (chain_instructions[end_index]->shape().dimensions(0) ==
+          chain_instructions[start_index]->shape().dimensions(0)) {
+        auto init_val =
+            reduce_one_vector_to_orig_init_val[chain_instructions[end_index]];
+        std::vector<int64_t> reduce_dims;
+        reduce_dims.push_back(0);
+        LOG(INFO) << "reduce.operand="
+                  << chain_instructions[start_index]->ToString()
+                  << " reduce.dim=" << 0
+                  << " reduce.init_val=" << init_val->ToString();
+        TF_ASSIGN_OR_RETURN(
+            auto new_reduce,
+            MakeReduceHlo(chain_instructions[start_index], init_val,
+                          reduce_dims, HloOpcode::kAdd));
+        subgraph_stack.emplace_back(new_reduce);
+      } else {
+        auto init_val =
+            reduce_one_vector_to_orig_init_val[chain_instructions[end_index]];
+        std::vector<int64_t> reduce_dims;
+        reduce_dims.push_back(1);
+        LOG(INFO) << "reduce.operand="
+                  << chain_instructions[start_index]->ToString()
+                  << " reduce.dim=" << 1
+                  << " reduce.init_val=" << init_val->ToString();
+        TF_ASSIGN_OR_RETURN(
+            auto new_reduce,
+            MakeReduceHlo(chain_instructions[start_index], init_val,
+                          reduce_dims, HloOpcode::kAdd));
+        subgraph_stack.emplace_back(new_reduce);
+      }
+    } else {
+      create_dot(chain_instructions[start_index],
+                 chain_instructions[end_index]);
+      DebugPrint("HloMCO::ConstructOptimalChainHelper",
+                 "After insert single matmul subgraph_stack.size= " +
+                     std::to_string(subgraph_stack.size()) +
+                     " top = " + subgraph_stack.back()->name());
+    }
+
     return Status::OK();
   }
   DebugPrint("HloMCO::ConstructOptimalChainHelper",
@@ -1001,10 +549,12 @@ Status HloMCO::ConstructOptimalChainHelper(
                  std::to_string(end_index) + "]");
   TF_RETURN_IF_ERROR(ConstructOptimalChainHelper(
       orig_root, solution, chain_instructions, start_index,
-      solution[start_index][end_index], subgraph_stack));
+      solution[start_index][end_index], subgraph_stack,
+      reduce_one_vector_to_orig_init_val));
   TF_RETURN_IF_ERROR(ConstructOptimalChainHelper(
       orig_root, solution, chain_instructions,
-      solution[start_index][end_index] + 1, end_index, subgraph_stack));
+      solution[start_index][end_index] + 1, end_index, subgraph_stack,
+      reduce_one_vector_to_orig_init_val));
 
   // since this is a stack, the right_operand is on the top of left_operand
   DebugPrint("HloMCO::ConstructOptimalChainHelper",
@@ -1023,17 +573,71 @@ Status HloMCO::ConstructOptimalChainHelper(
       "HloMCO::ConstructOptimalChainHelper",
       "combile left_operand =" + left_operand->name() +
           " subgraph_stack.size= " + std::to_string(subgraph_stack.size()));
-  create_dot(left_operand, right_operand);
-  DebugPrint("HloMCO::ConstructOptimalChainHelper",
-             "After combile subgraph_stack.size= " +
-                 std::to_string(subgraph_stack.size()) +
-                 " top = " + subgraph_stack.back()->name());
 
+  if (reduce_one_vector_to_orig_init_val.contains(left_operand)) {
+    if (left_operand->shape().dimensions(0) ==
+        right_operand->shape().dimensions(0)) {
+      auto init_val = reduce_one_vector_to_orig_init_val[left_operand];
+      std::vector<int64_t> reduce_dims;
+      reduce_dims.push_back(0);
+      LOG(INFO) << "reduce.operand=" << right_operand->ToString()
+                << " reduce.dim=" << 0
+                << " reduce.init_val=" << init_val->ToString();
+      TF_ASSIGN_OR_RETURN(
+          auto new_reduce,
+          MakeReduceHlo(right_operand, init_val, reduce_dims, HloOpcode::kAdd));
+      subgraph_stack.emplace_back(new_reduce);
+    } else {
+      auto init_val = reduce_one_vector_to_orig_init_val[left_operand];
+      std::vector<int64_t> reduce_dims;
+      reduce_dims.push_back(1);
+      LOG(INFO) << "reduce.operand=" << right_operand->ToString()
+                << " reduce.dim=" << 1
+                << " reduce.init_val=" << init_val->ToString();
+      TF_ASSIGN_OR_RETURN(
+          auto new_reduce,
+          MakeReduceHlo(right_operand, init_val, reduce_dims, HloOpcode::kAdd));
+      subgraph_stack.emplace_back(new_reduce);
+    }
+  } else if (reduce_one_vector_to_orig_init_val.contains(right_operand)) {
+    if (right_operand->shape().dimensions(0) ==
+        left_operand->shape().dimensions(0)) {
+      auto init_val = reduce_one_vector_to_orig_init_val[right_operand];
+      std::vector<int64_t> reduce_dims;
+      reduce_dims.push_back(0);
+      LOG(INFO) << "reduce.operand=" << left_operand->ToString()
+                << " reduce.dim=" << 0
+                << " reduce.init_val=" << init_val->ToString();
+      TF_ASSIGN_OR_RETURN(
+          auto new_reduce,
+          MakeReduceHlo(left_operand, init_val, reduce_dims, HloOpcode::kAdd));
+      subgraph_stack.emplace_back(new_reduce);
+    } else {
+      auto init_val = reduce_one_vector_to_orig_init_val[right_operand];
+      std::vector<int64_t> reduce_dims;
+      reduce_dims.push_back(1);
+      LOG(INFO) << "reduce.operand=" << left_operand->ToString()
+                << " reduce.dim=" << 1
+                << " reduce.init_val=" << init_val->ToString();
+      TF_ASSIGN_OR_RETURN(
+          auto new_reduce,
+          MakeReduceHlo(left_operand, init_val, reduce_dims, HloOpcode::kAdd));
+      subgraph_stack.emplace_back(new_reduce);
+    }
+  } else {
+    create_dot(left_operand, right_operand);
+    DebugPrint("HloMCO::ConstructOptimalChainHelper",
+               "After combile subgraph_stack.size= " +
+                   std::to_string(subgraph_stack.size()) +
+                   " top = " + subgraph_stack.back()->name());
+  }
   return Status::OK();
 }
 
 StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
-    HloInstruction* root, std::vector<HloInstruction*>& chain) {
+    HloInstruction* root, std::vector<HloInstruction*>& chain,
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+        reduce_one_vector_to_orig_init_val) {
   DebugPrint("HloMCO::ComputeOptimalChainOrder",
              "chain_root = " + root->name() +
                  " chain_length = " + std::to_string(chain.size()));
@@ -1048,6 +652,8 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
       // vector operand
       // a vector in XLA is row vector or column vector? For now consider
       // it as column vector
+      // TODO:
+      // 感觉需要测试下比如vector在中间的情况比如Mvc^TN这类，以及v^Tc这类的
       sizes[i] = chain[i]->shape().dimensions(0);
       sizes[i + 1] = 1;
     } else if (chain[i]->shape().rank() == 2) {
@@ -1092,7 +698,8 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
       }
     }
   }
-  auto status_or = ConstructOptimalChain(root, solution, chain);
+  auto status_or = ConstructOptimalChain(root, solution, chain,
+                                         reduce_one_vector_to_orig_init_val);
   optimal_root = std::move(status_or).ValueOrDie();
   return optimal_root;
 }
@@ -1100,13 +707,16 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
 StatusOr<bool> HloMCO::ChainOptimize(
     HloComputation* computation,
     absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&
-        chain_map) {
+        chain_map,
+    absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+        reduce_one_vector_to_orig_init_val) {
   DebugPrint("HloMCO::ChainOptimize", "Start");
   bool changed = false;
   for (auto& item : chain_map) {
     DebugPrint("HloMCO::ChainOptimize",
                "optimize chain_root = " + item.first->name());
-    auto status_or = ComputeOptimalChainOrder(item.first, item.second);
+    auto status_or = ComputeOptimalChainOrder(
+        item.first, item.second, reduce_one_vector_to_orig_init_val);
     HloInstruction* new_instruction = std::move(status_or).ValueOrDie();
     DebugPrint(
         "HloMCO::ChainOptimize",
@@ -1130,6 +740,326 @@ StatusOr<bool> HloMCO::ChainOptimize(
   return changed;
 }
 
+Status EinSumReduceSumConverter::TransposeSinker(
+    std::stack<HloInstruction*> trans_stack) {
+  std::string prefix = "[TransposeSinker] ";
+  while (!trans_stack.empty()) {
+    HloInstruction* cur_trans = trans_stack.top();
+    trans_stack.pop();
+    HloInstruction* cur_operand;
+    CHECK(Match(cur_trans, m::Transpose(m::Op(&cur_operand))));
+    auto dnum_size = cur_trans->shape().dimensions_size();
+    if (dnum_size > 2) {
+      continue;
+    }
+    if (IsTrivialTranspose(cur_trans)) {
+      // skip trivial transpose and transpose of vector
+      TF_RETURN_IF_ERROR(ReplaceInstruction(cur_trans, cur_operand));
+      if (Match(cur_operand, m::Transpose())) trans_stack.push(cur_operand);
+      continue;
+    }
+
+    HloInstruction *lhs, *rhs, *next_trans_operand;
+    if (Match(cur_operand, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
+      // must be m-m dot
+      StatusOr<HloInstruction*> status_or = MakeTransposeHlo(rhs, {1, 0});
+      auto new_lhs = std::move(status_or).ValueOrDie();
+      status_or = MakeTransposeHlo(lhs, {1, 0});
+      auto new_rhs = std::move(status_or).ValueOrDie();
+
+      DotDimensionNumbers dimension_numbers;
+      dimension_numbers.add_lhs_contracting_dimensions(1);
+      dimension_numbers.add_rhs_contracting_dimensions(0);
+      status_or = MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                             cur_operand->precision_config(),
+                             cur_operand->shape().element_type());
+      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+      LOG(INFO) << "cur_transpose=" << cur_trans->ToString()
+                << " new_dot=" << new_dot->ToString();
+      TF_RETURN_IF_ERROR(ReplaceInstruction(cur_trans, new_dot));
+      trans_stack.push(new_rhs);
+      trans_stack.push(new_lhs);
+    } else if (Match(cur_operand, m::Transpose(m::Op(&next_trans_operand)))) {
+      if (cur_trans->dimensions(0) == cur_operand->dimensions(0) &&
+          cur_trans->dimensions(1) == cur_operand->dimensions(1)) {
+        // 2 transposes counteract
+        LOG(INFO) << "cur_transpose=" << cur_trans->ToString()
+                  << "cur_operand=" << cur_operand->ToString()
+                  << " next_trans_operand=" << next_trans_operand->ToString();
+        TF_RETURN_IF_ERROR(ReplaceInstruction(cur_trans, next_trans_operand));
+        if (Match(next_trans_operand, m::Transpose())) {
+          trans_stack.push(next_trans_operand);
+        }
+      }
+    }
+  }
+  return Status::OK();
+}
+
+Status EinSumReduceSumConverter::HandleDot(HloInstruction* dot) {
+  std::string prefix = "[EinSumReduceSumConverter::HandleDot] ";
+  HloInstruction *lhs, *rhs;
+  CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
+  if (lhs->shape().dimensions_size() == 1 &&
+      rhs->shape().dimensions_size() == 1) {
+    // skip v-v outer/inner dot
+    return Status::OK();
+  }
+  const DotDimensionNumbers& dnums = dot->dot_dimension_numbers();
+  if (dnums.lhs_contracting_dimensions_size() != 1 ||
+      dnums.rhs_contracting_dimensions_size() != 1 ||
+      dnums.lhs_batch_dimensions_size() != 0 ||
+      dnums.rhs_batch_dimensions_size() != 0 ||
+      dot->shape().dimensions_size() > 2 ||
+      dot->shape().dimensions_size() == 0) {
+    // not m-m, m-v dot
+    // do not need to handle v-v inner/outer product, since both of them won't
+    // lead to better solution for inner-product, the result is a scalar for
+    // outer-product, although the result is a matrix, but if we split the chain
+    // from here and let two vector enter 2 sub-chain, the optimal solution is
+    // the same
+    return Status::OK();
+  }
+  int lhs_contracting_dim = *(dnums.lhs_contracting_dimensions().begin());
+  int rhs_contracting_dim = *(dnums.rhs_contracting_dimensions().begin());
+
+  bool lhs_is_vector = lhs->shape().dimensions_size() == 1;
+  bool rhs_is_vector = rhs->shape().dimensions_size() == 1;
+  bool lhs_is_matrix = lhs->shape().dimensions_size() == 2;
+  bool rhs_is_matrix = rhs->shape().dimensions_size() == 2;
+  bool is_regular_dot = (lhs_contracting_dim == 1 && rhs_contracting_dim == 0);
+  HloInstruction* new_dot = dot;
+  if (!is_regular_dot) {
+    // need to convert
+    if (lhs_is_vector && rhs_is_matrix) {
+      if (lhs_contracting_dim == 0 && rhs_contracting_dim == 0) {
+        // einsum(v,M) = M^T*v
+        StatusOr<HloInstruction*> status_or = MakeTransposeHlo(rhs, {1, 0});
+        HloInstruction* new_lhs = std::move(status_or).ValueOrDie();
+        HloInstruction* new_rhs = lhs;
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      } else if (lhs_contracting_dim == 0 && rhs_contracting_dim == 1) {
+        // einsum(v,M) = M*v
+        HloInstruction* new_lhs = rhs;
+        HloInstruction* new_rhs = lhs;
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        StatusOr<HloInstruction*> status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      }
+
+    } else if (lhs_is_matrix && rhs_is_vector) {
+      if (lhs_contracting_dim == 0 && rhs_contracting_dim == 0) {
+        // einsum(M,v) = M^T*v
+        StatusOr<HloInstruction*> status_or = MakeTransposeHlo(lhs, {1, 0});
+        HloInstruction* new_lhs = std::move(status_or).ValueOrDie();
+        HloInstruction* new_rhs = rhs;
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      }
+
+    } else if (lhs_is_matrix && rhs_is_matrix) {
+      if (lhs_contracting_dim == 0 && rhs_contracting_dim == 0) {
+        // einsum(M,N) = M^T*N
+        StatusOr<HloInstruction*> status_or = MakeTransposeHlo(lhs, {1, 0});
+        HloInstruction* new_lhs = std::move(status_or).ValueOrDie();
+        HloInstruction* new_rhs = rhs;
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      } else if (lhs_contracting_dim == 0 && rhs_contracting_dim == 1) {
+        // einsum(M,N) = M^T*N^T
+        StatusOr<HloInstruction*> status_or = MakeTransposeHlo(lhs, {1, 0});
+        HloInstruction* new_lhs = std::move(status_or).ValueOrDie();
+        status_or = MakeTransposeHlo(rhs, {1, 0});
+        HloInstruction* new_rhs = std::move(status_or).ValueOrDie();
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      } else if (lhs_contracting_dim == 1 && rhs_contracting_dim == 1) {
+        // einsum(M,N) = M-N^T
+        HloInstruction* new_lhs = lhs;
+        StatusOr<HloInstruction*> status_or = MakeTransposeHlo(rhs, {1, 0});
+        HloInstruction* new_rhs = std::move(status_or).ValueOrDie();
+        DotDimensionNumbers dimension_numbers;
+        dimension_numbers.add_lhs_contracting_dimensions(1);
+        dimension_numbers.add_rhs_contracting_dimensions(0);
+        status_or =
+            MakeDotHlo(new_lhs, new_rhs, dimension_numbers,
+                       dot->precision_config(), dot->shape().element_type());
+        new_dot = std::move(status_or).ValueOrDie();
+      }
+    }
+  }
+  std::stack<HloInstruction*> trans_stack;
+  HloInstruction *new_lhs, *new_rhs;
+  CHECK(Match(new_dot, m::Dot(m::Op(&new_lhs), m::Op(&new_rhs))));
+  if (Match(new_rhs, m::Transpose())) {
+    trans_stack.push(new_rhs);
+  }
+  if (Match(new_lhs, m::Transpose())) {
+    trans_stack.push(new_lhs);
+  }
+  if (!trans_stack.empty()) TF_RETURN_IF_ERROR(TransposeSinker(trans_stack));
+
+  if (new_dot != dot) {
+    LOG(INFO) << prefix << " old_dot=" << dot->ToString()
+              << " new_dot=" << new_dot->ToString();
+    return ReplaceInstruction(dot, new_dot);
+  } else {
+    return Status::OK();
+  }
+}
+bool EinSumReduceSumConverter::IsReduceSumDot(const HloInstruction* reduce) {
+  if (reduce->opcode() != HloOpcode::kReduce) {
+    return false;
+  }
+  int64_t op_count = reduce->operand_count() / 2;
+  if (op_count > 1) return false;
+  HloInstruction* reduce_function = reduce->to_apply()->root_instruction();
+  if (reduce->shape().IsTuple() ||
+      reduce_function->opcode() != HloOpcode::kAdd ||
+      !reduce->shape().IsArray() || reduce->dimensions().size() != 1 ||
+      reduce->shape().dimensions_size() != 1) {
+    // only consider reduce_sum(matrix) -> vector
+    return false;
+  }
+  auto zero = LiteralUtil::CreateR0<float>(0);
+  if (reduce->operand(1)->opcode() != HloOpcode::kConstant ||
+      (reduce->operand(1)->literal() != zero)) {
+    // If Reduce Sum has non-zero init_value, such
+    // reduce sum cannot be target as matrix multiplication
+    return false;
+  }
+
+  DebugPrint("EinSumReduceSumConverter::IsReduceSumDot",
+             reduce->name() + " is reduce_sum");
+  return true;
+}
+
+Status EinSumReduceSumConverter::HandleReduce(HloInstruction* reduce) {
+  DebugPrint("EinSumReduceSumConverter::HandleReduce",
+             "Start " + reduce->ToString());
+  if (!IsReduceSumDot(reduce)) {
+    return Status::OK();
+  }
+  DebugPrint(
+      "EinSumReduceSumConverter::HandleReduce",
+      "Start " + reduce->name() + " dimension_size = " +
+          std::to_string(reduce->shape().dimensions_size()) +
+          " reduce_func = " +
+          HloOpcodeString(reduce->to_apply()->root_instruction()->opcode()) +
+          " operand.name = " + reduce->operand(0)->name() +
+          " operand.dimension_size = " +
+          std::to_string(reduce->operand(0)->shape().dimensions_size()) +
+          " init_value.name = " + reduce->operand(1)->name());
+
+  // replace reduce with dot
+  HloInstruction* operand = reduce->mutable_operand(0);
+  auto reduce_dim = reduce->dimensions(0);
+  DebugPrint("EinSumReduceSumConverter::HandleReduce",
+             "reduce_dim = " + std::to_string(reduce_dim));
+  DebugPrint("EinSumReduceSumConverter::HandleReduce",
+             "operand->dimensions(0) = " +
+                 std::to_string(operand->shape().dimensions(0)) +
+                 " operand->dimensions(1) = " +
+                 std::to_string(operand->shape().dimensions(1)));
+  PrecisionConfig precision_config;
+  precision_config.mutable_operand_precision()->Resize(
+      2, PrecisionConfig::DEFAULT);
+  HloInstruction* new_dot = nullptr;
+  if (reduce_dim == 0) {
+    // reduce(M) = M^T*v
+    DebugPrint("EinSumReduceSumConverter::HandleReduce",
+               "Is M^T-v dot, reduce_dim = " + std::to_string(reduce_dim));
+    auto raw_one_vector_status_or = CreateOneConstVector(
+        reduce->shape().element_type(), operand->shape().dimensions(0));
+    auto raw_one_vector = std::move(raw_one_vector_status_or).ValueOrDie();
+    HloInstruction* one_vector_inst = reduce->parent()->AddInstruction(
+        HloInstruction::CreateConstant(std::move(raw_one_vector)));
+    DebugPrint(
+        "EinSumReduceSumConverter::HandleReduce",
+        "Is M^T-v dot, one_vector_inst = " + one_vector_inst->ToString());
+    StatusOr<HloInstruction*> status_or = MakeTransposeHlo(operand, {1, 0});
+    HloInstruction* lhs = std::move(status_or).ValueOrDie();
+    HloInstruction* rhs = one_vector_inst;
+    reduce_one_vector_to_orig_init_val[one_vector_inst] =
+        reduce->parent()->AddInstruction(reduce->mutable_operand(1)->Clone());
+
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+    status_or = MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
+                           reduce->shape().element_type());
+    new_dot = std::move(status_or).ValueOrDie();
+
+  } else if (reduce_dim == 1) {
+    // reduce(M) = M*v
+    DebugPrint("EinSumReduceSumConverter::HandleReduce",
+               "Is M-v dot, reduce_dim = " + std::to_string(reduce_dim));
+    auto raw_one_vector_status_or = CreateOneConstVector(
+        reduce->shape().element_type(), operand->shape().dimensions(1));
+    auto raw_one_vector = std::move(raw_one_vector_status_or).ValueOrDie();
+    HloInstruction* one_vector_inst = reduce->parent()->AddInstruction(
+        HloInstruction::CreateConstant(std::move(raw_one_vector)));
+    DebugPrint("EinSumReduceSumConverter::HandleReduce",
+               "Is M-v dot, one_vector_inst = " + one_vector_inst->ToString());
+    HloInstruction* lhs = operand;
+    HloInstruction* rhs = one_vector_inst;
+    reduce_one_vector_to_orig_init_val[one_vector_inst] =
+        reduce->parent()->AddInstruction(reduce->mutable_operand(1)->Clone());
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+    StatusOr<HloInstruction*> status_or =
+        MakeDotHlo(lhs, rhs, dimension_numbers, precision_config,
+                   reduce->shape().element_type());
+    new_dot = std::move(status_or).ValueOrDie();
+  }
+  std::stack<HloInstruction*> trans_stack;
+  HloInstruction *new_lhs, *new_rhs;
+  CHECK(Match(new_dot, m::Dot(m::Op(&new_lhs), m::Op(&new_rhs))));
+  if (Match(new_rhs, m::Transpose())) {
+    trans_stack.push(new_rhs);
+  }
+  if (Match(new_lhs, m::Transpose())) {
+    trans_stack.push(new_lhs);
+  }
+  if (!trans_stack.empty()) TF_RETURN_IF_ERROR(TransposeSinker(trans_stack));
+
+  if (new_dot != nullptr) {
+    LOG(INFO) << "EinSumReduceSumConverter::HandleReduce"
+              << " Replace reduce.name=" << reduce->name()
+              << " reduce.shape=" << reduce->shape().ToString()
+              << " with new_dot.name=" << new_dot->name()
+              << " new_dot.shape=" << new_dot->shape().ToString();
+    return ReplaceInstruction(reduce, new_dot);
+  }
+  return Status::OK();
+}
+
 StatusOr<bool> HloMCO::Run(HloModule* module) {
   bool changed = false;
   TF_RET_CHECK(!module->name().empty());
@@ -1145,19 +1075,26 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
     // CleanupVisitor cleanup_visitor;
     // TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
 
-    TransposeReduceSumUnfolder transpose_unfolder;
-    DebugPrint("HloMCO::Run", "start transpose_unfolder");
-    PreOrderAccept(computation, &transpose_unfolder, changed);
+    // TransposeReduceSumUnfolder transpose_unfolder;
+    // DebugPrint("HloMCO::Run", "start transpose_unfolder");
+    // PreOrderAccept(computation, &transpose_unfolder, changed);
+    DebugPrint("HloMCO::Run", "start EinSumReduceSumConverter");
+    EinSumReduceSumConverter converter;
+    TF_RETURN_IF_ERROR(computation->Accept(&converter));
+
     DebugPrint("HloMCO::Run", "start matriox_chain_detector");
     MatrixChainDetector matrix_chain_detector;
     // detection matrix chain on the whithin the computation;
     TF_RETURN_IF_ERROR(computation->Accept(&matrix_chain_detector));
     DebugPrint("HloMCO::Run", "finish matriox_chain_detector");
+
     auto chain_map = matrix_chain_detector.GetChainMap();
+    auto reduce_one_vector_to_orig_init_val = converter.GetReduceOneVetorSet();
     DebugPrint("HloMCO::Run",
                "chain_map.size = " + std::to_string(chain_map.size()));
     TF_ASSIGN_OR_RETURN(bool changed_for_computation,
-                        ChainOptimize(computation, chain_map));
+                        ChainOptimize(computation, chain_map,
+                                      reduce_one_vector_to_orig_init_val));
     changed |= changed_for_computation;
     computation->Cleanup();
     DebugPrint("HloMCO::Run",

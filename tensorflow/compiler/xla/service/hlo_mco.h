@@ -3,12 +3,13 @@
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_HLO_MCO_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_HLO_MCO_H_
 
+#include <stack>
+
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_interface.h"
 #include "tensorflow/compiler/xla/service/shape_inference.h"
 #include "tensorflow/compiler/xla/util.h"
-
 namespace xla {
 
 // A pass which performs matrix chain optimization. The pass
@@ -28,17 +29,24 @@ class HloMCO : public HloModulePass {
   StatusOr<bool> ChainOptimize(
       HloComputation* computation,
       absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&
-          chain_map);
-  static StatusOr<HloInstruction*> CopyResuableSubgraph(HloInstruction* inst);
+          chain_map,
+      absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+          reduce_one_vector_to_orig_init_val);
   StatusOr<HloInstruction*> ComputeOptimalChainOrder(
-      HloInstruction* root, std::vector<HloInstruction*>& chain);
+      HloInstruction* root, std::vector<HloInstruction*>& chain,
+      absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+          reduce_one_vector_to_orig_init_val);
   StatusOr<HloInstruction*> ConstructOptimalChain(
       HloInstruction* orig_root, std::vector<std::vector<int64_t>>& solution,
-      std::vector<HloInstruction*>& chain_instructions);
+      std::vector<HloInstruction*>& chain_instructions,
+      absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+          reduce_one_vector_to_orig_init_val);
   Status ConstructOptimalChainHelper(
       HloInstruction* orig_root, std::vector<std::vector<int64_t>>& solution,
       std::vector<HloInstruction*>& chain_instructions, int64_t start_index,
-      int64_t end_index, std::vector<HloInstruction*>& subgraph_stack);
+      int64_t end_index, std::vector<HloInstruction*>& subgraph_stack,
+      absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+          reduce_one_vector_to_orig_init_val);
   const PrecisionConfig& precision_config() const { return precision_config_; }
   Status SetPrecisionConfig(PrecisionConfig& precision_config) {
     precision_config_ = precision_config;
@@ -105,21 +113,35 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
 };
 
-class TransposeReduceSumUnfolder : public DfsHloRewriteVisitor {
+// a post-order visitor which convert einsum to regular matrix/vector product
+// and convert reduce_sum to regular m-v dot
+class EinSumReduceSumConverter : public DfsHloRewriteVisitor {
  public:
-  Status HandleDot(HloInstruction* reshape) override;
-  Status HandleTranspose(HloInstruction* transpose) override;
+  Status HandleDot(HloInstruction* dot) override;
   Status HandleReduce(HloInstruction* reduce) override;
-  bool OldNewMapContain(HloInstruction* old_inst);
-  HloInstruction* GetNewInst(HloInstruction* old_inst);
-  bool DeleteOldInst(HloInstruction* old_inst);
+  Status TransposeSinker(std::stack<HloInstruction*> trans_stack);
+  bool IsReduceSumDot(const HloInstruction* hlo);
+
+  bool DimsAreIndexes(HloInstruction* inst) {
+    for (auto i = 0; i < inst->dimensions().size(); i++) {
+      if (i != inst->dimensions(i)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool IsTrivialTranspose(HloInstruction* transpose) {
+    return DimsAreIndexes(transpose);
+  }
+  absl::flat_hash_map<HloInstruction*, HloInstruction*>&
+  GetReduceOneVetorSet() {
+    return reduce_one_vector_to_orig_init_val;
+  }
 
  private:
-  bool IsTransDot(const HloInstruction* hlo);
-  bool IsRegularDot(const HloInstruction* hlo);
-  bool IsReduceSumDot(const HloInstruction* hlo);
-  absl::flat_hash_map<HloInstruction*, HloInstruction*> old_new_inst_map;
-  void InsertOldNewMap(HloInstruction* old_inst, HloInstruction* new_inst);
+  absl::flat_hash_map<HloInstruction*, HloInstruction*>
+      reduce_one_vector_to_orig_init_val;
 };
 
 }  // namespace xla
