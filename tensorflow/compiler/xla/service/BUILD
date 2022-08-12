@@ -2364,6 +2364,21 @@ cc_library(
 )
 
 cc_library(
+    name = "reshape_sinker",
+    srcs = ["reshape_sinker.cc"],
+    hdrs = ["reshape_sinker.h"],
+    deps = [
+        ":hlo_pass",
+        ":hlo_creation_utils",
+        ":hlo_dce",
+        # ":algebraic_simplifier",
+        ":hlo_pass_pipeline",
+        ":pattern_matcher",
+        "@com_google_absl//absl/algorithm:container",
+    ],
+)
+
+cc_library(
     name = "tree_reduction_rewriter",
     srcs = ["tree_reduction_rewriter.cc"],
     hdrs = ["tree_reduction_rewriter.h"],
