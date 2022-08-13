@@ -291,7 +291,6 @@ class SplittablePathRecorder : public SplitDeterminer {
   // record how many staring_nodes have been procesed for a while-loop
   absl::flat_hash_map<int64_t, absl::flat_hash_set<int64_t>>
       while_loop_num_to_unmegerable_while_loop_num;
-  // // node -> while_loop_nums where the node is included
   // absl::flat_hash_map<SplitNodeVal, std::vector<int64_t>>
   //     node_to_while_loop_nums;
   int64_t while_loop_num_counter;
@@ -2061,23 +2060,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
   LOG(INFO) << prefix << "descendant_start_nodes_set.size="
             << descendant_start_nodes.size()
             << " chain_root_nodes_set.size=" << chain_root_nodes.size();
-  // // we can perform merging if all start_nodes in the while_loop are in one
-  // // chain or the merging are launched by their end nodes
-  // if (chain_root_nodes.size() > 1) {
-  //   if (start_node_to_decendant_start_nodes[first_key].size() > 0 ||
-  //       start_node_to_decendant_start_nodes[second_key].size() > 0) {
-  //     LOG(INFO) << prefix
-  //               << " Cannot merge while_loop_1=" << orig_first_while_loop_num
-  //               << " while_loop_2=" << orig_second_while_loop_num
-  //               << " because multiple chain merge can only be lanuched by "
-  //                  "their end nodes, cur_chain_root_nodes.size="
-  //               << chain_root_nodes.size();
-  //     RecordUnmergableWhileLoops(orig_first_while_loop_num,
-  //                                orig_second_while_loop_num);
-  //     // do not perform merging, return
-  //     return Status::OK();
-  //   }
-  // }
 
   // chain_nodes include chain_root itself
   absl::flat_hash_map<SplitNodeKey, absl::flat_hash_set<SplitNodeKey>>
@@ -2138,14 +2120,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
         SplitNodeKey cur_node_key = MakeSplitNodeKey(cur_node_inst);
         int64_t cur_node_split_dim = std::get<1>(cur_node_val);
         int64_t cur_node_split_size = std::get<2>(cur_node_val);
-        // LOG(INFO) << prefix << " chain_root_node.name="
-        //           << start_node_to_start_inst[chain_root_node]->name()
-        //           << " cur_path_index=" << i
-        //           << " cur_path_index.index=" << counter
-        //           << " cur_node.name=" << cur_node_inst->name()
-        //           << " split_dim=" << cur_node_split_dim
-        //           << " in_path_start_node.size=" << chain_nodes.size()
-        //           << " path_node_que.size=" << path_node_que.size();
         if (cur_node_split_dim == -1 || cur_node_split_size == -1 ||
             (!chain_nodes.contains(cur_node_key))) {
           LOG(INFO) << prefix << " chain_root_node.name="
@@ -2367,11 +2341,6 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
     if (start_node_set.contains(cur_descdant_key)) {
       start_node_to_decendant_start_nodes[start_node_key].insert(
           cur_descdant_key);
-      // LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
-      //           << " has descdant_start_node=" << cur_descdant_inst->name()
-      //           << cur_start_inst->name() << ".descendant.size="
-      //           <<
-      //           start_node_to_decendant_start_nodes[start_node_key].size();
     }
     for (auto operand_inst : cur_descdant_inst->operands()) {
       if (!descendant_inst_set.contains(operand_inst)) {
@@ -2384,12 +2353,6 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
                   << operand_inst->name();
       }
     }
-    // LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
-    //           << " cur_descdant_start_node=" << cur_descdant_inst->name() <<
-    //           " "
-    //           << cur_descdant_inst->name()
-    //           << ".operands.size=" << cur_descdant_inst->operands().size();
-    // << " descdant_que.size=" << descdant_que.size();
   }
   return Status::OK();
 }
@@ -2516,80 +2479,6 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
     }
   }
 
-  // for (const auto& first_kv : start_node_to_splittable_paths) {
-  //   for (const auto& second_kv : start_node_to_splittable_paths) {
-  //     if (first_kv.first == second_kv.first ||
-  //         Merged(first_kv.first, second_kv.first) ||
-  //         !SizeCanMerge(first_kv.first, second_kv.first)) {
-  //       continue;
-  //     }
-  //     if (start_node_to_start_inst[first_kv.first]->opcode() ==
-  //             HloOpcode::kSort ||
-  //         start_node_to_start_inst[second_kv.first]->opcode() ==
-  //             HloOpcode::kSort) {
-  //       continue;
-  //     }
-  //     int64_t first_while_loop_num =
-  //         start_node_to_while_loop_num[first_kv.first];
-  //     int64_t second_while_loop_num =
-  //         start_node_to_while_loop_num[second_kv.first];
-  //     if (while_loop_num_to_unmegerable_while_loop_num.contains(
-  //             first_while_loop_num) &&
-  //         while_loop_num_to_unmegerable_while_loop_num[first_while_loop_num]
-  //             .contains(second_while_loop_num)) {
-  //       // donn't need to check
-  //       //
-  //       while_loop_num_to_unmegerable_while_loop_num[second_while_loop_num]
-  //       // since they must be contain to each other's
-  //       // while_loop_num_to_unmegerable_while_loop_num
-  //       continue;
-  //     }
-  //     LOG(INFO) << prefix << "Determine merge first_start_node_inst="
-  //               << start_node_to_start_inst[first_kv.first]->name()
-  //               << " toatal_path_num=" << first_kv.second.size()
-  //               << " second_start_node_inst="
-  //               << start_node_to_start_inst[second_kv.first]->name()
-  //               << " toatal_path_num=" << second_kv.second.size();
-  //     int64_t best_lcs_len = 0;
-  //     std::vector<size_t> best_lcs_path_indices_first = {};
-  //     std::vector<size_t> best_lcs_path_indices_second = {};
-  //     for (auto i = 0; i < first_kv.second.size(); ++i) {
-  //       for (auto j = 0; j < second_kv.second.size(); ++j) {
-  //         int64_t cur_lcs_len = LCS(first_kv.second[i], second_kv.second[j]);
-  //         LOG(INFO) << prefix << "first_start_node_inst="
-  //                   << start_node_to_start_inst[first_kv.first]->name()
-  //                   << " second_start_node_inst="
-  //                   << start_node_to_start_inst[second_kv.first]->name()
-  //                   << " LCS(" << i << "," << j << ")" << cur_lcs_len
-  //                   << " best_lcs_len=" << best_lcs_len;
-  //         if (cur_lcs_len == 0) continue;
-  //         if (cur_lcs_len > best_lcs_len &&
-  //             ShouldMerge(cur_lcs_len, first_kv.second[i].size(),
-  //                         second_kv.second[j].size())) {
-  //           best_lcs_len = cur_lcs_len;
-  //           best_lcs_path_indices_first = {i};
-  //           best_lcs_path_indices_second = {j};
-  //         } else if (cur_lcs_len == best_lcs_len &&
-  //                    ShouldMerge(cur_lcs_len, first_kv.second[i].size(),
-  //                                second_kv.second[j].size())) {
-  //           // need to record all possible best_merge_paths, the compatiable
-  //           // paths have the same index.
-  //           best_lcs_path_indices_first.emplace_back(i);
-  //           best_lcs_path_indices_second.emplace_back(j);
-  //         }
-  //       }
-  //     }
-
-  //     if (best_lcs_len == 0) continue;
-  //     LOG(INFO) << prefix << "Try merge first_start_node_inst="
-  //               << start_node_to_start_inst[first_kv.first]->name()
-  //               << " second_start_node_inst="
-  //               << start_node_to_start_inst[second_kv.first]->name();
-  //     TryMergableRelativeWhileLoop(first_kv.first, second_kv.first,
-  //                                  best_lcs_path_indices_first,
-  //                                  best_lcs_path_indices_second);
-  //   }
-  // }
 
   RecordInstructionsInWhileLoop();
   LOG(INFO) << prefix << "Finish AllocateWhileLoops";
