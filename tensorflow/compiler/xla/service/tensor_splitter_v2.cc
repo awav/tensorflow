@@ -186,8 +186,6 @@ class SplittablePathRecorder : public SplitDeterminer {
 
   Status HandleSort(HloInstruction* sort) override;
 
-  // detect whether one of them are operand of the other
-  bool IsOperandofTheOther(SplitNodeKey first_key, SplitNodeKey second_key);
 
   // Decide how to merge paths and allocate while_loop num to each path
   // Can only be called after recording all paths
@@ -234,6 +232,7 @@ class SplittablePathRecorder : public SplitDeterminer {
       SplitNodeKey first_key, SplitNodeKey second_key,
       const std::vector<size_t>& first_path_indices,
       const std::vector<size_t>& second_path_indices);
+  // if the leaf_dot/leaf_broadcast's operand is another while-loop, record the information
   Status FinishRecordLeafDot(SplitNodeKey path_key, int64_t path_index,
                              HloInstruction* dot, int64_t split_dim,
                              int64_t split_size);
@@ -251,13 +250,13 @@ class SplittablePathRecorder : public SplitDeterminer {
   // Check whether first_key and second_key have already been merged into the
   // same while_loop
   bool Merged(SplitNodeKey first_key, SplitNodeKey second_key);
-
+  // Calculate the longest common subsequence of two given paths
   int64_t LCS(const std::vector<SplitNodeVal>& first_path,
               const std::vector<SplitNodeVal>& second_path);
 
   bool ShouldMerge(int64_t lcs_len, int64_t first_path_len,
                    int64_t second_path_len);
-
+  // update available split paths for a while loop
   Status UpdateNewPaths(
       SplitNodeKey node_key, const std::vector<size_t>& path_indices,
       absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
@@ -297,6 +296,7 @@ class SplittablePathRecorder : public SplitDeterminer {
   float lcs_merge_threshold;
 };
 
+// perform real splitting and create while_loops
 class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
  public:
   explicit TensorSplitterRewriteVisitorV2(
@@ -650,11 +650,6 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
   Status AddReduceToMergedWhileLoop(HloInstruction* reduce);
   // Add sort starting-node to while-loop info
   Status AddSortToMergedWhileLoop(HloInstruction* sort);
-
-  Status CreateSingleWhileLoopForDot(HloInstruction* dot, HloInstruction* lhs,
-                                     HloInstruction* rhs);
-  Status CreateSingleWhileLoopForReduce(HloInstruction* reduce);
-  Status CreateSingleWhileLoopForSort(HloInstruction* sort);
 
   HloModule* parent_module;
   // splittable_paths doesn't contain start_node itself
@@ -1126,16 +1121,9 @@ Status SplittablePathRecorder::CreateNewEmptyPath(SplitNodeKey key,
               << "]=" << start_node_to_start_inst[key];
   } else {
     // find a new starting_node, insert an empty path
-    LOG(INFO) << "[SplittablePathRecorder::CreateNewEmptyPath] "
-              << "Create a new starting_node: " << inst->name();
     std::vector<std::vector<SplitNodeVal>> tmp(0);
     start_node_to_splittable_paths[key] = tmp;
     start_node_to_start_inst[key] = inst;
-    LOG(INFO) << "[SplittablePathRecorder::CreateNewEmptyPath] "
-              << "start_node_to_splittable_paths[" << key
-              << "].size=" << start_node_to_splittable_paths[key].size()
-              << " start_node_to_start_inst[" << key
-              << "]=" << start_node_to_start_inst[key];
   }
   std::vector<SplitNodeVal> tmp(0);
   start_node_to_splittable_paths[key].push_back(tmp);
@@ -1186,7 +1174,6 @@ Status SplittablePathRecorder::FinishRecordLeafDot(SplitNodeKey path_key,
     // We are splitting up the lhs
     split_is_lhs = true;
     split_op = lhs;
-    // TODO: Check if this is robust for multiple indices ...
     for (int64_t i = 0; i < dnums.lhs_contracting_dimensions_size(); i++) {
       if (split_dim >= dnums.lhs_contracting_dimensions(i)) split_dim += 1;
     }
@@ -1195,7 +1182,6 @@ Status SplittablePathRecorder::FinishRecordLeafDot(SplitNodeKey path_key,
     split_is_lhs = false;
     split_dim -= dims_lhs;
     split_op = rhs;
-    // TODO: Check if this is robust for multiple indices ...
     for (int64_t i = 0; i < dnums.rhs_contracting_dimensions_size(); i++) {
       if (split_dim >= dnums.rhs_contracting_dimensions(i)) split_dim += 1;
     }
@@ -1269,6 +1255,7 @@ Status SplittablePathRecorder::RecordPath(
             << " path_index=" << path_index << " inst.name=" << inst->name()
             << " split_dim=" << split_dim << " split_size=" << split_size
             << " parent_inst.name=" << parent_inst->name();
+  // record current node
   AppendToPath(path_key, path_index, inst, split_dim, split_size, parent_inst);
   if (absl::c_linear_search(split_leafs, inst)) {
     LOG(INFO) << prefix << " Reach a leaf: '" << inst->name();
@@ -1389,10 +1376,6 @@ Status SplittablePathRecorder::HandleDot(HloInstruction* dot) {
     LOG(INFO) << ss.str();
     return Status::OK();
   }
-  LOG(INFO) << "\n ----< [SplittablePathRecorder]  HandleDot for '"
-            << dot->name() << " dot.shape=" << dot->shape().ToString()
-            << "' dot.byte_size=" << ShapeUtil::ByteSizeOfElements(dot->shape())
-            << " max_size_threshold= " << max_size_threshold;
   // TODO: Handle the case where both operands can be
   //       split in a better way.
 
@@ -1529,6 +1512,15 @@ Status SplittablePathRecorder::HandleDot(HloInstruction* dot) {
     //
     bool split_is_lhs = can_split_lhs;
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
+    for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+      exclude_dims_lhs.push_back(dnums.lhs_batch_dimensions(i));
+      exclude_dims_rhs.push_back(dnums.rhs_batch_dimensions(i));
+      LOG(INFO) << "\n ----< [SplittablePathRecorder]  HandleDot for '"
+                << dot->name()
+                << " skip lhs.batch_dimension=" << dnums.lhs_batch_dimensions(i)
+                << " skip rhs.batch_dimension="
+                << dnums.rhs_batch_dimensions(i);
+    }
     std::vector<int64_t> split_dims = BestSplitDim(
         split_inst,
         absl::MakeSpan(split_is_lhs ? exclude_dims_lhs : exclude_dims_rhs));
@@ -1600,11 +1592,6 @@ Status SplittablePathRecorder::HandleReduce(HloInstruction* reduce) {
   if (!OperandShouldBeSplit(reduce->mutable_operand(0))) {
     ss << "\n<<< Reduce '" << reduce->name()
        << "' cannot be split. Something is not splittable on the way up.";
-    ss << "\noperand.name=" << reduce->mutable_operand(0)->name()
-       << " shape=" << reduce->mutable_operand(0)->shape().ToString()
-       << " byte_size="
-       << ShapeUtil::ByteSizeOfElements(reduce->mutable_operand(0)->shape())
-       << " max_size_threshold=" << max_size_threshold;
     ss << "\n <---- Exit HandleReduce for '" << reduce->name() << "' FAILURE";
     LOG(INFO) << ss.str();
     return Status::OK();
@@ -1867,27 +1854,17 @@ bool SplittablePathRecorder::SizeCanMerge(SplitNodeKey first_key,
   // second_key's while_loop can be merged into first_key's while_loop  only if
   // after merging, the result size of the while_loop is less than or equal to
   // max_size_threshold.
-  LOG(INFO) << "[SizeCanMerge] first_key=" << first_key
-            << " second_key=" << second_key;
   int64_t first_total_size = 0, second_total_size = 0;
   int64_t first_while_loop_num = start_node_to_while_loop_num[first_key],
           second_while_loop_num = start_node_to_while_loop_num[second_key];
-  LOG(INFO) << "[SizeCanMerge] first_while_loop_num=" << first_while_loop_num
-            << " second_while_loop_num=" << second_while_loop_num;
   for (const auto& key : while_loop_num_to_start_node[first_while_loop_num]) {
-    LOG(INFO) << "[SizeCanMerge] Before Add key=" << key
-              << " to first_total_size" << first_total_size;
     first_total_size +=
         ShapeUtil::ByteSizeOfElements(start_node_to_start_inst[key]->shape());
-    LOG(INFO) << "[SizeCanMerge] After Add key=" << key
-              << " to first_total_size" << first_total_size;
   }
-  LOG(INFO) << "[SizeCanMerge] first_total_size=" << first_total_size;
   for (const auto& key : while_loop_num_to_start_node[second_while_loop_num]) {
     second_total_size +=
         ShapeUtil::ByteSizeOfElements(start_node_to_start_inst[key]->shape());
   }
-  LOG(INFO) << "[SizeCanMerge] second_total_size=" << second_total_size;
   return first_total_size + second_total_size <= max_size_threshold;
 }
 
@@ -2094,11 +2071,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
       // skip chain_root, since it will not be used by other node in the
       // while-loop
       chain_nodes.erase(chain_root_node);
-      LOG(INFO) << prefix << " chain_root_node.name="
-                << start_node_to_start_inst[chain_root_node]->name()
-                << " try use cur_path_index=" << i << " cur_path_size="
-                << tmp_start_node_to_splittable_paths[chain_root_node][i].size()
-                << " in_path_start_node.size=" << chain_nodes.size();
       std::queue<SplitNodeVal> path_node_que;
       // skip root it self
       for (auto j = 1;
@@ -2107,10 +2079,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
         path_node_que.push(
             tmp_start_node_to_splittable_paths[chain_root_node][i][j]);
       }
-      LOG(INFO) << prefix << " chain_root_node.name="
-                << start_node_to_start_inst[chain_root_node]->name()
-                << " try use cur_path_index=" << i
-                << " path_node_que.init_size=" << path_node_que.size();
       int counter = 0;
       while (!path_node_que.empty()) {
         auto cur_node_val = path_node_que.front();
@@ -2122,14 +2090,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
         int64_t cur_node_split_size = std::get<2>(cur_node_val);
         if (cur_node_split_dim == -1 || cur_node_split_size == -1 ||
             (!chain_nodes.contains(cur_node_key))) {
-          LOG(INFO) << prefix << " chain_root_node.name="
-                    << start_node_to_start_inst[chain_root_node]->name()
-                    << " cur_path_index=" << i
-                    << " cur_path_index.index=" << counter
-                    << " skip cur_node.name=" << cur_node_inst->name()
-                    << " split_dim=" << cur_node_split_dim
-                    << " in_path_start_node.size=" << chain_nodes.size()
-                    << " path_node_que.size=" << path_node_que.size();
           continue;
         }
 
@@ -2142,12 +2102,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
         if (cur_node_split_dim == start_node_split_dim &&
             cur_node_split_size == start_node_split_size) {
           chain_nodes.erase(cur_node_key);
-          LOG(INFO) << prefix << " chain_root_node.name="
-                    << start_node_to_start_inst[chain_root_node]->name()
-                    << " cur_path_index=" << i
-                    << " remove in_path_start_node.name="
-                    << cur_node_inst->name()
-                    << " in_path_start_node.size=" << chain_nodes.size();
           // since paths can have branches, so once we meet an extendable
           // node,extend the path(skip cur_node)
           for (auto k = 1;
@@ -2156,13 +2110,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
             path_node_que.push(
                 tmp_start_node_to_splittable_paths[cur_node_key][i][k]);
           }
-          LOG(INFO)
-              << prefix << " chain_root_node.name="
-              << start_node_to_start_inst[chain_root_node]->name()
-              << " cur_path_index=" << i << " extend cur_path using "
-              << cur_node_inst->name() << " " << i << "'s path, path_size="
-              << tmp_start_node_to_splittable_paths[chain_root_node][i].size() -
-                     1;
         }
       }
 
@@ -2243,12 +2190,6 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
     }
   }
 
-  LOG(INFO) << prefix << " Before intersection, first_lcs_indices"
-            << first_path_indices.size() << " second_lcs_indices"
-            << second_path_indices.size()
-            << " After intersection, first_lcs_indices"
-            << first_lcs_indices.size() << " second_lcs_indices"
-            << second_lcs_indices.size();
   // perform the real update
   TF_RETURN_IF_ERROR(UpdateNewPaths(first_key, first_lcs_indices,
                                     start_node_to_splittable_paths));
@@ -2346,11 +2287,6 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
       if (!descendant_inst_set.contains(operand_inst)) {
         descdant_que.push(operand_inst);
         descendant_inst_set.insert(operand_inst);
-      } else {
-        LOG(INFO) << prefix << " starting_node=" << cur_start_inst->name()
-                  << " cur_descdant_start_node=" << cur_descdant_inst->name()
-                  << " has duplicate descendant_operand"
-                  << operand_inst->name();
       }
     }
   }
@@ -2359,7 +2295,6 @@ Status SplittablePathRecorder::FindAllDescdantStartNodes(
 
 Status SplittablePathRecorder::RecordAllDescdantStartNodes() {
   std::string prefix = "[RecordAllDescdantStartNodes] ";
-  LOG(INFO) << prefix << "Start RecordAllDescdantStartNodes";
   for (const auto& kv : start_node_to_splittable_paths) {
     start_node_set.insert(kv.first);
   }
@@ -2392,7 +2327,6 @@ bool SplittablePathRecorder::HasDesedantRelationship(SplitNodeKey first_key,
 }
 Status SplittablePathRecorder::InitWhileLoops() {
   std::string prefix = "[InitWhileLoops] ";
-  LOG(INFO) << prefix << "Start InitWhileLoops";
   for (const auto& kv : start_node_to_splittable_paths) {
     auto while_loop_num = GenerateNewWhileLoopNum();
     start_node_to_while_loop_num[kv.first] = while_loop_num;
@@ -2432,24 +2366,12 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
       }
       const auto& first_paths = start_node_to_splittable_paths[first_key];
       const auto& second_paths = start_node_to_splittable_paths[first_key];
-      LOG(INFO) << prefix << "Determine merge first_start_node_inst="
-                << start_node_to_start_inst[first_key]->name()
-                << " toatal_path_num=" << first_paths.size()
-                << " second_start_node_inst="
-                << start_node_to_start_inst[second_key]->name()
-                << " toatal_path_num=" << second_paths.size();
       int64_t best_lcs_len = 0;
       std::vector<size_t> best_lcs_path_indices_first = {};
       std::vector<size_t> best_lcs_path_indices_second = {};
       for (auto i = 0; i < first_paths.size(); ++i) {
         for (auto j = 0; j < second_paths.size(); ++j) {
           int64_t cur_lcs_len = LCS(first_paths[i], second_paths[j]);
-          LOG(INFO) << prefix << "first_start_node_inst="
-                    << start_node_to_start_inst[first_key]->name()
-                    << " second_start_node_inst="
-                    << start_node_to_start_inst[second_key]->name() << " LCS("
-                    << i << "," << j << ")" << cur_lcs_len
-                    << " best_lcs_len=" << best_lcs_len;
           if (cur_lcs_len == 0) continue;
           if (cur_lcs_len > best_lcs_len &&
               ShouldMerge(cur_lcs_len, first_paths[i].size(),
@@ -3088,9 +3010,6 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
     output_index_offset = 0;
   }
 
-  LOG(INFO) << "[BuildMergedLoopOutput] "
-            << "original.name=" << original->name()
-            << " offset_=" << offset_->name();
   // collect idx, output and all parameters into a tuple ..
 
   for (int64_t i = param_start_index + output_index_offset;
@@ -3296,6 +3215,9 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
               << " sub_output_idx=" << std::to_string(sub_output_idx)
               << " parent.name()=" << orig_inst->parent()->name()
               << " shape=" << result->shape().ToString();
+    if (loop_info.split_rest != sub_info.split_rest) {
+      continue;
+    }
     if (orig_inst->opcode() == HloOpcode::kDot) {
       if (sub_info.split_rest == 0) {
         LOG(INFO) << prefix << " Start Replace "
@@ -3562,8 +3484,6 @@ Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
 
   HloInstruction* output_tuple = body_builder.AddInstruction(
       HloInstruction::CreateTuple(loop_info.while_loop_output_elements));
-  LOG(INFO) << prefix
-            << "Final output_tuple.shape=" << output_tuple->shape().ToString();
   HloComputation* body =
       parent_module->AddEmbeddedComputation(body_builder.Build(output_tuple));
   LOG(INFO) << prefix << "Create body body first param.name="
