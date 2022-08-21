@@ -39,7 +39,6 @@ namespace m = match;
 
 using DFSStack = absl::InlinedVector<std::pair<int, HloInstruction*>, 16>;
 void DebugPrint(std::string functionName, std::string content) {
-  // std::cout << "[" << functionName << "]: " << content << std::endl;
   LOG(INFO) << "[" << functionName << "]: " << content;
 }
 void PrintCycle(const HloInstruction* child, DFSStack* dfs_stack) {
@@ -123,9 +122,6 @@ static Status DetectMatrixChainPreorderDFS(
   // its id.
   DFSStack dfs_stack;
   dfs_stack.emplace_back(root->unique_id(), root);
-  DebugPrint("DetectMatrixChainPreorderDFS",
-             "Start, root = " + root->name() +
-                 "opcode = " + HloOpcodeString(root->opcode()));
 
   do {
     DCHECK(!dfs_stack.empty());
@@ -144,10 +140,6 @@ static Status DetectMatrixChainPreorderDFS(
 
     dfs_stack.pop_back();
     bool is_matmul_node = MatrixChainDetector::CheckRealDot(current_node);
-    DebugPrint("DetectMatrixChainPreorderDFS",
-               "Visiting HLO = " + current_node->name() +
-                   " opcode = " + HloOpcodeString(current_node->opcode()) +
-                   " is_matmul = " + std::to_string(is_matmul_node));
     TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
     visitor->SetVisitState(current_id, Visitor::kVisited);
     if (!is_matmul_node) {
@@ -155,11 +147,6 @@ static Status DetectMatrixChainPreorderDFS(
       // as a single operand
       continue;
     }
-    DebugPrint(
-        "DetectMatrixChainPreorderDFS",
-        "current_node = " + current_node->name() +
-            " opcode = " + HloOpcodeString(current_node->opcode()) +
-            " users.size = " + std::to_string(current_node->users().size()));
 
     const size_t old_dfs_stack_size = dfs_stack.size();
     // current_node is a dot op, must have 2 operands
@@ -172,11 +159,6 @@ static Status DetectMatrixChainPreorderDFS(
             "instruction %s",
             current_node->ToString());
       }
-      DebugPrint("DetectMatrixChainPreorderDFS",
-                 "current_node = " + current_node->name() +
-                     " opcode = " + HloOpcodeString(current_node->opcode()) +
-                     " Add Child " + child->name() +
-                     " opcode = " + HloOpcodeString(child->opcode()));
     }
 
     // This makes the traversal order the same as what you'd expect
@@ -254,10 +236,6 @@ Status ChainRecorder::Preprocess(HloInstruction* hlo) {
                "Add node: " + hlo->name() + " to root: " + chain_root->name() +
                    " chain_map[" + chain_root->name() +
                    "].size = " + std::to_string(chain_map[chain_root].size()));
-  } else {
-    DebugPrint("ChainRecorder::Preprocess",
-               "Skip dot node: " + hlo->name() +
-                   " opcode = " + HloOpcodeString(hlo->opcode()));
   }
   return Status::OK();
 }
@@ -272,18 +250,13 @@ Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
     auto status = DetectMatrixChainPreorderDFS(cur_root, &chain_recorder);
 
     auto chain = chain_recorder.GetChain(cur_root);
-    DebugPrint(
-        "MatrixChainDetector::MatrixChainDetector",
-        "Before insert chain_map.size() = " + std::to_string(chain_map.size()));
     chain_map.insert({cur_root, chain});
-    DebugPrint(
-        "MatrixChainDetector::MatrixChainDetector",
-        "After insert chain_map.size() = " + std::to_string(chain_map.size()));
   }
   DebugPrint("MatrixChainDetector::MatrixChainDetector",
              "Finished chain_map.size() = " + std::to_string(chain_map.size()));
   return Status::OK();
 }
+
 bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
   if (hlo->opcode() != HloOpcode::kDot) {
     return false;
@@ -316,20 +289,9 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
     // since transpose op may be rewritten to dot op with
     // lhs_contracting_dimension = {0} rhs_contracting_dimension = {1}
     // such dot is actuall a tranpose and is not associative with other dots.
-    DebugPrint(
-        "MatrixChainDetector::CheckRealDot",
-        " kDot check fail: inst.name:" + hlo->name() + " opcode = " +
-            HloOpcodeString(hlo->opcode()) + " dimensions_size() = " +
-            std::to_string(hlo->shape().dimensions_size()) +
-            " lhs_contracting_dimension = " +
-            std::to_string(*(dnums.lhs_contracting_dimensions().begin())) +
-            " rhs_contracting_dimension = " +
-            std::to_string(*(dnums.rhs_contracting_dimensions().begin())));
 
     return false;
   }
-  DebugPrint("MatrixChainDetector::CheckRealDot",
-             "End check dot op: " + hlo->name() + " True");
   return true;
 }
 Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
@@ -345,23 +307,14 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
                  "root_instruction is dot, inst.name:" + hlo->name() +
                      " opcode = " + HloOpcodeString(hlo->opcode()));
       TF_RETURN_IF_ERROR(DetectMatrixChain(hlo));
-      DebugPrint(
-          "MatrixChainDetector::Preprocess",
-          "After DetectMatrixChain(" + hlo->name() +
-              ") chain_map.size() = " + std::to_string(chain_map.size()));
       return Status::OK();
     }
   }
 
   for (auto op : hlo->operands()) {
     if (Match(op, m::Dot())) {
-      DebugPrint("MatrixChainDetector::Preprocess",
-                 "operand.name:" + op->name() +
-                     " opcode = " + HloOpcodeString(op->opcode()));
       if (!CheckRealDot(op)) {
         // Only consider 2D dot product for now
-        DebugPrint("MatrixChainDetector::Preprocess",
-                   "Can only optimize 2D non-batch dot operations.");
         continue;
       }
       // current node != kDot, child op = kDot, child op is the root of a matrix
@@ -392,8 +345,6 @@ StatusOr<HloInstruction*> HloMCO::ConstructOptimalChain(
   TF_RETURN_IF_ERROR(ConstructOptimalChainHelper(
       orig_root, solution, chain_instructions, 0, chain_instructions.size() - 1,
       subgraph_stack, reduce_one_vector_to_orig_init_val));
-  DebugPrint("HloMCO::ConstructOptimalChain",
-             "subgraph_stack.size = " + std::to_string(subgraph_stack.size()));
   CHECK_EQ(subgraph_stack.size(), 1);
   optimal_root = subgraph_stack.back();
   return optimal_root;
@@ -405,17 +356,11 @@ Status HloMCO::ConstructOptimalChainHelper(
     int64_t end_index, std::vector<HloInstruction*>& subgraph_stack,
     absl::flat_hash_map<HloInstruction*, HloInstruction*>&
         reduce_one_vector_to_orig_init_val) {
-  DebugPrint(
-      "HloMCO::ConstructOptimalChainHelper",
-      "Start, root = " + orig_root->name() + " (start,end) = (" +
-          std::to_string(start_index) + "," + std::to_string(end_index) + ") " +
-          "subgraph_stack.size = " + std::to_string(subgraph_stack.size()));
   auto create_dot = [&](HloInstruction* l, HloInstruction* r) {
     std::string temp_string = "Start:  operand1 = " + l->name() +
                               " shape = " + l->shape().ToString() +
                               " operand2 = " + r->name() +
                               " shape = " + r->shape().ToString();
-    DebugPrint("HloMCO::ConstructOptimalChainHelper::create_dot", temp_string);
     const Shape lhs_shape = l->shape();
     DotDimensionNumbers dimension_numbers;
     dimension_numbers.add_lhs_contracting_dimensions(
@@ -430,42 +375,22 @@ Status HloMCO::ConstructOptimalChainHelper(
                   " operand2 = " + r->name() +
                   " shape = " + r->shape().ToString() +
                   " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("HloMCO::ConstructOptimalChainHelper::create_dot", temp_string);
 
     // for newly created instruction, we need to save it to the computation
     HloInstruction* new_matmul_inst_ptr = l->parent()->AddInstruction(
         HloInstruction::CreateDot(output_shape, l, r, dimension_numbers,
                                   orig_root->precision_config()));
-    DebugPrint("HloMCO::ConstructOptimalChainHelper::create_dot",
-               "create new matmul: " + new_matmul_inst_ptr->name() +
-                   "shape = " + new_matmul_inst_ptr->shape().ToString() +
-                   " operand1 = " + l->name() + " operand2 = " + r->name());
     subgraph_stack.emplace_back(new_matmul_inst_ptr);
-    DebugPrint("HloMCO::ConstructOptimalChainHelper::create_dot",
-               "After insert subgraph_stack.size= " +
-                   std::to_string(subgraph_stack.size()) +
-                   " top = " + subgraph_stack.back()->name() +
-                   " shape = " + subgraph_stack.back()->shape().ToString());
   };
 
   if (start_index == end_index) {
-    DebugPrint(
-        "HloMCO::ConstructOptimalChainHelper",
-        "Add single operand: " + chain_instructions[start_index]->name());
     // for single operand, it has already been stored in the compoutation
     subgraph_stack.emplace_back(chain_instructions[start_index]);
-    DebugPrint("HloMCO::ConstructOptimalChainHelper",
-               "After insert single operand subgraph_stack.size= " +
-                   std::to_string(subgraph_stack.size()) +
-                   " top = " + subgraph_stack.back()->name());
     return Status::OK();
   }
 
   if (start_index == end_index - 1) {
     // construction a new matmul op
-    DebugPrint("HloMCO::ConstructOptimalChainHelper",
-               "Add single matmul: " + chain_instructions[start_index]->name() +
-                   " * " + chain_instructions[end_index]->name());
     if (reduce_one_vector_to_orig_init_val.contains(
             chain_instructions[start_index])) {
       if (chain_instructions[start_index]->shape().dimensions(0) ==
@@ -533,10 +458,6 @@ Status HloMCO::ConstructOptimalChainHelper(
     } else {
       create_dot(chain_instructions[start_index],
                  chain_instructions[end_index]);
-      DebugPrint("HloMCO::ConstructOptimalChainHelper",
-                 "After insert single matmul subgraph_stack.size= " +
-                     std::to_string(subgraph_stack.size()) +
-                     " top = " + subgraph_stack.back()->name());
     }
 
     return Status::OK();
@@ -557,16 +478,8 @@ Status HloMCO::ConstructOptimalChainHelper(
       reduce_one_vector_to_orig_init_val));
 
   // since this is a stack, the right_operand is on the top of left_operand
-  DebugPrint("HloMCO::ConstructOptimalChainHelper",
-             "Before combile subgraph_stack.size= " +
-                 std::to_string(subgraph_stack.size()) +
-                 " top = " + subgraph_stack.back()->name());
   HloInstruction* right_operand = subgraph_stack.back();
   subgraph_stack.pop_back();
-  DebugPrint(
-      "HloMCO::ConstructOptimalChainHelper",
-      "combile right_operand =" + right_operand->name() +
-          " subgraph_stack.size= " + std::to_string(subgraph_stack.size()));
   HloInstruction* left_operand = subgraph_stack.back();
   subgraph_stack.pop_back();
   DebugPrint(
@@ -626,10 +539,6 @@ Status HloMCO::ConstructOptimalChainHelper(
     }
   } else {
     create_dot(left_operand, right_operand);
-    DebugPrint("HloMCO::ConstructOptimalChainHelper",
-               "After combile subgraph_stack.size= " +
-                   std::to_string(subgraph_stack.size()) +
-                   " top = " + subgraph_stack.back()->name());
   }
   return Status::OK();
 }
@@ -650,10 +559,6 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
     CHECK_LE(chain[i]->shape().rank(), 2);
     if (chain[i]->shape().rank() == 1) {
       // vector operand
-      // a vector in XLA is row vector or column vector? For now consider
-      // it as column vector
-      // TODO:
-      // 感觉需要测试下比如vector在中间的情况比如Mvc^TN这类，以及v^Tc这类的
       sizes[i] = chain[i]->shape().dimensions(0);
       sizes[i + 1] = 1;
     } else if (chain[i]->shape().rank() == 2) {
@@ -710,7 +615,6 @@ StatusOr<bool> HloMCO::ChainOptimize(
         chain_map,
     absl::flat_hash_map<HloInstruction*, HloInstruction*>&
         reduce_one_vector_to_orig_init_val) {
-  DebugPrint("HloMCO::ChainOptimize", "Start");
   bool changed = false;
   for (auto& item : chain_map) {
     DebugPrint("HloMCO::ChainOptimize",
@@ -721,9 +625,6 @@ StatusOr<bool> HloMCO::ChainOptimize(
     DebugPrint(
         "HloMCO::ChainOptimize",
         "Finish optimization, new_chain_root = " + new_instruction->name());
-    DebugPrint("HloMCO::ChainOptimize",
-               "Before replace, chain_root.user.size = " +
-                   std::to_string(item.first->users().size()));
 
     item.first->ReplaceAllUsesWith(new_instruction);
     if (new_instruction == item.first->parent()->root_instruction()) {
@@ -731,15 +632,13 @@ StatusOr<bool> HloMCO::ChainOptimize(
                  "Replace computation root success, new_root: " +
                      new_instruction->name());
     }
-    DebugPrint("HloMCO::ChainOptimize",
-               "After replace, chain_root.user.size = " +
-                   std::to_string(item.first->users().size()));
 
     changed = true;
   }
   return changed;
 }
 
+// unfold transpose
 Status EinSumReduceSumConverter::TransposeSinker(
     std::stack<HloInstruction*> trans_stack) {
   std::string prefix = "[TransposeSinker] ";
@@ -960,8 +859,6 @@ bool EinSumReduceSumConverter::IsReduceSumDot(const HloInstruction* reduce) {
 }
 
 Status EinSumReduceSumConverter::HandleReduce(HloInstruction* reduce) {
-  DebugPrint("EinSumReduceSumConverter::HandleReduce",
-             "Start " + reduce->ToString());
   if (!IsReduceSumDot(reduce)) {
     return Status::OK();
   }
@@ -979,13 +876,6 @@ Status EinSumReduceSumConverter::HandleReduce(HloInstruction* reduce) {
   // replace reduce with dot
   HloInstruction* operand = reduce->mutable_operand(0);
   auto reduce_dim = reduce->dimensions(0);
-  DebugPrint("EinSumReduceSumConverter::HandleReduce",
-             "reduce_dim = " + std::to_string(reduce_dim));
-  DebugPrint("EinSumReduceSumConverter::HandleReduce",
-             "operand->dimensions(0) = " +
-                 std::to_string(operand->shape().dimensions(0)) +
-                 " operand->dimensions(1) = " +
-                 std::to_string(operand->shape().dimensions(1)));
   PrecisionConfig precision_config;
   precision_config.mutable_operand_precision()->Resize(
       2, PrecisionConfig::DEFAULT);
@@ -1071,13 +961,6 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
   DebugPrint("HloMCO::Run", "Start Run");
   for (auto* computation : module->MakeNonfusionComputations()) {
     DebugPrint("HloMCO::Run", "computation: " + computation->ToString());
-    // DebugPrint("HloMCO::Run", "start cleanup_visitor");
-    // CleanupVisitor cleanup_visitor;
-    // TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
-
-    // TransposeReduceSumUnfolder transpose_unfolder;
-    // DebugPrint("HloMCO::Run", "start transpose_unfolder");
-    // PreOrderAccept(computation, &transpose_unfolder, changed);
     DebugPrint("HloMCO::Run", "start EinSumReduceSumConverter");
     EinSumReduceSumConverter converter;
     TF_RETURN_IF_ERROR(computation->Accept(&converter));
@@ -1100,7 +983,6 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
     DebugPrint("HloMCO::Run",
                "After optimization computation: " + computation->ToString());
   }
-  // After these pass, also need to run HloDCE and HloCSE
   return changed;
 }
 

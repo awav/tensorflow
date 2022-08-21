@@ -98,12 +98,6 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
   Status DefaultAction(HloInstruction* hlo) override { return Status::OK(); }
   Status Preprocess(HloInstruction* hlo) override;
   static bool CheckRealDot(HloInstruction* hlo);
-  // Status Postprocess(HloInstruction* hlo) override;
-
-  // Status HandleDot(HloInstruction* dot) override;
-  // Status HandleBroadcast(HloInstruction* broadcast) override;
-  // Status HandleReshape(HloInstruction* reshape) override;
-  // Status HandleTranspose(HloInstruction* transpose) override;
 
   Status FinishVisit(HloInstruction* hlo) override { return Status::OK(); }
   Status DetectMatrixChain(HloInstruction* chain_root);
@@ -114,7 +108,7 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
 };
 
 // a post-order visitor which convert einsum to regular matrix/vector product
-// and convert reduce_sum to regular m-v dot
+// convert reduce_sum to regular m-v dot and unfold transpose
 class EinSumReduceSumConverter : public DfsHloRewriteVisitor {
  public:
   Status HandleDot(HloInstruction* dot) override;
