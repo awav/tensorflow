@@ -126,6 +126,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_sharding_metadata.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
@@ -345,6 +346,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     // pipeline.AddPass<AlgebraicRewriter>();
+    pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<TensorSplitter>();
     pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
