@@ -13,6 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// MCO is an XLA pass used to optimise matrix multiplication chain. It has two
+// phases: matrix chain detection and matrix chain optimisation. But in order to
+// optimise more matrix chains, some extra processes are applied.
+
 #include "tensorflow/compiler/xla/service/hlo_mco.h"
 
 #include <set>
@@ -239,6 +243,23 @@ Status ChainRecorder::Preprocess(HloInstruction* hlo) {
   }
   return Status::OK();
 }
+
+// For matrix multiplication chains, due to associativity, we do not need to
+// care the order in which the matrix multiplication chain is computed, we only
+// need to record all the matrices involved in the matrix multiplication chain.
+// Take the following graph as an example, where dot.11 represents the root node
+// of a subgraph of a matrix multiplication chain, and Parameter 0, Parameter 1,
+// Parameter 2 are the three matrices involved in the chain. We can store this
+// chain as {dot.11 : Parameter 0, Parameter 1, Parameter 2}.
+// The basic idea is we need to perform a post-order DFS algorithm to traverse a
+// computational graph from its root node, which is the final result of the
+// computational graph. We perform a post-order DFS on the computational graph,
+// checking all its operands if the node currently being processed is not a dot.
+// If an operand of the node is a dot, it means that this dot is the root node
+// of a matrix multiplication chain. Then we use start from the dot to record
+// the chain, whenever a node is encountered that is not a dot, it is an operand
+// in the matrix multiplication chain and is recorded in the hash table,
+// otherwise it continues to iterate through all the operands of the dot.
 Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
   std::deque<HloInstruction*> chain_roots{chain_root};
   while (!chain_roots.empty()) {
@@ -609,6 +630,18 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
   return optimal_root;
 }
 
+// Iterate all chains recorded in the hash table, compute its
+// optimal order and then reconstruct that subgraph using the optimal computing
+// order. The standard bottom-up dynamic programming MCO algorithm is used to
+// calculate the optimal computing order(http://arxiv.org/abs/1804.04021). Then
+// a recursive funciton is used to construct a new chain based on the optimal
+// order. And the original chain is replaced by the optimised chain.
+// The reason why we cannot merge matrix chain detection and matrix chain
+// optimisation into a single pass is some intermediate result of a matrix chain
+// may be used by other opsrations in the compoutational graph. If the two
+// procedure are merged, once we detect a matrix chain, we don't know wheter
+// other operations we haven't visited are using some intermediate results of
+// the chain.
 StatusOr<bool> HloMCO::ChainOptimize(
     HloComputation* computation,
     absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&
@@ -638,7 +671,16 @@ StatusOr<bool> HloMCO::ChainOptimize(
   return changed;
 }
 
-// unfold transpose
+// Transpose Unfolder
+// In practice, there are often cases where the chain contains other operations
+// such as *transpose*. Take $(ABC(D(JH)^T)^T)^T$ for example. If we directly
+// apply MCO on this chain, this chain will be seen as three separate matrix
+// multiplication chains: $(ABCX)^T$, $(DY)^T$ and $(JH)^T$, where
+// $X=(D(JH)^T)^T, Y=(JH)^T$. However,the optimisation result is not optimal. By
+// the property of transposition we know that expression $(ABC(D(JH)^T)^T)^T$ is
+// actually equivalent to $(ABCJHD^T)^T$. That means we need to unfold such
+// transposes before optimising matrix chains, which allows optimising longer
+// chains and thus getting more speed gains and reducing memory consumption.
 Status EinSumReduceSumConverter::TransposeSinker(
     std::stack<HloInstruction*> trans_stack) {
   std::string prefix = "[TransposeSinker] ";
@@ -695,6 +737,28 @@ Status EinSumReduceSumConverter::TransposeSinker(
   return Status::OK();
 }
 
+//  Einsum Converter
+//  Einsum(Einstein summation convention) is an elegant symbolic representation
+//  that sums elementwise products of the tensors involved in the operation on
+//  user-specified dimensions. For example, a matrix multiplication $AB$ can be
+//  expressed in einsum as $einsum('ik,kj \rightarrow ij', A, B)$. While einsum
+//  can be very convenient for users, allowing them to write more elegant
+//  algorithms, it can cause a lot of problems for matrix chain optimisation.
+//  Let $A \in R^{20 \times 30}, B \in R^{20 \times 40}, C \in R^{10 \times
+//  30}$. and consider an expression:
+//  $$
+//  reduce\_sum(einsum('ki,jk \rightarrow ij',einsum('ki,kj \rightarrow
+//  ij',A,B),C),axis=1)
+//  $$
+//  This expression is actually equivalent to $reduce\_sum((A^TB)^TC^T,axis=1)$.
+//  For a valid matrix multiplication chain, the contracting dimensions of
+//  neighbouring matrices must match, i.e. the number of columns of one matrix
+//  must be equal to the number of rows of the next matrix. This means that the
+//  valid matrix multiplication chain for this example is $B^TAC^T$. In order to
+//  be able to correctly optimise the chain of matrix multiplications expressed
+//  in einsums, we need to convert einsum into ordinary matrix multiplication
+//  and add the appropriate transpose operations.
+//  All of the above pre-processing are done in `EinSumReduceSumConverter`.
 Status EinSumReduceSumConverter::HandleDot(HloInstruction* dot) {
   std::string prefix = "[EinSumReduceSumConverter::HandleDot] ";
   HloInstruction *lhs, *rhs;
@@ -857,6 +921,32 @@ bool EinSumReduceSumConverter::IsReduceSumDot(const HloInstruction* reduce) {
              reduce->name() + " is reduce_sum");
   return true;
 }
+
+// Reducesum Converter
+// reduce_sum is also an extremely common operator. The function of this
+// operator is to sum all the elements of the specified dimension on the
+// operand. If the operand of reduce_sum is a two-dimensional matrix, this
+// operation can actually be seen as a multiplication of that matrix with a
+// vector whose elements are all 1s. Suppose there is a matrix $M \in R^{m
+// \times n}$. We can perform the reduce_sum operation on both dimensions of the
+// matrix. The operations in each of these two dimensions are equal to the
+// following matrix-vector multiplications respectively:
+// $$
+//  reduce\_sum(M,0) = M^Tv
+//  \\reduce\_sum(M,1) = Mv
+// $$
+// So if we can convert these *reducesum*s, which are equivalent to
+// matrix-vector multiplications, into their corresponding matrix-vector
+// multiplications, our optimisation algorithm can optimise more and longer
+// matrix multiplication chains. Of course, in order not to affect the
+// processing of reducesum by other eXLA optimisers, we also need to convert the
+// matrix vector multiplication from reducesum back to the corresponding
+// reducesum operation after performing matrix chain optimisation. For example,
+// if we want to calculate $reduce\_sum(ABC,axis=1)$,where  $A \in R^{40 \times
+// 20}, B \in R^{20 \times 30}, C \in R^{30 \times 10}$. By transforming
+// reducesum into matrix vector multiplication, completing matrix chain
+// optimisation and recovering reducesum, we can obtain the following equation:
+// $reduce\_sum(ABC,axis=1) = ABCv = A(B(Cv))=A(B\cdot reduce\_sum(C,axis=1))$.
 
 Status EinSumReduceSumConverter::HandleReduce(HloInstruction* reduce) {
   if (!IsReduceSumDot(reduce)) {
