@@ -1,4 +1,13 @@
 // License TODO ....
+
+// For each subgraph in a computational graph that can be split, eXLA will split
+// the subgraph and create a while loop for it to replace the subgraph. In many
+// cases, two subgraphs may have a large portion of common paths, but these two
+// subgraphs are split and replaced with two different while loops, resulting in
+// the common paths being computed multiple times. In order to merge those
+// while-loops that can be merged, aiming at speeding up memory-optimised
+// algorithms while maintaining the memory benefits of eXLA-v1.
+
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
 
 #include <stdlib.h>
@@ -154,6 +163,26 @@ class SplitDeterminer : public DfsHloRewriteVisitor {
   int64_t target_split_size;
 };
 
+// In eXLA-v1, the splitting is completed during a traversal of a computational
+// graph, but in order to merge the subgraphs that can be merged after the
+// splitting, we need to divide the original splitting process into three
+// stages: record the paths that need to be split, assign while-loops, perform
+// splitting and replacing. The general recording process is similar to what
+// eXLA-v1 does. Every time we meet a node that need to be split during
+// traversing, we then calculate all the dimensions in which this node can be
+// split, i.e. split_dim and its corresponding split_size, and then for each
+// split_dim, record its split_path on that dimension. For each node in a
+// split_path, we need to record its original node and its split_size and
+// split_dim in the path. Also for each split_dim, we need to mark whether it is
+// a contracting/reduce dimension,, which will be eliminated in the operation
+// and not retained in the resulting dimension. As this affects whether the two
+// paths can be merged, which will be discussed in detail in subsequent
+// sections. A split_path terminates in a number of split_leaves. Four types of
+// nodes may be used as a split_leaf in eXLA-v1: dot, broadcast, iota, and
+// parameter. The first three types of nodes can be considered split_leaves if
+// they accept a small tensor as input, but output a very large tensor. eXLA-v2
+// continues to use these as split_leaves.
+
 // a visitor which records all splittable paths and decides how to merge paths
 class SplittablePathRecorder : public SplitDeterminer {
  public:
@@ -185,7 +214,6 @@ class SplittablePathRecorder : public SplitDeterminer {
   Status HandleReduce(HloInstruction* reduce) override;
 
   Status HandleSort(HloInstruction* sort) override;
-
 
   // Decide how to merge paths and allocate while_loop num to each path
   // Can only be called after recording all paths
@@ -232,7 +260,8 @@ class SplittablePathRecorder : public SplitDeterminer {
       SplitNodeKey first_key, SplitNodeKey second_key,
       const std::vector<size_t>& first_path_indices,
       const std::vector<size_t>& second_path_indices);
-  // if the leaf_dot/leaf_broadcast's operand is another while-loop, record the information
+  // if the leaf_dot/leaf_broadcast's operand is another while-loop, record the
+  // information
   Status FinishRecordLeafDot(SplitNodeKey path_key, int64_t path_index,
                              HloInstruction* dot, int64_t split_dim,
                              int64_t split_size);
@@ -296,6 +325,9 @@ class SplittablePathRecorder : public SplitDeterminer {
   float lcs_merge_threshold;
 };
 
+// This phase is similar to eXLA-v1 but will use the recorded paths and
+// while-loop information to perform splitting and add split nodes to allocated
+// while-loops.
 // perform real splitting and create while_loops
 class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
  public:
@@ -1890,6 +1922,15 @@ bool SplittablePathRecorder::ShouldMerge(int64_t lcs_len,
          float(lcs_len) / float(second_path_len) > lcs_merge_threshold;
 }
 
+// For two Reducers that are not merged and the sum of their result sizes does
+// not exceed the memory limit, the length of the longest common subsequence of
+// the two Reducer is calculated, i.e. the length of their longest common path.
+// Since multiple split paths are recorded for each Reducer, we need to traverse
+// all their path combinations and try to find all the paths that have the
+// longest common path. When computing the common path of two paths, a node is
+// considered to be the common node of both paths if and only if they would be
+// split from the same node of the original computational graph with the same
+// split_dim and split_size.
 int64_t SplittablePathRecorder::LCS(
     const std::vector<SplitNodeVal>& first_path,
     const std::vector<SplitNodeVal>& second_path) {
@@ -1939,6 +1980,54 @@ Status SplittablePathRecorder::RecordUnmergableWhileLoops(int64_t first_num,
   while_loop_num_to_unmegerable_while_loop_num[second_num].insert(first_num);
   return Status::OK();
 }
+
+// We will then try to merge the two while-loops of two Reducers using the paths
+// with the longest common path identified by the LCS algorithm. When we want to
+// merge the while-loops where two Reducers are located, there are various cases
+// of dependencies between them and the split_paths they use.
+// 1. Two Reducers don't have any dependency relationship. In this case the two
+// Reducers can be merged into a single while-loop.
+// 2. There is a dependency between the two Reducer, assuming that Reducer_1
+// depends on Reducer_2 and Reducer_2 is not on the split_path of Reducer_1. In
+// this case although the two Reducers have a part of common split_path that can
+// be merged, they cannot be merged because the computation of Reducer_1 depends
+// on the final result of Reducer_2.
+// 3. There is a dependency between the two Reducer, assuming that Reducer_1
+// depends on Reducer_2 and Reducer_2 is on the split_path of Reducer_1 . If the
+// split_dim of Reducer_2 is a non-contracting/non-reduce dimension, then it
+// means that the result of Reducer_2 calculated in each iteration will be part
+// of the final result of Reducer_2, and therefore this part of the result can
+// be used to calculate the result of Reducer_1 in each iteration, and the two
+// Reducers can be merged; however, if the split_dim of Reducer_2 is a
+// contracting/reduce dimension, then this means that the result computed by
+// each iteration of Reducer_2 is not part of the final result of Reducer_2 and
+// cannot be used in the computation of Reducer_1, so the two Reducers cannot be
+// merged.
+
+// There are another special case we must handle when performing merging.
+// Assume that there are 4 Reducers on the graph, both Reducer_2 and Reducer_4
+// have two split_paths with split_dim=1 and split_dim=2. Reducer_1 has only one
+// split_path with split_dim=1 and Reducer_1 has only one split_path with
+// split_dim=2 path. This means that we have a total of 4 merge options and they
+// will all end up with two while-loops, but one of them causes problems, namely
+// merging Reducer_1 and Reducer_4 into one loop using split_path with
+// split_dim=1 and merging Reducer_3 and Reducer_2 into a while-loop with
+// split_path=1 using split_path with split_dim=2 into another while-loop. This
+// case is shown on the right hand side graph. In this case since the
+// computation of Reducer_1 needs to use the results of Reducer_2 and the
+// computation of Reducer_3 needs to use the results of Reducer_4, this leads to
+// an interdependence between these two while-loops and introduces a loop in the
+// computational graph, whereas a reasonable computational graph must be a
+// directed acyclic graph. To avoid cycles, we need to introduce a rule when
+// trying to merge two while-loops in which the Reducers are located. That is,
+// if the split_paths we are trying to merge contain other Reducers that are not
+// in the two while-loops, the merge is abandoned. With this rule in place, the
+// merging algorithm will merge Reducers that are in the same dependency chain
+// before attempting to merge with other Reducers that do not have dependencies.
+
+// When we try to merge two while-loops, if all Reducers in the two while-loops
+// doesn't offend any dependency relationship and doesn't cause any cycles, the
+// two while-loops would be merged.
 
 Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
     SplitNodeKey first_key, SplitNodeKey second_key,
@@ -2336,6 +2425,17 @@ Status SplittablePathRecorder::InitWhileLoops() {
   return Status::OK();
 }
 
+// After all the paths to be split have been recorded in the previous phase, the
+// purpose of this phase is to try to merge the subgraphs that can be merged
+// represented by these paths. Algorithm AllocateWhileLoops is an overview of
+// the merging process. The first step is to assign a separate while-loop to
+// each Reducer, then iterate through all the Reducer combinations in pairs,
+// using the LCS(Longest Common Subsequence) algorithm to find the common path
+// length of the two Reducers, and if this length is greater than a
+// predetermined threshold, try to merge the loops in which the two Reducers are
+// located. However, not all Reducers with a common path can be merged, and the
+// merging process requires a lot of dependency analysis.
+
 Status SplittablePathRecorder::AllocateWhileLoops() {
   std::string prefix = "[AllocateWhileLoops] ";
   // first init all starting_node with a unique while_loop
@@ -2400,7 +2500,6 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
                                    best_lcs_path_indices_second);
     }
   }
-
 
   RecordInstructionsInWhileLoop();
   LOG(INFO) << prefix << "Finish AllocateWhileLoops";
