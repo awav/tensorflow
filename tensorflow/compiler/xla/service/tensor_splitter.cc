@@ -242,6 +242,12 @@ bool TensorSplitterRewriteVisitor::OperandCanBeSplit(
            i < original_dimensions->size(); i++) {
         exclude_dimensions->push_back((*original_dimensions)[i]);
       }
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[dnums.lhs_batch_dimensions(i)]);
+      }
       // Make a dimensions which is only for the lhs
       std::vector<int64_t> lhs_original_dims;
       int64_t lhs_cdim =
@@ -267,6 +273,13 @@ bool TensorSplitterRewriteVisitor::OperandCanBeSplit(
       for (int64_t i = 0; i < lhs->shape().dimensions_size() - 1; i++) {
         exclude_dimensions->push_back((*original_dimensions)[i]);
       }
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      int64_t offset = lhs->shape().dimensions_size() - 1;
+      for (int64_t i = 0; i < dnums.rhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)]);
+      }
       // Make a dimensions which is only for the rhs
       std::vector<int64_t> rhs_original_dims;
       int64_t rhs_cdim =
@@ -291,6 +304,18 @@ bool TensorSplitterRewriteVisitor::OperandCanBeSplit(
       msg << ", dot base case;";
       LOG(INFO) << msg.str();
       // Base case: A Dot produces this large intermediate tensor
+
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[dnums.lhs_batch_dimensions(i)]);
+      }
+      int64_t offset = lhs->shape().dimensions_size() - 1;
+      for (int64_t i = 0; i < dnums.rhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)]);
+      }
       if (split_leafs != nullptr) {
         split_leafs->push_back(inst);
       }
@@ -1439,6 +1464,11 @@ Status TensorSplitterRewriteVisitor::HandleDot(HloInstruction* dot) {
     //
     bool split_is_lhs = can_split_lhs;
     HloInstruction* split_inst = split_is_lhs ? lhs : rhs;
+    // exclude batch_dimension
+    for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+      exclude_dims_lhs.push_back(dnums.lhs_batch_dimensions(i));
+      exclude_dims_rhs.push_back(dnums.rhs_batch_dimensions(i));
+    }
     int64_t split_dim = BestSplitDim(
         split_inst,
         absl::MakeSpan(split_is_lhs ? exclude_dims_lhs : exclude_dims_rhs));
