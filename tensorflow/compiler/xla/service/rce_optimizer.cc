@@ -204,8 +204,8 @@ Status RceOptimizerVisitor::HandleReduce(HloInstruction* reduce) {
     // ss << "\n";
 
     std::stringstream ss;
-    auto operand_shape = op->operand(0)->shape();
-    auto reshape_shape = op->shape();
+    auto operand_shape = op->shape();
+    auto reshape_shape = reshape->shape();
     auto reduce_shape = reduce->shape();
     std::vector<int64_t> input_indices(operand_shape.dimensions_size());
     absl::c_iota(input_indices, 0);
