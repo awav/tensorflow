@@ -745,6 +745,16 @@ bool SplitDeterminer::OperandCanBeSplit(
            i < original_dimensions->size(); i++) {
         exclude_dimensions->push_back((*original_dimensions)[i]);
       }
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[dnums.lhs_batch_dimensions(i)]);
+        LOG(INFO) << "\n ----< [OperandCanBeSplit]  HandleDot for '"
+                  << inst->name() << " skip lhs.batch_dimension="
+                  << dnums.lhs_batch_dimensions(i) << " orig_dim = "
+                  << (*original_dimensions)[dnums.lhs_batch_dimensions(i)];
+      }
       // Make a dimensions which is only for the lhs
       std::vector<int64_t> lhs_original_dims;
       int64_t lhs_cdim =
@@ -770,6 +780,19 @@ bool SplitDeterminer::OperandCanBeSplit(
       for (int64_t i = 0; i < lhs->shape().dimensions_size() - 1; i++) {
         exclude_dimensions->push_back((*original_dimensions)[i]);
       }
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      int64_t offset = lhs->shape().dimensions_size() - 1;
+      for (int64_t i = 0; i < dnums.rhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)]);
+        LOG(INFO)
+            << "\n ----< [OperandCanBeSplit]  HandleDot for '" << inst->name()
+            << " skip rhs.batch_dimension=" << dnums.rhs_batch_dimensions(i)
+            << " orig_dim = "
+            << (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)];
+      }
+
       // Make a dimensions which is only for the rhs
       std::vector<int64_t> rhs_original_dims;
       int64_t rhs_cdim =
@@ -794,6 +817,27 @@ bool SplitDeterminer::OperandCanBeSplit(
       msg << ", dot base case;";
       LOG(INFO) << msg.str();
       // Base case: A Dot produces this large intermediate tensor
+
+      // exclude batch dimensions
+      auto& dnums = inst->dot_dimension_numbers();
+      for (int64_t i = 0; i < dnums.lhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[dnums.lhs_batch_dimensions(i)]);
+        LOG(INFO) << "\n ----< [OperandCanBeSplit]  HandleDot for '"
+                  << inst->name() << " skip lhs.batch_dimension="
+                  << dnums.lhs_batch_dimensions(i) << " orig_dim = "
+                  << (*original_dimensions)[dnums.lhs_batch_dimensions(i)];
+      }
+      int64_t offset = lhs->shape().dimensions_size() - 1;
+      for (int64_t i = 0; i < dnums.rhs_batch_dimensions_size(); ++i) {
+        exclude_dimensions->push_back(
+            (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)]);
+        LOG(INFO)
+            << "\n ----< [OperandCanBeSplit]  HandleDot for '" << inst->name()
+            << " skip rhs.batch_dimension=" << dnums.rhs_batch_dimensions(i)
+            << " orig_dim = "
+            << (*original_dimensions)[offset + dnums.rhs_batch_dimensions(i)];
+      }
       if (split_leafs != nullptr) {
         split_leafs->push_back(inst);
       }
@@ -2046,14 +2090,17 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
        while_loop_num_to_start_node[orig_second_while_loop_num]) {
     descendant_start_nodes.insert(second_start_node_key);
   }
+  CHECK(first_path_indices.size() == second_path_indices.size());
   std::vector<size_t> selected_first_path_indices;
   std::vector<size_t> selected_second_path_indices;
-  for (size_t index : first_path_indices) {
+  for (int i = 0; i < first_path_indices.size(); ++i) {
     bool can_use = true;
+    int64_t first_index = first_path_indices[i];
+    int64_t second_index = second_path_indices[i];
     for (auto first_start_node_key :
          while_loop_num_to_start_node[orig_first_while_loop_num]) {
       for (auto val :
-           start_node_to_splittable_paths[first_start_node_key][index]) {
+           start_node_to_splittable_paths[first_start_node_key][first_index]) {
         HloInstruction* cur_inst = std::get<0>(val);
         SplitNodeKey cur_key = MakeSplitNodeKey(cur_inst);
         if (start_node_set.contains(cur_key) &&
@@ -2062,9 +2109,9 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
           LOG(INFO) << prefix << " while_loop_" << orig_first_while_loop_num
                     << " cur_start_node="
                     << start_node_to_start_inst[first_start_node_key]->name()
-                    << " cur_path_index=" << index
+                    << " cur_path_index=" << first_index
                     << " contain unmerged start_node.name=" << cur_inst->name()
-                    << " skip cur_index=" << index;
+                    << " skip cur_index=" << first_index;
           break;
         }
       }
@@ -2072,8 +2119,8 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
     }
     for (auto second_start_node_key :
          while_loop_num_to_start_node[orig_second_while_loop_num]) {
-      for (auto val :
-           start_node_to_splittable_paths[second_start_node_key][index]) {
+      for (auto val : start_node_to_splittable_paths[second_start_node_key]
+                                                    [second_index]) {
         HloInstruction* cur_inst = std::get<0>(val);
         SplitNodeKey cur_key = MakeSplitNodeKey(cur_inst);
         if (start_node_set.contains(cur_key) &&
@@ -2082,17 +2129,17 @@ Status SplittablePathRecorder::TryMergableRelativeWhileLoop(
           LOG(INFO) << prefix << " while_loop_" << orig_second_while_loop_num
                     << " cur_start_node="
                     << start_node_to_start_inst[second_start_node_key]->name()
-                    << " cur_path_index=" << index
+                    << " cur_path_index=" << second_index
                     << " contain unmerged start_node.name=" << cur_inst->name()
-                    << " skip cur_index=" << index;
+                    << " skip cur_index=" << second_index;
           break;
         }
       }
       if (!can_use) break;
     }
     if (can_use) {
-      selected_first_path_indices.push_back(index);
-      selected_second_path_indices.push_back(index);
+      selected_first_path_indices.push_back(first_index);
+      selected_second_path_indices.push_back(second_index);
     }
   }
   if (selected_first_path_indices.empty()) {
@@ -2465,7 +2512,7 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
         continue;
       }
       const auto& first_paths = start_node_to_splittable_paths[first_key];
-      const auto& second_paths = start_node_to_splittable_paths[first_key];
+      const auto& second_paths = start_node_to_splittable_paths[second_key];
       int64_t best_lcs_len = 0;
       std::vector<size_t> best_lcs_path_indices_first = {};
       std::vector<size_t> best_lcs_path_indices_second = {};
