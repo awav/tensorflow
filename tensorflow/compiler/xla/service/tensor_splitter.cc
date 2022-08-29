@@ -2496,7 +2496,7 @@ Status TensorSplitterRewriteVisitor::HandleSort(HloInstruction* sort) {
   return Status::OK();
 }
 
-bool endsWith(const string& str, string pattern) {
+bool endsWith(const std::string& str, std::string pattern) {
   if (pattern.size() > str.size()) return false;
   for (int i = 1; i <= pattern.size(); i++) {
     if (pattern[pattern.size() - i] != str[str.size() - i]) return false;
@@ -2517,7 +2517,7 @@ std::tuple<int64_t, int64_t> TensorSplitter::SplitSettings() {
   return std::make_tuple(size_threshold, split_size);
 }
 
-int64_t TensorSplitter::TensorBytes(const string& option) {
+int64_t TensorSplitter::TensorBytes(const std::string& option) {
   int64_t raw = (int64_t)atoi(option.c_str());
   if (raw <= 0) {
     return 134217728;  // 1 GiB
