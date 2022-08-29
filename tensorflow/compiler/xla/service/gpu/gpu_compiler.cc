@@ -126,6 +126,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_sharding_metadata.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
 #include "tensorflow/compiler/xla/service/reshape_sinker.h"
@@ -347,6 +348,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     // pipeline.AddPass<AlgebraicRewriter>();
+    pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<HloPassFix<ReshapeSinker>>();
     // ReshapeSinker may introduce new redundant reshape chain 

@@ -109,6 +109,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_proto_util.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/indexed_array_analysis.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
@@ -334,6 +335,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<HloPassFix<RceOptimizer>>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloMCO>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<HloPassFix<ReshapeSinker>>();
   // ReshapeSinker may introduce new redundant reshape chain 

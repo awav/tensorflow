@@ -1688,6 +1688,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:hlo_proto_util",
         "//tensorflow/compiler/xla/service:hlo_subcomputation_unification",
         "//tensorflow/compiler/xla/service:hlo_verifier",
+        "//tensorflow/compiler/xla/service:hlo_mco",
         "//tensorflow/compiler/xla/service:tensor_splitter",
         "//tensorflow/compiler/xla/service:tensor_splitter_v2",
         "//tensorflow/compiler/xla/service:broadcast_simplifier",

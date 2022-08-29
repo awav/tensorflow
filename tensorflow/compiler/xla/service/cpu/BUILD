@@ -244,6 +244,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:hlo_memory_scheduler",
         "//tensorflow/compiler/xla/service:hlo_subcomputation_unification",
         "//tensorflow/compiler/xla/service:hlo_verifier",
+        "//tensorflow/compiler/xla/service:hlo_mco",
         "//tensorflow/compiler/xla/service:indexed_array_analysis",
         "//tensorflow/compiler/xla/service:llvm_compiler",
         "//tensorflow/compiler/xla/service:gather_expander",
