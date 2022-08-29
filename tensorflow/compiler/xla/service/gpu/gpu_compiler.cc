@@ -128,6 +128,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/reshape_sinker.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
 #include "tensorflow/compiler/xla/service/loop_schedule_linearizer.h"
@@ -347,6 +348,9 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     // pipeline.AddPass<AlgebraicRewriter>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+    // ReshapeSinker may introduce new redundant reshape chain 
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<TensorSplitter>();
     pipeline.AddPass<TensorSplitterV2>();
     pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
