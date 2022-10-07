@@ -8,7 +8,16 @@
 
 namespace xla {
 
-// Sink reshape for furthur optimisation
+// The role of reshape-sinker is to sink the reshape operations in a
+// computational graph below dot operations, allowing the tensor-splitter to
+// split more subgraphs.
+// For example:
+//  [2,3,5]           [5,4]               [2,3,5]      [5,4]
+//     |                /                     \         /
+//   reshape(6,5)      /          ->           dot([2,3,5])
+//          \         /                             |
+//            dot([6,5])                        reshape([6,5])
+
 class ReshapeSinker : public HloModulePass {
  public:
   absl::string_view name() const override { return "reshape-sinker"; }
