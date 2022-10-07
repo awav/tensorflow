@@ -3419,7 +3419,8 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
           TF_RETURN_IF_ERROR(ReplaceInstruction(orig_inst, full_result));
         }
       }
-    } else if (orig_inst->opcode() == HloOpcode::kReduce) {
+    } else if (orig_inst->opcode() == HloOpcode::kReduce ||
+               orig_inst->opcode() == HloOpcode::kGetTupleElement) {
       if (sub_info.split_rest == 0) {
         TF_RETURN_IF_ERROR(ReplaceInstruction(orig_inst, result));
         LOG(INFO) << prefix << " Replace "
@@ -4504,7 +4505,7 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
     std::vector<HloInstruction*> empty_leafs;
 
     while_loop_num_to_info[while_loop_num].AddSubOutput(SubOutputInfo(
-        output_index, reduce, split_dim, empty_id_shapes, empty_leafs,
+        output_index, old_output, split_dim, empty_id_shapes, empty_leafs,
         split_rest, rest_output_idx, false, split_along_reduce_dim));
     while_loop_num_to_processed_count[while_loop_num] += 1;
     ss << "\n <---- Exit HandleReduce for '" << old_output->name()
@@ -4518,7 +4519,7 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
   std::vector<HloInstruction*> empty_leafs;
   while_loop_num_to_info[while_loop_num].AddSubOutput(
-      SubOutputInfo(output_index, reduce, split_dim, empty_id_shapes,
+      SubOutputInfo(output_index, old_output, split_dim, empty_id_shapes,
                     empty_leafs, 0, -1, false, split_along_reduce_dim));
   while_loop_num_to_processed_count[while_loop_num] += 1;
   ss << "\n <---- Exit HandleReduce for '" << old_output->name() << "' SUCCESS";
