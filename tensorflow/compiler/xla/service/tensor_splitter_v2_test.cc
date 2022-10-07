@@ -3,48 +3,18 @@
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
 
 #include "tensorflow/compiler/xla/debug_options_flags.h"
+#include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
+#include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
-#include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
-#include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/path.h"
 
 namespace xla {
 namespace {
-
-std::string splitter_dir =
-    "/vol/bitbucket/ya321/codes/MscProject/test_output/tensor_splitter_v2";
-
-void DumpToFileInDirImpl(std::string dir, std::string filename,
-                         std::string contents) {
-  // const string& dir = opts.dump_to;
-  std::cout << "Dumping " << filename << " to " << dir;
-
-  tensorflow::Env* env = tensorflow::Env::Default();
-  // Two threads can race to observe the absence of the dump directory and
-  // simultaneously try to create it, causing the "losing" thread to get a
-  // "directory already exists" error.  We can work around this by checking
-  // again whether the dir exists.
-  if (!env->IsDirectory(dir).ok()) {
-    auto status = env->RecursivelyCreateDir(dir);
-    if (!status.ok() && !env->IsDirectory(dir).ok()) {
-      LOG(ERROR) << "Could not create directory " << dir
-                 << " for dumping XLA debug data: " << status;
-      return;
-    }
-  }
-
-  string file_path = tensorflow::io::JoinPath(dir, SanitizeFileName(filename));
-  auto status = tensorflow::WriteStringToFile(env, file_path, contents);
-  if (!status.ok()) {
-    LOG(ERROR) << "Could not write XLA debug data to " << file_path << ": "
-               << status;
-  }
-}
 
 namespace m = match;
 
@@ -69,7 +39,8 @@ class TensorSplitterV2Test : public HloTestBase {
     return max_size() < max_op_bytes_in_graph(inst);
   }
 
-  string replace_all_in_string(string original, string find, string replace) {
+  std::string replace_all_in_string(std::string original, std::string find,
+                                    std::string replace) {
     int len = find.length();
     size_t index = 0;
     while (true) {
@@ -80,52 +51,17 @@ class TensorSplitterV2Test : public HloTestBase {
     }
     return original;
   }
-};
 
-// Test multi argument reduce (e.g. argmax)
-TEST_F(TensorSplitterV2Test, BasicCaseLhsAfter) {
-  const string module_str = R"(
-HloModule BasicCaseLhsAfter
-
-ENTRY %BasicCaseLhs (a: f32[83333333,2], b: f32[83333333,2], v: f32[83333333]) -> f32[83333333] {
-  %constant = s64[] constant(0)
-  %a = f32[83333333,2]{1,0} parameter(0)
-  %b = f32[83333333,2]{1,0} parameter(1)
-  %v = f32[83333333]{0} parameter(2)
-  %constant.1 = f32[] constant(0)
-  %broadcast = f32[83333333]{0} broadcast(f32[] %constant.1), dimensions={}
-  %tuple = (s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) tuple(s64[] %constant, f32[83333333,2]{1,0} %a, f32[83333333,2]{1,0} %b, f32[83333333]{0} %v, f32[83333333]{0} %broadcast)
-  %tuple.3 = ((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) tuple((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) %tuple)
-  %while = ((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) while(((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) %tuple.3), condition=%tensor_splitter_dot_cond, body=%merged_while_loop_0
-  %get-tuple-element.9 = (s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) get-tuple-element(((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0})) %while), index=0
-  ROOT %get-tuple-element.10 = f32[83333333]{0} get-tuple-element((s64[], f32[83333333,2]{1,0}, f32[83333333,2]{1,0}, f32[83333333]{0}, f32[83333333]{0}) %get-tuple-element.9), index=4
-}
-
-)";
-
-  string module_with_big_dims = replace_all_in_string(
-      module_str, "1000", std::to_string(large_dim() / 1000));
-
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(module_with_big_dims));
-
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph = RenderGraph(
-        *module->entry_computation(),
-        /*label=*/filename, module->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
+  const int64_t comp_loop_count(HloComputation* comp) {
+    int64_t count = 0;
+    for (HloInstruction* inst : comp->instructions()) {
+      if (inst->opcode() == HloOpcode::kWhile) {
+        count++;
+      }
     }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %s\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
-}
+    return count;
+  }
+};
 
 // Test the most basic case: exp(AB^T)v
 TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
@@ -161,22 +97,6 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
@@ -187,12 +107,6 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test the most basic rhs case: exp(AB^T)v
@@ -229,22 +143,6 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
@@ -255,12 +153,6 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Self dot: outer-product -> inner-product
@@ -294,22 +186,6 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))),
                            m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
@@ -320,12 +196,6 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test the case where the to split dimension lies on the
@@ -363,22 +233,6 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(
       computation->root_instruction(),
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
@@ -389,12 +243,6 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test broadcast instructions as source
@@ -424,22 +272,6 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
@@ -449,12 +281,6 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test broadcast instructions as source when split dim
@@ -485,22 +311,6 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
@@ -510,12 +320,6 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test iota with iota dimension along split
@@ -539,22 +343,6 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
@@ -564,12 +352,6 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test iota with non-iota dimension along split
@@ -593,22 +375,6 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
@@ -618,12 +384,6 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test single argument reduce (e.g. max)
@@ -654,22 +414,6 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
 
   HloComputation* computation = m->AddEntryComputation(builder.Build());
 
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph =
-        RenderGraph(*m->entry_computation(),
-                    /*label=*/filename, m->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
-
   EXPECT_TRUE(Match(computation->root_instruction(),
                     m::Reduce(m::Op().Is(a), m::Op().Is(init))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
@@ -679,17 +423,11 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
-
-  printf("After opotimization:\n %s\n", m->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test multi argument reduce (e.g. argmax)
 TEST_F(TensorSplitterV2Test, MultiOperandReduce) {
-  const string module_str = R"(
+  const std::string module_str = R"(
 HloModule a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.35
 
 %minmax_func.17 (lhs_value.18: f32[], lhs_index.19: s32[], rhs_value.20: f32[], rhs_index.21: s32[]) -> (f32[], s32[]) {
@@ -732,27 +470,11 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 }
 )";
 
-  string module_with_big_dims = replace_all_in_string(
+  std::string module_with_big_dims = replace_all_in_string(
       module_str, "1000", std::to_string(large_dim() / 1000));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));
-
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph = RenderGraph(
-        *module->entry_computation(),
-        /*label=*/filename, module->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 
   HloComputation* entry = module->entry_computation();
 
@@ -763,17 +485,11 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(entry->root_instruction()));
-
-  printf("After opotimization:\n %f\n", module->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test nested reduce
 TEST_F(TensorSplitterV2Test, NestedReduce) {
-  const string module_str = R"(
+  const std::string module_str = R"(
 HloModule a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.34
 
 %Sum-reduction.22 (x.23: f32[], y.24: f32[]) -> f32[] {
@@ -815,27 +531,11 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 }
 )";
 
-  string module_with_big_dims =
+  std::string module_with_big_dims =
       replace_all_in_string(module_str, "2000", std::to_string(large_dim()));
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_with_big_dims));
-
-  std::string filename = TestName() + "_before_opotimization";
-  // DebugOptions debug_options
-  auto render_graph = [&](RenderedGraphFormat format) {
-    StatusOr<string> rendered_graph = RenderGraph(
-        *module->entry_computation(),
-        /*label=*/filename, module->config().debug_options(), format);
-    if (rendered_graph.ok()) {
-      return std::move(rendered_graph).ValueOrDie();
-    }
-    return absl::StrFormat("Error rendering graph: %s",
-                           rendered_graph.status().ToString());
-  };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 
   HloComputation* entry = module->entry_computation();
 
@@ -846,13 +546,168 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
   EXPECT_TRUE(result);
 
   EXPECT_FALSE(graph_needs_split(entry->root_instruction()));
-
-  printf("After opotimization:\n %f\n", module->ToString().c_str());
-  filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
-  DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
-                      render_graph(RenderedGraphFormat::kDot));
 }
 
+// Test merge without dependency
+TEST_F(TensorSplitterV2Test, MergePathWithoutDependency) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+  HloInstruction* a =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
+  HloInstruction* b =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, b_shape, "b"));
+  HloInstruction* v =
+      builder.AddInstruction(HloInstruction::CreateParameter(2, v_shape, "v"));
+  HloInstruction* v2 =
+      builder.AddInstruction(HloInstruction::CreateParameter(3, v_shape, "v2"));
+
+  DotDimensionNumbers dnums_ab;
+  dnums_ab.add_lhs_contracting_dimensions(1);
+  dnums_ab.add_rhs_contracting_dimensions(1);
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
+      ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
+
+  HloInstruction* exp_ab = builder.AddInstruction(
+      HloInstruction::CreateUnary(ab_shape, HloOpcode::kExp, ab));
+
+  DotDimensionNumbers dnums_final;
+  dnums_final.add_lhs_contracting_dimensions(1);
+  dnums_final.add_rhs_contracting_dimensions(0);
+  Shape final_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+  HloInstruction* res1 = builder.AddInstruction(HloInstruction::CreateDot(
+      final_shape, exp_ab, v, dnums_final, DefaultPrecisionConfig(2)));
+  HloInstruction* res2 = builder.AddInstruction(HloInstruction::CreateDot(
+      final_shape, exp_ab, v2, dnums_final, DefaultPrecisionConfig(2)));
+  builder.AddInstruction(HloInstruction::CreateBinary(
+      final_shape, HloOpcode::kSubtract, res1, res2));
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
+
+  TensorSplitterV2 optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
+  EXPECT_EQ(1, comp_loop_count(computation));
+}
+
+// Test merge with unmergable dependency
+TEST_F(TensorSplitterV2Test, MergePathWitUnmergableDependency) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+  HloComputation::Builder max_builder(TestName() + ".max");
+
+  Shape empty_shape = ShapeUtil::MakeShape(F32, {});
+  HloInstruction* x = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, empty_shape, "x"));
+  HloInstruction* y = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(1, empty_shape, "y"));
+  max_builder.AddInstruction(
+      HloInstruction::CreateBinary(empty_shape, HloOpcode::kMaximum, x, y));
+  HloComputation* max = m->AddEmbeddedComputation(max_builder.Build());
+
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+  HloInstruction* a =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
+  HloInstruction* b =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, b_shape, "b"));
+
+  DotDimensionNumbers dnums_ab;
+  dnums_ab.add_lhs_contracting_dimensions(1);
+  dnums_ab.add_rhs_contracting_dimensions(1);
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
+      ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
+
+  HloInstruction* init = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0.0)));
+
+  Shape reduce_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+
+  HloInstruction* res1 = builder.AddInstruction(
+      HloInstruction::CreateReduce(reduce_shape, ab, init, {1}, max));
+  std::vector<int64_t> dims = {1};
+  HloInstruction* broadcast = builder.AddInstruction(
+      HloInstruction::CreateBroadcast(ab_shape, res1, absl::MakeSpan(dims)));
+  HloInstruction* res2 = builder.AddInstruction(
+      HloInstruction::CreateReduce(reduce_shape, broadcast, init, {1}, max));
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
+
+  TensorSplitterV2 optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
+  EXPECT_EQ(2, comp_loop_count(computation));
+}
+
+// Test merge with mergable dependency
+TEST_F(TensorSplitterV2Test, MergePathWitMergableDependency) {
+  auto m = CreateNewVerifiedModule();
+  HloComputation::Builder builder(TestName());
+  HloComputation::Builder max_builder(TestName() + ".max");
+
+  Shape empty_shape = ShapeUtil::MakeShape(F32, {});
+  HloInstruction* x = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, empty_shape, "x"));
+  HloInstruction* y = max_builder.AddInstruction(
+      HloInstruction::CreateParameter(1, empty_shape, "y"));
+  max_builder.AddInstruction(
+      HloInstruction::CreateBinary(empty_shape, HloOpcode::kMaximum, x, y));
+  HloComputation* max = m->AddEmbeddedComputation(max_builder.Build());
+
+  Shape a_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape b_shape = ShapeUtil::MakeShape(F32, {large_dim(), 2});
+  Shape v_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+  HloInstruction* a =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, a_shape, "a"));
+  HloInstruction* b =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, b_shape, "b"));
+  HloInstruction* v =
+      builder.AddInstruction(HloInstruction::CreateParameter(2, v_shape, "v"));
+
+  DotDimensionNumbers dnums_ab;
+  dnums_ab.add_lhs_contracting_dimensions(1);
+  dnums_ab.add_rhs_contracting_dimensions(1);
+  Shape ab_shape = ShapeUtil::MakeShape(F32, {large_dim(), large_dim()});
+  HloInstruction* ab = builder.AddInstruction(HloInstruction::CreateDot(
+      ab_shape, a, b, dnums_ab, DefaultPrecisionConfig(2)));
+
+  HloInstruction* init = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0.0)));
+
+  Shape res_shape = ShapeUtil::MakeShape(F32, {large_dim()});
+
+  HloInstruction* res1 = builder.AddInstruction(
+      HloInstruction::CreateReduce(res_shape, ab, init, {1}, max));
+  std::vector<int64_t> dims = {0};
+  HloInstruction* broadcast = builder.AddInstruction(
+      HloInstruction::CreateBroadcast(ab_shape, res1, absl::MakeSpan(dims)));
+  DotDimensionNumbers dnums_final;
+  dnums_final.add_lhs_contracting_dimensions(1);
+  dnums_final.add_rhs_contracting_dimensions(0);
+  HloInstruction* res2 = builder.AddInstruction(HloInstruction::CreateDot(
+      res_shape, broadcast, v, dnums_final, DefaultPrecisionConfig(2)));
+  HloComputation* computation = m->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
+
+  TensorSplitterV2 optim;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
+  EXPECT_TRUE(result);
+
+  EXPECT_FALSE(graph_needs_split(computation->root_instruction()));
+  EXPECT_EQ(1, comp_loop_count(computation));
+}
 }  // namespace
 }  // namespace xla
