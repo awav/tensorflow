@@ -115,6 +115,11 @@ void TestDelegation::SetUpSubgraph(Subgraph* subgraph) {
                                   &node_index_ignored);
 }
 
+void TestDelegation::AddSubgraphs(int subgraphs_to_add,
+                                  int* first_new_subgraph_index) {
+  interpreter_->AddSubgraphs(subgraphs_to_add, first_new_subgraph_index);
+}
+
 void TestDelegate::SetUp() {
   interpreter_.reset(new Interpreter);
   SetUpSubgraph(&interpreter_->primary_subgraph());
@@ -272,7 +277,10 @@ TfLiteRegistration SimpleDelegate::FakeFusedRegistration() {
     };
   } else {
     reg.invoke = [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
-      // Copy input data to output data.
+      // Compute output data as elementwise sum of the two input arguments:
+      //   func(x, y) = x + y
+      // or for a single argument compute 2 * x:
+      //   func(x) = x + x
       const TfLiteTensor* a0;
       const TfLiteTensor* a1;
       if (node->inputs->size == 2) {

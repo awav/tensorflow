@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_XLA_MLIR_HLO_TO_HLO_H_
 #define TENSORFLOW_COMPILER_MLIR_XLA_MLIR_HLO_TO_HLO_H_
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
@@ -40,6 +41,9 @@ struct MlirToHloConversionOptions {
   // backend config for the bitcast. This is required for XLA:GPU backend to
   // use elemental IR emitters for fused bitcasts without propagating layouts.
   bool propagate_bitcast_layouts_to_backend_config = false;
+
+  // Legalize names to be compatible with TensorFlow.
+  bool legalize_node_names = true;
 };
 
 // Converts a MLIR module in HLO dialect into a HloModuleProto. If

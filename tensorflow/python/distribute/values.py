@@ -38,6 +38,7 @@ from tensorflow.python.saved_model import save_context
 from tensorflow.python.training.saving import saveable_object
 from tensorflow.python.training.tracking import base as trackable
 from tensorflow.python.types import core
+from tensorflow.python.types import trace
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -421,6 +422,30 @@ class PerReplica(DistributedValues, composite_tensor.CompositeTensor):
     return self._values
 
 
+def _per_replica_to_tensor(var, dtype=None, name=None, as_ref=False):
+  """Converts a `PerReplica` to a `Tensor`."""
+  del name
+  if dtype is not None and not dtype.is_compatible_with(var.dtype):
+    raise ValueError(
+        "Incompatible type conversion requested to type {!r} for variable "
+        "of type {!r}".format(dtype.name, var.dtype.name))
+  if as_ref:
+    raise NotImplementedError(
+        "PerReplica doesn't support being used as a reference.")
+  if ds_context.in_cross_replica_context() or not ds_context.has_strategy():
+    raise ValueError("It looks like you are using a PerReplica object while "
+                     "not inside a replica context, which is not supported. "
+                     "Try running your op or function inside a replica context "
+                     "by using `strategy.run`")
+  else:
+    replica_id = values_util.get_current_replica_id_as_int()
+    return var.values[replica_id]
+
+# Register a conversion function to provide a useful error message when users
+# try to use PerReplica values in the wrong contexts
+ops.register_tensor_conversion_function(PerReplica, _per_replica_to_tensor)
+
+
 class PerReplicaSpec(type_spec.TypeSpec):
   """Type specification for a `PerReplica`."""
 
@@ -484,6 +509,34 @@ class DistributedVarOp(object):
 
   def __hash__(self):
     return hash((self.name, self.graph, tuple(self.traceback), self.type))
+
+
+# TODO(b/209081027): Remove this once Variable is a CompositeTensor.
+class DistributedVariableTraceType(trace.TraceType):
+  """TraceType of DistributedVariable objects."""
+
+  def __init__(self, distributed_variable):
+    self.distributed_variable = distributed_variable
+    self.components = (tuple(distributed_variable.shape.as_list()),
+                       distributed_variable.dtype)
+
+  def is_subtype_of(self, other):
+    return self == other
+
+  def most_specific_common_supertype(self, others):
+    return self if all(self == other for other in others) else None
+
+  def _placeholder_value(self):
+    return self.distributed_variable
+
+  def __hash__(self) -> int:
+    return hash(self.components)
+
+  def __eq__(self, other) -> bool:
+    if not isinstance(other, DistributedVariableTraceType):
+      return False
+
+    return self.components == other.components
 
 
 class DistributedVariable(DistributedDelegate, variables_lib.Variable,
@@ -878,6 +931,9 @@ class DistributedVariable(DistributedDelegate, variables_lib.Variable,
     return values_util.scatter_update(
         self, sparse_delta, use_locking=use_locking, name=name)
 
+  def __tf_tracing_type__(self, _):
+    return DistributedVariableTraceType(self)
+
   def _gather_saveables_for_checkpoint(self):
     """Overrides Trackable method.
 
@@ -1044,6 +1100,15 @@ class DistributedVariable(DistributedDelegate, variables_lib.Variable,
     if self._policy:
       if self._policy._is_mirrored():  # pylint: disable=protected-access
         self._policy._write_object_proto(self, proto, options)  # pylint: disable=protected-access
+
+  @property
+  def is_distributed_variable(self):
+    return True
+
+  def __tf_experimental_restore_capture__(
+      self, concrete_function, internal_capture):
+    concrete_function.graph.capture_distributed_variable(self, internal_capture)
+    return self
 
 
 # We extend from `saveable_object.SaveableObject` instead of

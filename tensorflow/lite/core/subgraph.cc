@@ -690,27 +690,6 @@ TfLiteStatus Subgraph::CheckInputAndOutputForOverlap(const int* input_indices,
   return kTfLiteOk;
 }
 
-namespace {
-// Multiply two sizes and return true if overflow occurred;
-// This is based off tensorflow/overflow.h but is simpler as we already
-// have unsigned numbers. It is also generalized to work where sizeof(size_t)
-// is not 8.
-TfLiteStatus MultiplyAndCheckOverflow(size_t a, size_t b, size_t* product) {
-  // Multiplying a * b where a and b are size_t cannot result in overflow in a
-  // size_t accumulator if both numbers have no non-zero bits in their upper
-  // half.
-  constexpr size_t size_t_bits = 8 * sizeof(size_t);
-  constexpr size_t overflow_upper_half_bit_position = size_t_bits / 2;
-  *product = a * b;
-  // If neither integers have non-zero bits past 32 bits can't overflow.
-  // Otherwise check using slow devision.
-  if (TFLITE_EXPECT_FALSE((a | b) >> overflow_upper_half_bit_position != 0)) {
-    if (a != 0 && *product / a != b) return kTfLiteError;
-  }
-  return kTfLiteOk;
-}
-}  // namespace
-
 TfLiteStatus Subgraph::BytesRequired(TfLiteType type, const int* dims,
                                      size_t dims_size, size_t* bytes) {
   TF_LITE_ENSURE(&context_, bytes != nullptr);
@@ -783,6 +762,10 @@ TfLiteStatus Subgraph::AllocateTensors() {
   // variable tensors. They should call `ResetVariableTensors` directly
   // instead.
   ResetVariableTensors();
+
+  // Initialize the mapping between tensor index and the last execution plan
+  // index that uses the tensor.
+  InitializeTensorReleaseMap();
 
   return kTfLiteOk;
 }
@@ -1119,11 +1102,49 @@ TfLiteStatus Subgraph::PrepareOpsAndTensors() {
   return kTfLiteOk;
 }
 
+TfLiteStatus Subgraph::RemoveUnusedInputs() {
+  auto graph_info = CreateGraphInfo();
+  std::vector<int> refcounts(graph_info->num_tensors(), 0);
+
+  for (int tensor_index : graph_info->variables()) {
+    refcounts[tensor_index]++;
+  }
+  // Count references to node input tensors.
+  for (size_t i = 0; i < graph_info->num_execution_nodes(); ++i) {
+    const TfLiteNode& node = graph_info->node(i);
+    TfLiteIntArray* node_inputs = node.inputs;
+    for (int j = 0; j < node_inputs->size; ++j) {
+      int tensor_index = node_inputs->data[j];
+      if (tensor_index != kTfLiteOptionalTensor) {
+        refcounts[tensor_index]++;
+      }
+    }
+  }
+  // Count references to SubGraph output tensors.
+  for (auto iter = outputs_.begin(); iter != outputs_.end(); iter++) {
+    if (*iter == kTfLiteOptionalTensor) continue;
+    refcounts[*iter]++;
+  }
+
+  // Mark unused inputs as kTfLiteOptionalTensor.
+  for (auto iter = inputs_.begin(); iter != inputs_.end(); iter++) {
+    if (*iter == kTfLiteOptionalTensor) continue;
+    if (refcounts[*iter] == 0) {
+      *iter = kTfLiteOptionalTensor;
+    }
+  }
+  return kTfLiteOk;
+}
+
 TfLiteStatus Subgraph::Invoke() {
   if (!consistent_) {
     ReportError("Invoke called on model that is not consistent.");
     return kTfLiteError;
   }
+
+  // Allocate large dynamic tensors which memory are required to be allocated
+  // before executing the graph.
+  MaybeAllocateLargeDynamicTensors();
 
   TfLiteStatus status = kTfLiteOk;
   if (state_ == kStateUninvokable) {
@@ -1219,6 +1240,8 @@ TfLiteStatus Subgraph::Invoke() {
         }
       }
     }
+    // Release dynamic tensor memory if configured by the user.
+    MaybeReleaseDynamicInputs(node, node_index);
   }
 
   return status;
@@ -1473,6 +1496,25 @@ TfLiteStatus Subgraph::ResizeTensorImpl(TfLiteTensor* tensor,
     return kTfLiteError;
   }
   return kTfLiteOk;
+}
+
+void Subgraph::UseDynamicAllocationForLargeTensors(
+    int large_tensors_threshods_in_bytes) {
+  for (size_t tensor_index = 0; tensor_index < context_.tensors_size;
+       tensor_index++) {
+    TfLiteTensor* tensor = &context_.tensors[tensor_index];
+    if (tensor->bytes >= large_tensors_threshods_in_bytes &&
+        tensor->allocation_type == kTfLiteArenaRw &&
+        // Skip input tensors since they are handled by ResizeInputTensor().
+        std::find(inputs_.begin(), inputs_.end(), tensor_index) ==
+            inputs_.end()) {
+      large_static_shape_tensors_.insert(tensor_index);
+      // Change large tensors' allocation_type and data.raw. This method must be
+      // called before AllocateTensors() to avoid handling them by ArenaPlanner.
+      tensor->allocation_type = kTfLiteDynamic;
+      tensor->data.raw = nullptr;
+    }
+  }
 }
 
 void Subgraph::SwitchToDelegateContext() {
@@ -1807,6 +1849,57 @@ TfLiteStatus Subgraph::PreserveAllTensorsExperimental() {
 
 std::unique_ptr<GraphInfo> Subgraph::CreateGraphInfo() {
   return std::unique_ptr<GraphInfo>(new InterpreterInfo(this));
+}
+
+void Subgraph::InitializeTensorReleaseMap() {
+  for (int i = 0; i < execution_plan_.size(); ++i) {
+    int node_index = execution_plan_[i];
+    const TfLiteNode& node = nodes_and_registration_[node_index].first;
+    for (int input_index = 0; input_index < node.inputs->size; ++input_index) {
+      int input_tensor_index = node.inputs->data[input_index];
+      TfLiteTensor* input_tensor = tensor(input_tensor_index);
+      if (!input_tensor) continue;
+      tensor_to_last_op_index_[input_tensor_index] = node_index;
+    }
+  }
+}
+
+void Subgraph::MaybeReleaseDynamicInputs(const TfLiteNode& node,
+                                         size_t node_index) {
+  if (!release_dynamic_tensors_if_unused_) return;
+  auto tensorIsInput = [&](int index) {
+    for (int idx : inputs_) {
+      if (idx == index) return true;
+    }
+    return false;
+  };
+  // Release dynamic tensor's memory if the current node is the last one that
+  // uses the tensor.
+  for (int input_index = 0; input_index < node.inputs->size; ++input_index) {
+    int input_tensor_index = node.inputs->data[input_index];
+    TfLiteTensor* input_tensor = tensor(input_tensor_index);
+    if (!input_tensor || input_tensor->allocation_type != kTfLiteDynamic ||
+        input_tensor->type == kTfLiteString ||
+        input_tensor->type == kTfLiteResource ||
+        tensorIsInput(input_tensor_index))
+      continue;
+    auto it = tensor_to_last_op_index_.find(input_tensor_index);
+    if (it != tensor_to_last_op_index_.end() && it->second == node_index) {
+      if (input_tensor->data.raw) {
+        TfLiteTensorDataFree(input_tensor);
+      }
+    }
+  }
+}
+
+void Subgraph::MaybeAllocateLargeDynamicTensors() {
+  for (int tensor_index : large_static_shape_tensors_) {
+    TfLiteTensor* tensor = &context_.tensors[tensor_index];
+    if (tensor->allocation_type == kTfLiteDynamic &&
+        tensor->data.raw == nullptr) {
+      TfLiteTensorRealloc(tensor->bytes, tensor);
+    }
+  }
 }
 
 }  // namespace tflite

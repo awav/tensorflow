@@ -177,6 +177,7 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/common_runtime/eager:eager_executor",
+        "//tensorflow/core/common_runtime/eager:kernel_and_device",
         "//tensorflow/core/common_runtime/eager:tensor_handle",
     ],
 )
@@ -242,6 +243,7 @@ filegroup(
     ],
     visibility = [
         "//tensorflow/core:__pkg__",
+        "//tensorflow/core/function:__pkg__",
         "//tensorflow/python:__subpackages__",
     ],
 )

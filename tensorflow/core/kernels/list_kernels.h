@@ -40,9 +40,9 @@ limitations under the License.
 
 // stream.h isn't available in some platforms such as Android and iOS.
 // Only include it for platforms that PluggableDevice is tested on.
-#if !defined(PLUGGABLE_DEVICE_SUPPORTED) &&                                \
-    (__x86_64__ || __i386__ || defined(__APPLE__)) && !defined(ANDROID) && \
-    !TARGET_OS_IOS
+#if !defined(PLUGGABLE_DEVICE_SUPPORTED) &&                              \
+    (__x86_64__ || __i386__ || defined(__APPLE__) || defined(_WIN32)) && \
+    !defined(ANDROID) && !defined(__ANDROID__) && !TARGET_OS_IOS
 #define PLUGGABLE_DEVICE_SUPPORTED
 #endif
 
@@ -393,8 +393,11 @@ class TensorListConcat : public OpKernel {
   void Compute(OpKernelContext* c) override {
     PartialTensorShape element_shape_except_first_dim;
     if (!element_shape_.unknown_rank()) {
-      element_shape_except_first_dim = PartialTensorShape(
-          gtl::ArraySlice<int64_t>(element_shape_.dim_sizes()).subspan(1));
+      auto dim_sizes = element_shape_.dim_sizes();
+      OP_REQUIRES(c, !dim_sizes.empty(),
+                  errors::InvalidArgument("element_shape must not be empty"));
+      element_shape_except_first_dim =
+          PartialTensorShape(gtl::ArraySlice<int64_t>(dim_sizes).subspan(1));
     }
     // Check that the input Variant tensor is indeed a TensorList and has the
     // correct element type.
@@ -768,6 +771,11 @@ class TensorListFromTensor : public OpKernel {
     attr.set_on_host(true);
     OP_REQUIRES_OK(c, c->allocate_output(0, {}, &output_tensor, attr));
     PartialTensorShape element_shape;
+    OP_REQUIRES(
+        c, !TensorShapeUtils::IsMatrixOrHigher(c->input(1).shape()),
+        errors::InvalidArgument(
+            "TensorListFromTensor: element_shape must be at most rank 1 but ",
+            "has the shape of ", c->input(1).shape().DebugString()));
     OP_REQUIRES_OK(c, TensorShapeFromTensor(c->input(1), &element_shape));
     TensorList output_list;
     const Tensor& t = c->input(0);
@@ -894,10 +902,20 @@ class TensorListScatter : public OpKernel {
     OP_REQUIRES_OK(c, c->allocate_output(0, {}, &output_tensor, attr));
     Tensor indices = c->input(1);
     PartialTensorShape element_shape;
+    OP_REQUIRES(
+        c, !TensorShapeUtils::IsMatrixOrHigher(c->input(2).shape()),
+        errors::InvalidArgument(
+            "TensorListScatter: element_shape must be at most rank 1 but has ",
+            "the shape of ", c->input(2).shape().DebugString()));
     OP_REQUIRES_OK(c, TensorShapeFromTensor(c->input(2), &element_shape));
     // TensorListScatterV2 passes the num_elements input, TensorListScatter does
     // not.
-    int num_elements = c->num_inputs() >= 4 ? c->input(3).scalar<int>()() : -1;
+    int num_elements = -1;
+    if (c->num_inputs() >= 4) {
+      OP_REQUIRES(c, TensorShapeUtils::IsScalar(c->input(3).shape()),
+                  errors::InvalidArgument("num_elements must be a scalar"));
+      num_elements = c->input(3).scalar<int>()();
+    }
     OP_REQUIRES(c, num_elements >= -1,
                 errors::InvalidArgument(
                     "TensorListScatter expects num_elements >= -1, found: ",

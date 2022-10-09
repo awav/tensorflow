@@ -16,11 +16,14 @@
 import copy
 import math
 from typing import Sequence
+import weakref
+
 import numpy as np
 
 from tensorflow.python.framework import composite_tensor
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import indexed_slices as indexed_slices_lib
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import type_spec
@@ -253,10 +256,10 @@ class ShardedVariableMixin(trackable.Trackable):
   """Mixin for ShardedVariable."""
 
   # TODO(b/170877138): Remove this mixin once fixed. This mixin is required
-  # since TPUShardedVariable can't be a CompositeTensor.
+  # since TPUEmbeddingVariable can't be a CompositeTensor.
 
   def __init__(self,
-               variables: Sequence[variables_lib.Variable],
+               variables,
                name='ShardedVariable'):
     """Treats `variables` as shards of a larger Variable.
 
@@ -307,6 +310,10 @@ class ShardedVariableMixin(trackable.Trackable):
     first_dim = sum(int(v.shape.as_list()[0]) for v in variables)
     self._shape = tensor_shape.TensorShape([first_dim] +
                                            first_var.shape.as_list()[1:])
+
+    for v in variables:
+      v._sharded_container = weakref.ref(self)
+
     self._var_offsets = [
         [0 for _ in range(len(first_var.shape))] for _ in range(len(variables))
     ]
@@ -596,7 +603,8 @@ class ShardedVariableMixin(trackable.Trackable):
                                                      len(self._variables))
 
     return [
-        ops.IndexedSlices(values=per_var_values[i], indices=per_var_indices[i])
+        indexed_slices_lib.IndexedSlices(
+            values=per_var_values[i], indices=per_var_indices[i])
         for i in range(len(self._variables))
     ]
 
@@ -726,10 +734,27 @@ class ShardedVariableMixin(trackable.Trackable):
       resource_map.update(v_resource_map)
     obj_map[self] = ShardedVariable([obj_map[self._saving_variable]],
                                     name=self.name)
-
     return obj_map, resource_map
 
+  @property
+  def _unique_id(self):
+    # String-replace to ensure uniqueness for checkpoint tracking
+    return self.variables[0]._unique_id.replace('part_0', 'sharded')  # pylint: disable=protected-access
 
+  @property
+  def _distribute_strategy(self):
+    return self.variables[0]._distribute_strategy  # pylint: disable=protected-access
+
+  @property
+  def _shared_name(self):
+    return self._name
+
+  @property
+  def is_sharded_variable(self):
+    return True
+
+
+@tf_export('__internal__.distribute.ShardedVariable', v1=[])
 class ShardedVariable(ShardedVariableMixin, composite_tensor.CompositeTensor):
   """A container for `Variables` that should be treated as shards.
 

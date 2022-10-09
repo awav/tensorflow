@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
@@ -175,6 +176,11 @@ Status BuildHloFromGraph(
 static inline Status CompileToHloGraphAnalysisFailedError() {
   return errors::Internal("disabled after graph analysis");
 }
+
+// Register a convenient pipeline for invoking TF/XLA lowering from the command
+// line.
+void RegisterConvertMlirToXlaHloPipelineWithDefaults();
+
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_MLIR_TENSORFLOW_UTILS_COMPILE_MLIR_UTIL_H_

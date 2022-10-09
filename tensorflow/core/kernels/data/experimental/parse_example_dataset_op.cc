@@ -269,7 +269,9 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       return name_utils::DatasetDebugString(kDatasetType, params);
     }
 
-    int64_t Cardinality() const override { return input_->Cardinality(); }
+    int64_t CardinalityInternal() const override {
+      return input_->Cardinality();
+    }
 
     Status InputDatasets(
         std::vector<const DatasetBase*>* inputs) const override {
@@ -380,7 +382,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       Status Initialize(IteratorContext* ctx) override {
         mutex_lock l(*mu_);
         if (num_parallel_calls_->value == model::kAutotune) {
-          num_parallel_calls_->value = ctx->runner_threadpool_size();
+          num_parallel_calls_->value = GetAutotuneDefaultParallelism(ctx);
         }
         TF_RETURN_IF_ERROR(RegisterCancellationCallback(
             ctx->cancellation_manager(),

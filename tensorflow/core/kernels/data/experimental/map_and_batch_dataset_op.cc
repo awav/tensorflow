@@ -123,7 +123,7 @@ class MapAndBatchDatasetOp::Dataset : public DatasetBase {
     return name_utils::DatasetDebugString(kDatasetType);
   }
 
-  int64_t Cardinality() const override {
+  int64_t CardinalityInternal() const override {
     if (!preserve_cardinality_) {
       return kUnknownCardinality;
     }
@@ -218,7 +218,7 @@ class MapAndBatchDatasetOp::Dataset : public DatasetBase {
       interleave_depth_ = ctx->interleave_depth();
 
       if (num_parallel_calls_->value == model::kAutotune) {
-        num_parallel_calls_->value = ctx->runner_threadpool_size();
+        num_parallel_calls_->value = GetAutotuneDefaultParallelism(ctx);
       }
       cancellation_manager_ = absl::make_unique<CancellationManager>();
       TF_RETURN_IF_ERROR(RegisterCancellationCallback(

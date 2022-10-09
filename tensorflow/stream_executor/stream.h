@@ -361,33 +361,6 @@ class Stream {
     return port::UnimplementedError("DNN library is not found.");
   }
 
-  template <typename InputType, typename OutputType>
-  port::Status ConvolveWithExecutionPlan(
-      dnn::ConvolutionKind kind, const dnn::BatchDescriptor &input_descriptor,
-      DeviceMemory<InputType> input_data,
-      const dnn::FilterDescriptor &filter_descriptor,
-      DeviceMemory<InputType> filter_data,
-      const dnn::BatchDescriptor &output_descriptor,
-      DeviceMemory<OutputType> output_data,
-      const dnn::ConvolutionDescriptor &convolution_descriptor,
-      DeviceMemoryBase scratch_memory,
-      const dnn::ConvolveExecutionPlan &execution_plan,
-      dnn::ProfileResult *output_profile_result) {
-#if GOOGLE_CUDA
-    dnn::DnnSupport *dnn = parent_->AsDnn();
-    if (dnn) {
-      gpu::CudnnSupport *cudnn_dnn = dynamic_cast<gpu::CudnnSupport *>(dnn);
-      return cudnn_dnn->DoConvolveWithExecutionPlan(
-          kind, dnn::ToDataType<InputType>::value,
-          dnn::ToDataType<OutputType>::value, this, input_descriptor,
-          input_data, filter_descriptor, filter_data, output_descriptor,
-          output_data, convolution_descriptor, execution_plan, scratch_memory,
-          output_profile_result);
-    }
-#endif  // GOOGLE_CUDA
-    return port::UnimplementedError("DNN library is not found.");
-  }
-
   template <typename InputT, typename ScaleT, typename SideInputT,
             typename BiasT, typename OutputT>
   port::Status FusedConvolveWithAlgorithm(
@@ -416,34 +389,42 @@ class Stream {
     return port::UnimplementedError("DNN library is not found.");
   }
 
-  template <typename InputT, typename ScaleT, typename SideInputT,
-            typename BiasT, typename OutputT>
-  port::Status FusedConvolveWithExecutionPlan(
-      const dnn::BatchDescriptor &conv_input_descriptor,
-      const DeviceMemory<InputT> &conv_input_data, ScaleT conv_input_scale,
+  port::StatusOr<std::unique_ptr<const dnn::ConvRunner>> ConvolveRunnerFromDesc(
+      const dnn::AlgorithmDesc &algorithm_desc, dnn::ConvolutionKind kind,
+      dnn::DataType element_type, dnn::DataType output_type,
+      const dnn::BatchDescriptor &input_descriptor,
       const dnn::FilterDescriptor &filter_descriptor,
-      const DeviceMemory<InputT> &filter_data,
-      const dnn::ConvolutionDescriptor &convolution_descriptor,
-      const DeviceMemory<SideInputT> &side_input_data, ScaleT side_input_scale,
-      const dnn::BatchDescriptor &bias_descriptor,
-      const DeviceMemory<BiasT> &biases, dnn::ActivationMode activation_mode,
       const dnn::BatchDescriptor &output_descriptor,
-      DeviceMemory<OutputT> *output, DeviceMemoryBase scratch_memory,
-      const dnn::ConvolveExecutionPlan &execution_plan,
-      dnn::ProfileResult *output_profile_result) {
-#if GOOGLE_CUDA
-    dnn::DnnSupport *dnn = parent_->AsDnn();
-    if (dnn) {
-      gpu::CudnnSupport *cudnn_dnn = dynamic_cast<gpu::CudnnSupport *>(dnn);
-      return cudnn_dnn->DoFusedConvolveWithExecutionPlan(
-          this, dnn::ToDataType<InputT>::value, conv_input_descriptor,
-          conv_input_data, conv_input_scale, filter_descriptor, filter_data,
-          convolution_descriptor, side_input_data, side_input_scale,
-          bias_descriptor, biases, activation_mode, output_descriptor, *output,
-          scratch_memory, execution_plan, output_profile_result);
+      const dnn::ConvolutionDescriptor &convolution_descriptor) {
+    dnn::DnnSupport *dnn_support = parent_->AsDnn();
+    if (!dnn_support) {
+      return port::UnimplementedError("DNN library is not found.");
     }
-#endif  // GOOGLE_CUDA
-    return port::UnimplementedError("DNN library is not found.");
+    return dnn_support->ConvolveRunnerFromDesc(
+        this, algorithm_desc, kind, element_type, output_type, input_descriptor,
+        filter_descriptor, output_descriptor, convolution_descriptor);
+  }
+
+  port::StatusOr<std::unique_ptr<const dnn::FusedConvRunner>>
+  FusedConvolveRunnerFromDesc(
+      const dnn::AlgorithmDesc &algorithm_desc, dnn::ConvolutionKind kind,
+      dnn::DataType element_type, dnn::DataType bias_type,
+      dnn::DataType output_type, double conv_input_scale,
+      double side_input_scale, const dnn::BatchDescriptor &input_descriptor,
+      const dnn::FilterDescriptor &filter_descriptor,
+      const dnn::BatchDescriptor &bias_descriptor,
+      const dnn::BatchDescriptor &output_descriptor,
+      const dnn::ConvolutionDescriptor &convolution_descriptor,
+      dnn::ActivationMode activation_mode) {
+    dnn::DnnSupport *dnn_support = parent_->AsDnn();
+    if (!dnn_support) {
+      return port::UnimplementedError("DNN library is not found.");
+    }
+    return dnn_support->FusedConvolveRunnerFromDesc(
+        this, algorithm_desc, kind, element_type, bias_type, output_type,
+        conv_input_scale, side_input_scale, input_descriptor, filter_descriptor,
+        bias_descriptor, output_descriptor, convolution_descriptor,
+        activation_mode);
   }
 
   Stream &ThenSeparableConvolve(
@@ -1655,6 +1636,32 @@ class Stream {
                        const DeviceMemory<std::complex<double>> &a, int lda,
                        DeviceMemory<std::complex<double>> *b, int ldb);
 
+  // See BlasSupport::DoBlasTrsmBatched.
+  Stream &ThenBlasTrsmBatched(blas::Side side, blas::UpperLower uplo,
+                              blas::Transpose transa, blas::Diagonal diag,
+                              uint64_t m, uint64 n, float alpha,
+                              const DeviceMemory<float *> &as, int lda,
+                              DeviceMemory<float *> *bs, int ldb,
+                              int batch_count);
+  Stream &ThenBlasTrsmBatched(blas::Side side, blas::UpperLower uplo,
+                              blas::Transpose transa, blas::Diagonal diag,
+                              uint64_t m, uint64 n, double alpha,
+                              const DeviceMemory<double *> &as, int lda,
+                              DeviceMemory<double *> *bs, int ldb,
+                              int batch_count);
+  Stream &ThenBlasTrsmBatched(blas::Side side, blas::UpperLower uplo,
+                              blas::Transpose transa, blas::Diagonal diag,
+                              uint64_t m, uint64 n, std::complex<float> alpha,
+                              const DeviceMemory<std::complex<float> *> &as,
+                              int lda, DeviceMemory<std::complex<float> *> *bs,
+                              int ldb, int batch_count);
+  Stream &ThenBlasTrsmBatched(blas::Side side, blas::UpperLower uplo,
+                              blas::Transpose transa, blas::Diagonal diag,
+                              uint64_t m, uint64 n, std::complex<double> alpha,
+                              const DeviceMemory<std::complex<double> *> &as,
+                              int lda, DeviceMemory<std::complex<double> *> *bs,
+                              int ldb, int batch_count);
+
   // See BlasSupport::DoBlatLtMatmul.
   // Note that we prevent alpha and beta from being used to deduce CType so that
   // they can be constructed implicitly from values of type CType. Without this,
@@ -2030,6 +2037,9 @@ class Stream {
     return parent()->GetDeviceDescription().cuda_compute_capability();
   }
 
+  RocmComputeCapability GetRocmComputeCapability() const {
+    return parent()->GetDeviceDescription().rocm_compute_capability();
+  }
   // Returns the (internal usage) temporary-memory-allocation manager associated
   // with this stream.
   internal::TemporaryMemoryManager *temporary_memory_manager();

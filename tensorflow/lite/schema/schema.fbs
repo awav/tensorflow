@@ -53,6 +53,7 @@ enum TensorType : byte {
   RESOURCE = 13,
   VARIANT = 14,
   UINT32 = 15,
+  UINT16 = 16
 }
 
 // Custom quantization parameters for experimenting with new quantization
@@ -380,6 +381,11 @@ enum BuiltinOperator : int32 {
   ASSIGN_VARIABLE = 144,
   BROADCAST_ARGS = 145,
   RANDOM_STANDARD_NORMAL = 146,
+  BUCKETIZE = 147,
+  RANDOM_UNIFORM = 148,
+  MULTINOMIAL = 149,
+  GELU = 150,
+  DYNAMIC_UPDATE_SLICE = 151,
 }
 // LINT.ThenChange(nnapi_linter/linter.proto)
 
@@ -499,6 +505,9 @@ union BuiltinOptions {
   ReadVariableOptions,
   AssignVariableOptions,
   RandomOptions,
+  BucketizeOptions,
+  GeluOptions,
+  DynamicUpdateSliceOptions,
 }
 
 enum Padding : byte { SAME, VALID }
@@ -1085,8 +1094,19 @@ table AssignVariableOptions {
 }
 
 table RandomOptions {
-  seed: int;
-  seed2: int;
+  seed: long;
+  seed2: long;
+}
+
+table BucketizeOptions {
+  boundaries: [float];  // The bucket boundaries.
+}
+
+table GeluOptions {
+  approximate: bool;
+}
+
+table DynamicUpdateSliceOptions {
 }
 
 // An OperatorCode can be an enum value (BuiltinOperator) if the operator is a

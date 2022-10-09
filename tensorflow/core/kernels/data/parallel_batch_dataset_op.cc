@@ -128,7 +128,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
     return name_utils::DatasetDebugString(kDatasetType, params);
   }
 
-  int64_t Cardinality() const override {
+  int64_t CardinalityInternal() const override {
     int64_t n = input_->Cardinality();
     if (n == kInfiniteCardinality || n == kUnknownCardinality) {
       return n;
@@ -210,7 +210,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
         if (dataset()->parallel_copy_) {
           num_parallel_calls_->value = 1;
         } else {
-          num_parallel_calls_->value = ctx->runner_threadpool_size();
+          num_parallel_calls_->value = GetAutotuneDefaultParallelism(ctx);
         }
       }
       cancellation_manager_ = absl::make_unique<CancellationManager>();
