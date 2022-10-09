@@ -5,8 +5,8 @@ the TensorFlow interop has a number of known sharp corners.
 
 ## `tf.Variable` on a different device
 
-*Error message*: INVALID_ARGUMENT: Trying to access resource <Variable> (defined
-@ <Loc>) located in device CPU:0 from device GPU:0`
+*Error message*: `INVALID_ARGUMENT: Trying to access resource <Variable>
+(defined @ <Loc>) located in device CPU:0 from device GPU:0`
 
 XLA cluster runs on exactly one device, and it can not read or write to
 `tf.Variable` located on a different device. Usually this error message
@@ -57,5 +57,30 @@ exceeds the original bound.
 
 XLA currently ignores TF seeds to random operations. This affects stateful TF
 random operations, such as `tf.random.normal`, or `tf.nn.dropout`. XLA will
-behave as if the compilation was seeded with a new unique seed at each run. This
-limitation does not apply to stateless random ops.
+behave as if the compilation was seeded with a new unique seed at each run
+within the same process (the first run of the process will always yield the same
+result).
+
+*Workaround*: use
+[the recommended RNGs](https://www.tensorflow.org/guide/random_numbers#stateless_rngs)
+such as `tf.random.stateless_uniform` or the `tf.random.Generator` directly.
+
+## Must-be-constant inputs which are functions of induction variables are not supported
+
+*Error Message*: `XLA compilation requires that operator arguments that
+represent shapes or dimensions be evaluated to concrete values at compile time.
+This error means that a shape or dimension argument could not be evaluated at
+compile time, usually because the value of the argument depends on a parameter
+to the computation, on a variable, or on a stateful operation such as a random
+number generator`.
+
+XLA requires certain values to be known at compile time, such as reduction axis
+of a reduce operation, or transposition dimensions. Consider the case when e.g.
+reduction axis is defined as a function of an induction variable of `tf.range`:
+resolving it statically is not possible without unrolling the entire loop, which
+might not be desired by the user.
+
+*Workaround*: Unroll loops, e.g. by converting `tf.range` into Python `range`.
+
+NOTE: The error message above is not unique to this issue, and can arise due to
+other limitations or bugs.

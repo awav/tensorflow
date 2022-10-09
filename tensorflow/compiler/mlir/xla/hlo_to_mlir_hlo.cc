@@ -17,12 +17,12 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/xla/hlo_module_importer.h"
 #include "tensorflow/compiler/xla/status_macros.h"
-#include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/tsl/platform/errors.h"
 
 namespace xla {
 
 Status ConvertHloToMlirHlo(mlir::ModuleOp module,
-                           xla::HloModuleProto* hlo_module_proto,
+                           xla::HloModuleProto const* hlo_module_proto,
                            bool import_all_computation) {
   mlir::StatusScopedDiagnosticHandler diag_handler(module.getContext());
   return HloModuleImporter(module, import_all_computation)

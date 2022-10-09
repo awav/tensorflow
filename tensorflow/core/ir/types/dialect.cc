@@ -16,14 +16,18 @@ limitations under the License.
 #include "tensorflow/core/ir/types/dialect.h"
 
 #include <cstdint>
+#include <string>
 
+#include "absl/strings/escaping.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Traits.h"  // from @llvm-project
+#include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
@@ -31,13 +35,15 @@ limitations under the License.
 #include "mlir/IR/Dialect.h"  // from @llvm-project
 #include "mlir/IR/DialectImplementation.h"  // from @llvm-project
 #include "mlir/IR/FunctionImplementation.h"  // from @llvm-project
-#include "mlir/IR/FunctionSupport.h"  // from @llvm-project
+#include "mlir/IR/FunctionInterfaces.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/OpImplementation.h"  // from @llvm-project
 #include "mlir/IR/OperationSupport.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 
 #define GET_ATTRDEF_CLASSES
 #include "tensorflow/core/ir/types/attributes.cc.inc"
+#include "tensorflow/core/ir/types/attributes_enum.cc.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "tensorflow/core/ir/types/types.cc.inc"
@@ -64,28 +70,6 @@ void TFTypeDialect::initialize() {
 #define HANDLE_LAST_TF_TYPE(tftype, enumerant, name) tftype##Type
 #include "tensorflow/core/ir/types/types.def"
            >();
-}
-
-// Entry point for Attribute parsing, TableGen generated code will handle the
-// dispatch to the individual classes.
-Attribute TFTypeDialect::parseAttribute(DialectAsmParser &parser,
-                                        Type type) const {
-  StringRef attr_tag;
-  if (failed(parser.parseKeyword(&attr_tag))) return Attribute();
-  {
-    Attribute attr;
-    auto parse_result = generatedAttributeParser(parser, attr_tag, type, attr);
-    if (parse_result.hasValue()) return attr;
-  }
-  parser.emitError(parser.getNameLoc(), "unknown tf_type attribute");
-  return Attribute();
-}
-
-// Entry point for Attribute printing, TableGen generated code will handle the
-// dispatch to the individual classes.
-void TFTypeDialect::printAttribute(Attribute attr,
-                                   DialectAsmPrinter &os) const {
-  (void)generatedAttributePrinter(attr, os);
 }
 
 namespace {
@@ -148,7 +132,10 @@ void PrintVariantType(VariantType ty, DialectAsmPrinter &os) {
 Type TFTypeDialect::parseType(DialectAsmParser &parser) const {
   StringRef type_tag;
   llvm::SMLoc loc = parser.getNameLoc();
-  if (failed(parser.parseKeyword(&type_tag))) return Type();
+
+  Type genType;
+  auto parse_result = generatedTypeParser(parser, &type_tag, genType);
+  if (parse_result.hasValue()) return genType;
 
 #define HANDLE_TF_TYPE(tftype, enumerant, name) \
   if (type_tag == name) return tftype##Type::get(getContext());
@@ -167,9 +154,6 @@ Type TFTypeDialect::parseType(DialectAsmParser &parser) const {
     return ret;
   }
 
-  Type genType;
-  auto parse_result = generatedTypeParser(parser, type_tag, genType);
-  if (parse_result.hasValue()) return genType;
   parser.emitError(parser.getNameLoc(),
                    "unknown type in TF graph dialect: " + type_tag);
   return {};
@@ -199,7 +183,7 @@ void TFTypeDialect::printType(Type type, DialectAsmPrinter &printer) const {
 // Attributes
 //===----------------------------------------------------------------------===//
 
-Attribute VersionAttr::parse(DialectAsmParser &parser, Type) {
+Attribute VersionAttr::parse(AsmParser &parser, Type) {
   if (failed(parser.parseLess())) return {};
 
   int32_t producer, min_consumer;
@@ -228,9 +212,8 @@ Attribute VersionAttr::parse(DialectAsmParser &parser, Type) {
                           bad_consumers);
 }
 
-void VersionAttr::print(DialectAsmPrinter &printer) const {
+void VersionAttr::print(AsmPrinter &printer) const {
   llvm::raw_ostream &os = printer.getStream();
-  os << getMnemonic();
   os << "<producer = " << getProducer()
      << ", min_consumer = " << getMinConsumer();
   ArrayRef<int32_t> badConsumers = getBadConsumers();
@@ -242,17 +225,85 @@ void VersionAttr::print(DialectAsmPrinter &printer) const {
   os << ">";
 }
 
+FailureOr<FullTypeAttr> RawFullTypeAttrParser(AsmParser &parser) {
+  SmallVector<FullTypeAttr> args;
+
+  // Parse variable 'type_id'
+  llvm::StringRef type_id_str;
+  if (failed(parser.parseKeyword(&type_id_str))) {
+    parser.emitError(
+        parser.getCurrentLocation(),
+        "failed to parse TFType_FullTypeAttr parameter keyword for "
+        "'type_id'");
+    return failure();
+  }
+  Optional<FullTypeId> type_id = symbolizeFullTypeId(type_id_str);
+  if (!type_id) {
+    parser.emitError(parser.getCurrentLocation(),
+                     "failed to parse TFType_FullTypeAttr parameter "
+                     "'type_id'");
+    return failure();
+  }
+
+  // Parse variable 'args'
+  if (parser.parseCommaSeparatedList(
+      AsmParser::Delimiter::OptionalLessGreater, [&]() {
+        FailureOr<tf_type::FullTypeAttr> arg = RawFullTypeAttrParser(parser);
+        if (failed(arg)) return failure();
+        args.push_back(*arg);
+        return success();
+      }))
+    return failure();
+
+  // Parse variable 'attr'
+  Attribute attr;
+  parser.parseOptionalAttribute(attr);
+  return FullTypeAttr::get(parser.getContext(), static_cast<int32_t>(*type_id),
+                           args, attr);
+}
+
+Attribute FullTypeAttr::parse(AsmParser &parser, Type odsType) {
+  if (failed(parser.parseLess())) return {};
+  FailureOr<tf_type::FullTypeAttr> ret = RawFullTypeAttrParser(parser);
+  if (succeeded(ret) && failed(parser.parseGreater())) return {};
+  return ret.getValueOr(FullTypeAttr());
+}
+
+static void RawFullTypeAttrPrint(FullTypeAttr tfattr, AsmPrinter &printer) {
+  printer << stringifyFullTypeId(tf_type::FullTypeId(tfattr.getTypeId()));
+  if (!tfattr.getArgs().empty()) {
+    printer << "<";
+    llvm::interleaveComma(tfattr.getArgs(), printer, [&](Attribute arg) {
+      if (auto t = arg.dyn_cast<FullTypeAttr>())
+        RawFullTypeAttrPrint(t, printer);
+      else
+        printer << "<<INVALID ARG>>";
+    });
+    printer << ">";
+  }
+  if (tfattr.getAttr()) {
+    printer << ' ';
+    printer.printStrippedAttrOrType(tfattr.getAttr());
+  }
+}
+
+void FullTypeAttr::print(AsmPrinter &printer) const {
+  printer << "<";
+  RawFullTypeAttrPrint(*this, printer);
+  printer << ">";
+}
+
 // Print a #tf.func attribute of the following format:
 //
 //   #tf.func<@symbol, {attr = "value"}>
 // or
 //   #tf.func<"", {attr = "value"}>
 // in case of null symbol ref.
-void FuncAttr::print(DialectAsmPrinter &os) const {
+void FuncAttr::print(AsmPrinter &os) const {
   if (getName().getRootReference().getValue().empty())
-    os << "func<\"\", " << getAttrs() << ">";
+    os << "<\"\", " << getAttrs() << ">";
   else
-    os << "func<" << getName() << ", " << getAttrs() << ">";
+    os << "<" << getName() << ", " << getAttrs() << ">";
 }
 
 // Parses a #tf.func attribute of the following format:
@@ -261,7 +312,7 @@ void FuncAttr::print(DialectAsmPrinter &os) const {
 //
 // where the first element is a SymbolRefAttr and the second element is a
 // DictionaryAttr.
-Attribute FuncAttr::parse(DialectAsmParser &parser, Type type) {
+Attribute FuncAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
   llvm::SMLoc loc = parser.getCurrentLocation();
   Attribute name, dict;
@@ -294,11 +345,27 @@ Attribute FuncAttr::parse(DialectAsmParser &parser, Type type) {
                        dict.cast<DictionaryAttr>());
 }
 
-void PlaceholderAttr::print(DialectAsmPrinter &os) const {
-  os << "placeholder<" << StringAttr::get(getContext(), getValue()) << ">";
+void FuncAttr::walkImmediateSubElements(
+    function_ref<void(Attribute)> walkAttrsFn,
+    function_ref<void(Type)> walkTypesFn) const {
+  // Walk the dictionary attribute first, so that its index is always 0.
+  walkAttrsFn(getAttrs());
+  // Walk the symbol ref attribute if it isn't empty.
+  if (!getName().getRootReference().getValue().empty()) walkAttrsFn(getName());
 }
 
-Attribute PlaceholderAttr::parse(DialectAsmParser &parser, Type type) {
+Attribute FuncAttr::replaceImmediateSubElements(
+    ArrayRef<Attribute> replAttrs, ArrayRef<Type> replTypes) const {
+  assert(replAttrs.size() == 2 && "invalid number of replacement attributes");
+  return get(getContext(), replAttrs[1].cast<SymbolRefAttr>(),
+             replAttrs[0].cast<DictionaryAttr>());
+}
+
+void PlaceholderAttr::print(AsmPrinter &os) const {
+  os << "<" << StringAttr::get(getContext(), getValue()) << ">";
+}
+
+Attribute PlaceholderAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
   std::string content;
   if (failed(parser.parseOptionalString(&content))) {
@@ -310,11 +377,11 @@ Attribute PlaceholderAttr::parse(DialectAsmParser &parser, Type type) {
   return PlaceholderAttr::get(parser.getContext(), content);
 }
 
-void ShapeAttr::print(DialectAsmPrinter &os) const {
-  os << "shape<";
+void ShapeAttr::print(AsmPrinter &os) const {
+  os << "<";
   if (hasRank()) {
     auto print_dim = [&](int64_t dim) {
-      if (dim > -1)
+      if (dim != -1)
         os << dim;
       else
         os << "?";
@@ -326,7 +393,7 @@ void ShapeAttr::print(DialectAsmPrinter &os) const {
   os << ">";
 }
 
-Attribute ShapeAttr::parse(DialectAsmParser &parser, Type type) {
+Attribute ShapeAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
 
   if (succeeded(parser.parseOptionalStar())) {
@@ -346,10 +413,9 @@ Attribute ShapeAttr::parse(DialectAsmParser &parser, Type type) {
       llvm::SMLoc loc = parser.getCurrentLocation();
       if (succeeded(parser.parseOptionalQuestion())) {
         shape.back() = ShapedType::kDynamicSize;
-      } else if (failed(parser.parseInteger(shape.back())) ||
-                 shape.back() < 0) {
-        parser.emitError(loc) << "expected a positive integer or `?` when "
-                                 "parsing a tf.shape attribute";
+      } else if (failed(parser.parseInteger(shape.back()))) {
+        parser.emitError(loc)
+            << "expected an integer or `?` when parsing a tf.shape attribute";
         return failure();
       }
       return success();
@@ -404,7 +470,7 @@ bool ShapeAttr::hasStaticShape() const {
 namespace {
 // Returns the shape of the given value if it's ranked; returns llvm::None
 // otherwise.
-llvm::Optional<llvm::ArrayRef<int64_t>> GetShape(Value value) {
+Optional<ArrayRef<int64_t>> GetShape(Value value) {
   auto shaped_type = value.getType().cast<ShapedType>();
   if (shaped_type.hasRank()) return shaped_type.getShape();
   return llvm::None;
@@ -415,9 +481,9 @@ llvm::Optional<llvm::ArrayRef<int64_t>> GetShape(Value value) {
 // either both have same size or one of them is dynamic. Returns false if the
 // given shapes are not cast compatible. The refined shape is same or more
 // precise than the two input shapes.
-bool GetCastCompatibleShape(llvm::ArrayRef<int64_t> a_shape,
-                            llvm::ArrayRef<int64_t> b_shape,
-                            llvm::SmallVectorImpl<int64_t> *refined_shape) {
+bool GetCastCompatibleShape(ArrayRef<int64_t> a_shape,
+                            ArrayRef<int64_t> b_shape,
+                            SmallVectorImpl<int64_t> *refined_shape) {
   if (a_shape.size() != b_shape.size()) return false;
   int64_t rank = a_shape.size();
   refined_shape->reserve(rank);
@@ -691,14 +757,16 @@ Type GetCastCompatibleType(Type a, Type b, bool may_ignore_ref_type_a) {
     // can be more constrained and check subtypes for cast compatibility as
     // well.
     if (a.isa<VariantType>()) return a;
+    if (b.isa<VariantType>()) return b;
 
     // For Resource types, we recursively check the subtypes for cast
     // compatibility, if possible. Otherwise treat them as compatible.
     auto a_wst_st = a_wst.GetSubtypes();
     auto b_wst_st = b_wst.GetSubtypes();
-    if (a_wst_st.empty() || b_wst_st.empty()) return a;
+    if (a_wst_st.empty()) return b;
+    if (b_wst_st.empty()) return a;
     if (a_wst_st.size() != b_wst_st.size()) return nullptr;
-    llvm::SmallVector<TensorType, 4> refined_subtypes;
+    SmallVector<TensorType, 4> refined_subtypes;
     for (auto subtypes : llvm::zip(a_wst_st, b_wst_st)) {
       Type refined_st =
           GetCastCompatibleType(std::get<0>(subtypes), std::get<1>(subtypes),
@@ -725,7 +793,7 @@ Type GetCastCompatibleType(Type a, Type b, bool may_ignore_ref_type_a) {
     return RankedTensorType::get(a_tt.getShape(), refined_element_ty);
   }
 
-  llvm::SmallVector<int64_t, 8> refined_shape;
+  SmallVector<int64_t, 4> refined_shape;
   if (!GetCastCompatibleShape(a_tt.getShape(), b_tt.getShape(), &refined_shape))
     return nullptr;
 
@@ -789,6 +857,29 @@ Type DropSubTypes(Type ty) {
 Type DropRefType(Type ty) { return DropTypeHelper<TensorFlowRefType>(ty); }
 
 Type DropRefAndSubTypes(Type ty) { return DropRefType(DropSubTypes(ty)); }
+
+Attribute TensorProtoAttr::parse(AsmParser &parser, Type type) {
+  if (parser.parseColon()) {
+    return nullptr;
+  }
+
+  std::string data;
+  if (parser.parseString(&data)) {
+    return nullptr;
+  }
+  if (data.size() < 2 || data.substr(0, 2) != "0x") {
+    parser.emitError(parser.getNameLoc(), "Hex string doesn't start with `0x`");
+    return nullptr;
+  }
+
+  std::string bytes_data = absl::HexStringToBytes(data.substr(2));
+  return TensorProtoAttr::get(type, bytes_data);
+}
+
+void TensorProtoAttr::print(mlir::AsmPrinter &printer) const {
+  StringRef bytes_str = getValue();
+  printer << " : \"0x" << llvm::toHex(bytes_str) << "\"";
+}
 
 }  // namespace tf_type
 }  // namespace mlir

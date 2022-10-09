@@ -23,6 +23,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/filecheck.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
 
+// TODO(b/210165681): The tests in this file are fragile to HLO op names.
+
 namespace xla {
 namespace gpu {
 namespace {
@@ -70,10 +72,10 @@ ENTRY %main {
   ROOT %fusion.4d = (f32[672]{0}, f32[672]{0}) fusion(%param_0), kind=kInput, calls=%fused_computation.4d
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -86,10 +88,10 @@ ENTRY %main {
 ; CHECK-LABEL: ENTRY %main
 ; CHECK-NEXT:    f16[2,14,14,672]{3,2,1,0} parameter(0)
 ; CHECK-NEXT:    bitcast(
-; CHECK-NEXT:    ROOT %fusion.4d.bitcast
+; CHECK-NEXT:    fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 // Tests that we lift bitcast outside the fusion when scalar broadcasting are
@@ -133,10 +135,10 @@ ENTRY %main {
   ROOT %fusion.4d = (f32[672]{0}, f32[672]{0}) fusion(%param_0, %param_1), kind=kInput, calls=%fused_computation.4d
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -154,10 +156,10 @@ ENTRY %main {
 ; CHECK-NEXT:    f16[2,14,14,672]{3,2,1,0} parameter(0)
 ; CHECK-NEXT:    bitcast(
 ; CHECK-NEXT:    %param_1.1 = f32[] parameter(1)
-; CHECK-NEXT:    ROOT %fusion.4d.bitcast
+; CHECK-NEXT:    fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 TEST_F(FusionBitcastLiftTest, RowBroadcastTest) {
@@ -190,10 +192,10 @@ ENTRY %main {
   ROOT %fusion.4d = (f32[672]{0}, f32[672]{0}) fusion(%param_0, %param_1), kind=kInput, calls=%fused_computation.4d
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -211,10 +213,10 @@ ENTRY %main {
 ; CHECK-NEXT:    f16[2,14,14,672]{3,2,1,0} parameter(0)
 ; CHECK-NEXT:    bitcast(
 ; CHECK-NEXT:    %param_1.1 = f32[672]{0} parameter(1)
-; CHECK-NEXT:    ROOT %fusion.4d.bitcast
+; CHECK-NEXT:    fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 TEST_F(FusionBitcastLiftTest, ScalarAndRowBroadcastTest) {
@@ -252,10 +254,10 @@ ENTRY %main {
 }
 )";
 
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -275,7 +277,7 @@ ENTRY %main {
 ; CHECK-NOT:     bitcast(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 // To trigger the bitcast same pattern check.
@@ -315,8 +317,8 @@ ENTRY %main {
 }
 )";
 
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_FALSE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_FALSE(FusionBitcastLift().Run(module.get()).value());
 }
 
 TEST_F(FusionBitcastLiftTest, ConstantBitcastTest) {
@@ -350,10 +352,10 @@ ENTRY %main {
   ROOT %fusion = (f32[672]{0}, f32[672]{0}) fusion(%param_0, %param_1), kind=kInput, calls=%fused_computation
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -367,10 +369,10 @@ ENTRY %main {
 ; CHECK-NEXT:    f16[392,672]{1,0} parameter(0)
 ; CHECK-NEXT:    f32[1]{0} parameter(1)
 ; CHECK-NEXT:    bitcast(
-; CHECK-NEXT:    ROOT %fusion.bitcast
+; CHECK-NEXT:    fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 TEST_F(FusionBitcastLiftTest, Swish1Test) {
@@ -440,10 +442,10 @@ ENTRY %main {
   ROOT %fusion = (f32[672]{0}, f32[672]{0}) fusion(%param_0, %param_1, %param_2, %param_3, %param_4, %param_5, %param_6), kind=kInput, calls=%fused_computation
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -455,10 +457,10 @@ ENTRY %main {
 ; CHECK-LABEL: ENTRY %main
 ; CHECK-COUNT-3: bitcast(
 ; CHECK-NOT:     bitcast(
-; CHECK:         ROOT %fusion.bitcast
+; CHECK:         fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 TEST_F(FusionBitcastLiftTest, Swish2Test) {
@@ -531,10 +533,10 @@ ENTRY %main {
   ROOT %fusion = (f32[672]{0}, f32[672]{0}) fusion(%param_0, %param_1, %param_2, %param_3, %param_4, %param_5), kind=kInput, calls=%fused_computation
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_TRUE(FusionBitcastLift().Run(module.get()).value());
   // Remove the old fusion not used anymore.
-  EXPECT_TRUE(HloDCE().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloDCE().Run(module.get()).value());
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-5, 1e-5}));
 
@@ -546,10 +548,10 @@ ENTRY %main {
 ; CHECK-LABEL: ENTRY %main
 ; CHECK-COUNT-2: bitcast(
 ; CHECK-NOT:     bitcast(
-; CHECK:         ROOT %fusion.bitcast
+; CHECK:         fusion(
       )");
   EXPECT_TRUE(filecheck_result.status().ok());
-  EXPECT_TRUE(filecheck_result.ValueOrDie());
+  EXPECT_TRUE(filecheck_result.value());
 }
 
 TEST_F(FusionBitcastLiftTest, LayoutChangeNotSupported) {
@@ -583,8 +585,8 @@ ENTRY entry {
   ROOT fusion = f32[3072]{0} fusion(param_0.0, param_1.0), kind=kInput, calls=fused_computation
 }
 )";
-  auto module = ParseAndReturnVerifiedModule(hlo_text).ValueOrDie();
-  EXPECT_FALSE(FusionBitcastLift().Run(module.get()).ValueOrDie());
+  auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  EXPECT_FALSE(FusionBitcastLift().Run(module.get()).value());
 }
 
 }  // namespace

@@ -175,7 +175,9 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
       ]
     group_size = num_processes * len(devices)
     collective = cross_device_ops_lib.CollectiveAllReduce(
-        devices=devices, group_size=group_size)
+        devices=devices,
+        group_size=group_size,
+        options=collective_util.Options())
     return collective, devices, cluster_resolver.task_id
 
   def as_list(self, value):
@@ -325,10 +327,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
     options = self.RunOptions(
         num_processes=num_processes,
         gpus_per_process=required_gpus,
@@ -367,10 +374,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
     options = self.RunOptions(
         mode=["func_graph"],  # Sparse reduce is not supported in eager.
         num_processes=num_processes,
@@ -447,10 +459,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     options = self.RunOptions(
         num_processes=num_processes,
@@ -490,10 +507,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     options = self.RunOptions(
         mode=["func_graph"],  # Sparse reduce is not supported in eager.
@@ -614,10 +636,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       collective, devices, _ = self.make_collective(num_processes,
@@ -677,10 +704,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
-    if (num_processes == 2 and
+    if (num_processes != required_gpus and
         implementation == CommunicationImplementation.NCCL):
-      self.skipTest("Skip NCCL + 2 processes combination. NCCL requires "
-                    "physical GPUs for every process.")
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       collective, devices, _ = self.make_collective(num_processes,
@@ -749,6 +781,12 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
   def testAllReduceMixedDenseAndSparse(self, num_processes, required_gpus,
                                        implementation, reduce_op):
 
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
+
     def replica_fn():
       collective, devices, _ = self.make_collective(num_processes,
                                                     required_gpus)
@@ -795,6 +833,19 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           prefer_unique_instance_key=[True, False]))
   def testAllGatherSameShape(self, num_processes, required_gpus, implementation,
                              func_mode, axis, prefer_unique_instance_key):
+
+    if (required_gpus == 0 and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip CPU + NCCL combination")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -865,13 +916,24 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=1,
           required_gpus=2,
           implementation=[
-              CommunicationImplementation.NCCL, CommunicationImplementation.RING
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testMultiThreadedCollectiveLaunchNoInterleave(self, num_processes,
                                                     required_gpus,
                                                     implementation,
                                                     prefer_unique_instance_key):
+
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -927,11 +989,22 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=1,
           required_gpus=2,
           implementation=[
-              CommunicationImplementation.NCCL, CommunicationImplementation.RING
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testInputsAreFunctionArgs(self, num_processes, required_gpus,
                                 implementation, prefer_unique_instance_key):
+
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -969,7 +1042,8 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=2,
           required_gpus=[0, 1],
           implementation=[
-              CommunicationImplementation.RING, CommunicationImplementation.NCCL
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testTimeoutReduceDense(self, num_processes, implementation, required_gpus,
@@ -978,6 +1052,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -1007,7 +1090,8 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=2,
           required_gpus=[0, 1],
           implementation=[
-              CommunicationImplementation.RING, CommunicationImplementation.NCCL
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testTimeoutBatchReduceDense(self, num_processes, implementation,
@@ -1015,6 +1099,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -1045,7 +1138,8 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=2,
           required_gpus=[0, 1],
           implementation=[
-              CommunicationImplementation.RING, CommunicationImplementation.NCCL
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testTimeoutReduceSparse(self, num_processes, implementation,
@@ -1053,6 +1147,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -1084,7 +1187,8 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
           num_processes=2,
           required_gpus=[0, 1],
           implementation=[
-              CommunicationImplementation.RING, CommunicationImplementation.NCCL
+              CommunicationImplementation.RING,
+              CommunicationImplementation.NCCL,
           ],
           prefer_unique_instance_key=[True, False]))
   def testTimeoutBatchReduceSparse(self, num_processes, required_gpus,
@@ -1092,6 +1196,15 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
     if (required_gpus == 0 and
         implementation == CommunicationImplementation.NCCL):
       self.skipTest("Skip CPU + NCCL combination")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.NCCL):
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
+    if (num_processes != required_gpus and
+        implementation == CommunicationImplementation.AUTO):
+      self.skipTest("Skip potential NCCL combination (AUTO) with mismatched "
+                    "process and GPU count. NCCL requires physical GPUs for "
+                    "every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = (
@@ -1121,6 +1234,10 @@ class CollectiveOpsTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(combinations.combine(num_processes=1, required_gpus=2))
   def testNcclOrdering(self, num_processes, required_gpus):
+
+    if num_processes != required_gpus:
+      self.skipTest("Skip NCCL combination with mismatched process and GPU "
+                    "count. NCCL requires physical GPUs for every process.")
 
     def replica_fn():
       CollectiveReplicaLauncher._prefer_unique_instance_key = True

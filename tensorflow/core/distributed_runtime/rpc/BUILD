@@ -4,16 +4,17 @@
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
+    "if_google",
     "if_windows",
     "tf_cc_binary",
     "tf_cc_test",
     "tf_cuda_library",
 )
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_tests")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_grpc_dependencies")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_grpc_cc_dependencies")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "tf_cuda_cc_test")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "tf_cuda_cc_tests")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_dependencies")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_cc_dependencies")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "filegroup")  # buildifier: disable=same-origin-load
 
 # For platform specific build config
 load(
@@ -27,7 +28,10 @@ load(
 )
 
 package(
-    default_visibility = ["//visibility:public"],
+    default_visibility = if_google(
+        ["//tensorflow:internal"],
+        ["//visibility:public"],
+    ),
     licenses = ["notice"],
 )
 
@@ -45,6 +49,8 @@ cc_library(
     hdrs = ["grpc_util.h"],
     linkopts = if_windows(["-DEFAULTLIB:ws2_32.lib"]),
     deps = [
+        "//tensorflow/core/distributed_runtime:error_payloads",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
         "//tensorflow/core:lib",
         # Required to be able to overload TensorResponse parsing.
         "//tensorflow/core/distributed_runtime:tensor_coding",
@@ -171,7 +177,6 @@ cc_library(
         "//tensorflow/core/distributed_runtime:worker_cache_partial",
         "//tensorflow/core/distributed_runtime:worker_interface",
         "//tensorflow/core/distributed_runtime/rpc/coordination:grpc_coordination_client",
-        "//tensorflow/core/distributed_runtime/rpc/coordination:grpc_coordination_client_impl",
         "//tensorflow/core/distributed_runtime/rpc/eager:grpc_eager_client",
         "//tensorflow/core/util:env_var",
     ],
@@ -340,6 +345,7 @@ cc_library(
         "//tensorflow/core/distributed_runtime:session_mgr",
         "//tensorflow/core/distributed_runtime:worker_cache_wrapper",
         "//tensorflow/core/distributed_runtime:worker_env",
+        "//tensorflow/core/distributed_runtime/rpc/coordination:grpc_coordination_service_impl",
         "//tensorflow/core/distributed_runtime/rpc/eager:grpc_eager_service_impl",
         "//tensorflow/core/profiler/rpc:profiler_service_impl",
     ] + tf_protos_profiler_service() + tf_grpc_dependencies() + tf_grpc_cc_dependencies(),
@@ -522,6 +528,8 @@ tf_cc_test(
     ],
     deps = [
         ":grpc_util",
+        "//tensorflow/core/distributed_runtime:error_payloads",
+        "//tensorflow/core/platform:errors",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/protobuf:worker_proto_cc",
@@ -531,6 +539,8 @@ tf_cc_test(
 tf_cuda_cc_test(
     name = "grpc_session_test",
     size = "medium",
+    # highly variable test time. Typically ~2m, but can spike to 5+min.
+    timeout = "long",
     srcs = ["grpc_session_test.cc"],
     linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags() + [

@@ -30,7 +30,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/window_util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/numbers.h"
+#include "tensorflow/tsl/platform/numbers.h"
 
 namespace xla {
 namespace spmd {
@@ -48,7 +48,7 @@ StatusOr<HloInstruction*> PartitionConvolutionWithBatchGroupCount(
     int64_t num_partitions, SpmdBuilder* b) {
   TF_RET_CHECK(original_hlo->opcode() == HloOpcode::kConvolution);
   if (original_hlo->batch_group_count() == 1 ||
-      original_hlo->batch_group_count() < num_partitions) {
+      original_hlo->batch_group_count() % num_partitions != 0) {
     return nullptr;
   }
 
@@ -140,7 +140,7 @@ StatusOr<HloInstruction*> PartitionConvolutionWithFeatureGroupCount(
     int64_t num_partitions, SpmdBuilder* b) {
   TF_RET_CHECK(original_hlo->opcode() == HloOpcode::kConvolution);
   if (original_hlo->feature_group_count() == 1 ||
-      original_hlo->feature_group_count() < num_partitions) {
+      original_hlo->feature_group_count() % num_partitions != 0) {
     return nullptr;
   }
 
@@ -149,7 +149,7 @@ StatusOr<HloInstruction*> PartitionConvolutionWithFeatureGroupCount(
       lhs.base_shape().dimensions(dnums.input_feature_dimension());
   const int64_t kernel_output_feature_size =
       rhs.base_shape().dimensions(dnums.kernel_output_feature_dimension());
-  if (input_feature_size != kernel_output_feature_size ||
+  if (kernel_output_feature_size % original_hlo->feature_group_count() != 0 ||
       input_feature_size % original_hlo->feature_group_count() != 0) {
     return nullptr;
   }

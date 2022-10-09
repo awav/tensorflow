@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_
-#define TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_
+#ifndef TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_H_
+#define TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_H_
 
 #include <stdint.h>
 
@@ -25,6 +25,7 @@ limitations under the License.
 #include "third_party/eigen3/Eigen/Core"
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
+#include "tensorflow/lite/kernels/register.h"
 
 namespace tflite {
 namespace delegates {
@@ -87,14 +88,26 @@ class SimpleDelegate {
 };
 
 // Base class for single/multiple delegate tests.
-// Friend of Interpreter to access RemoveAllDelegates().
+// Friend of Interpreter to access private methods.
 class TestDelegation {
+ public:
+  // Returns an empty interpreter that uses the same default delegates that are
+  // normally enabled by default.
+  static std::unique_ptr<Interpreter> NewInterpreterWithDefaultDelegates() {
+    auto interpreter = std::make_unique<Interpreter>();
+    interpreter->lazy_delegate_providers_ =
+        tflite::ops::builtin::BuiltinOpResolver().GetDelegateCreators();
+    return interpreter;
+  }
+
  protected:
   TfLiteStatus RemoveAllDelegates() {
     return interpreter_->RemoveAllDelegates();
   }
 
   void SetUpSubgraph(Subgraph* subgraph);
+  void AddSubgraphs(int subgraphs_to_add,
+                    int* first_new_subgraph_index = nullptr);
 
   std::unique_ptr<Interpreter> interpreter_;
 };
@@ -176,4 +189,4 @@ class TestFP16Delegation : public ::testing::TestWithParam<int> {
 }  // namespace delegates
 }  // namespace tflite
 
-#endif  // TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_
+#endif  // TENSORFLOW_LITE_DELEGATES_DELEGATE_TEST_UTIL_H_

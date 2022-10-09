@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H
-#define TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H
+#ifndef TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H_
+#define TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H_
 
 #include "mlir/IR/PatternMatch.h"  // from @llvm-project
 #include "mlir/Support/LLVM.h"  // from @llvm-project
@@ -168,39 +168,53 @@ llvm::Optional<Value> convertRoundingDivideByPOT(PatternRewriter& rewriter,
                                                  Value rshift_value);
 
 // Lowers ReduceAll to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceAllOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceAllOp(PatternRewriter& rewriter,
+                                         Operation* op,
+                                         RankedTensorType output_type,
+                                         Value input_value,
+                                         ElementsAttr axes_elems);
 
 // Lowers ReduceAny to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceAnyOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceAnyOp(PatternRewriter& rewriter,
+                                         Operation* op,
+                                         RankedTensorType output_type,
+                                         Value input_value,
+                                         ElementsAttr axes_elems);
 
 // Lowers ReduceMin to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceMinOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceMinOp(PatternRewriter& rewriter,
+                                         Operation* op,
+                                         RankedTensorType output_type,
+                                         Value input_value,
+                                         ElementsAttr axes_elems);
 
 // Lowers ReduceMax to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceMaxOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceMaxOp(PatternRewriter& rewriter,
+                                         Operation* op,
+                                         RankedTensorType output_type,
+                                         Value input_value,
+                                         ElementsAttr axes_elems);
 
 // Lowers ReduceProd to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceProdOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceProdOp(PatternRewriter& rewriter,
+                                          Operation* op,
+                                          RankedTensorType output_type,
+                                          Value input_value,
+                                          ElementsAttr axes_elems);
 
 // Lowers ReduceSum to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceSumOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceSumOp(PatternRewriter& rewriter,
+                                         Operation* op,
+                                         RankedTensorType output_type,
+                                         Value input_value,
+                                         ElementsAttr axes_elems);
 
 // Lowers ReduceMean to a sequence of TOSA ops.
-llvm::Optional<Value> convertReduceMeanOp(
-    PatternRewriter& rewriter, Operation* op, RankedTensorType output_type,
-    Value input_value, ElementsAttr axes_elems, bool keep_dims);
+llvm::Optional<Value> convertReduceMeanOp(PatternRewriter& rewriter,
+                                          Operation* op,
+                                          RankedTensorType output_type,
+                                          Value input_value,
+                                          ElementsAttr axes_elem);
 
 // Lowers ResizeBilinear and ResizeNearestNeighbor to TOSA resize.
 llvm::Optional<Value> convertResizeOp(PatternRewriter& rewriter, Operation* op,
@@ -258,4 +272,4 @@ llvm::Optional<Value> convertOneHotOp(PatternRewriter& rewriter, Operation* op,
 };  // namespace tosa
 };  // namespace mlir
 
-#endif  // TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H
+#endif  // TENSORFLOW_COMPILER_MLIR_TOSA_TRANSFORMS_LEGALIZE_COMMON_H_

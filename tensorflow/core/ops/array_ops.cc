@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/mirror_pad_mode.h"
 #include "tensorflow/core/util/padding.h"
 #include "tensorflow/core/util/strided_slice_op.h"
@@ -47,7 +48,7 @@ Status GetAxisForPackAndUnpack(InferenceContext* c, int32_t rank_after_pack,
                                    ")");
   }
   if (*axis < 0) *axis = (rank_after_pack + *axis);
-  return Status::OK();
+  return OkStatus();
 }
 
 template <typename T>
@@ -75,7 +76,7 @@ Status PadKnown(InferenceContext* c, ShapeHandle input,
     TF_RETURN_IF_ERROR(c->Add(c->Dim(input, i), pad0 + pad1, &dims[i]));
   }
   c->set_output(0, c->MakeShape(dims));
-  return Status::OK();
+  return OkStatus();
 }
 
 Status PadShapeFn(InferenceContext* c) {
@@ -104,7 +105,7 @@ Status PadShapeFn(InferenceContext* c) {
     } else {
       c->set_output(0, c->UnknownShape());
     }
-    return Status::OK();
+    return OkStatus();
   }
 
   const int64_t num_dims = paddings_t->shape().dim_size(0);
@@ -128,7 +129,7 @@ Status TransposeShapeFn(InferenceContext* c) {
   // information to at least find the rank of the output.
   if (!c->RankKnown(input) && !c->ValueKnown(perm_elems) && perm == nullptr) {
     c->set_output(0, c->UnknownShape());
-    return Status::OK();
+    return OkStatus();
   }
 
   // Find our value of the rank.
@@ -145,7 +146,7 @@ Status TransposeShapeFn(InferenceContext* c) {
     // indicate either a scalar or a 1-dimensional array, both of which the
     // transpose op returns unchanged.
     c->set_output(0, input);
-    return Status::OK();
+    return OkStatus();
   }
 
   std::vector<DimensionHandle> dims;
@@ -168,7 +169,7 @@ Status TransposeShapeFn(InferenceContext* c) {
 
     for (int32_t i = 0; i < rank; ++i) {
       int64_t in_idx = data[i];
-      if (in_idx >= rank) {
+      if (in_idx >= rank || in_idx <= -rank) {
         return errors::InvalidArgument("perm dim ", in_idx,
                                        " is out of range of input rank ", rank);
       }
@@ -181,7 +182,7 @@ Status TransposeShapeFn(InferenceContext* c) {
   }
 
   c->set_output(0, c->MakeShape(dims));
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SetOutputShapeForReshape(InferenceContext* c) {
@@ -192,7 +193,7 @@ Status SetOutputShapeForReshape(InferenceContext* c) {
   if (!c->RankKnown(out)) {
     // We have no information about the shape of the output.
     c->set_output(0, out);
-    return Status::OK();
+    return OkStatus();
   }
   if (c->RankKnown(in)) {
     // We don't know the number of output elements, but we can try to infer
@@ -276,7 +277,7 @@ Status SetOutputShapeForReshape(InferenceContext* c) {
     }
   }
   c->set_output(0, out);
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -317,7 +318,7 @@ REGISTER_OP("ParallelConcat")
 
       c->set_output(0, passed_shape);
 
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("Pack")
@@ -336,7 +337,7 @@ REGISTER_OP("Pack")
       }
       if (!c->RankKnown(cur)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
       // Determine the axis that will be added, converting from negative
       // axes to a positive point per negative indexing rules.
@@ -363,7 +364,7 @@ REGISTER_OP("Pack")
           }
         }
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("DeepCopy")
@@ -407,7 +408,7 @@ REGISTER_OP("Empty")
       ShapeHandle out;
       TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -443,7 +444,7 @@ REGISTER_OP("Unpack")
         out = c->UnknownShape();
       }
       for (int i = 0; i < c->num_outputs(); ++i) c->set_output(i, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("UnravelIndex")
@@ -462,7 +463,7 @@ REGISTER_OP("UnravelIndex")
       } else {
         c->set_output(0, c->UnknownShape());
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("BroadcastTo")
@@ -479,7 +480,7 @@ REGISTER_OP("BroadcastTo")
       if (!c->RankKnown(out)) {
         // We have no information about the shape of the output.
         c->set_output(0, out);
-        return Status::OK();
+        return OkStatus();
       }
 
       ShapeHandle in = c->input(0);
@@ -487,7 +488,7 @@ REGISTER_OP("BroadcastTo")
         // We have no information about the shape of the input,
         // nothing to do here.
         c->set_output(0, out);
-        return Status::OK();
+        return OkStatus();
       }
       int out_rank = c->Rank(out);
       TF_RETURN_IF_ERROR(c->WithRankAtMost(in, out_rank, &in));
@@ -504,7 +505,7 @@ REGISTER_OP("BroadcastTo")
         }
       }
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -560,7 +561,7 @@ REGISTER_OP("ConcatOffset")
       for (int i = 1; i < c->num_inputs(); ++i) {
         c->set_output(i - 1, c->input(i));
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -595,7 +596,7 @@ REGISTER_OP("Split")
             c->ReplaceDim(input, split_dim, split_dim_size, &out));
       }
       for (int i = 0; i < num_split; ++i) c->set_output(i, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("SplitV")
@@ -605,7 +606,7 @@ REGISTER_OP("SplitV")
     .Output("output: num_split * T")
     .Attr("num_split: int >= 1")
     .Attr("T: type")
-    .Attr("Tlen: {int32, int64} = DT_INT64")
+    .Attr("Tlen: {int8, int32, int64} = DT_INT64")
     .SetShapeFn([](InferenceContext* c) {
       DimensionHandle split_dimension;
       ShapeHandle input = c->input(0);
@@ -681,6 +682,12 @@ REGISTER_OP("SplitV")
           if (data[i] == -1 && c->ValueKnown(split_dim_size)) {
             size = split_dim_size - total_size;
           }
+          // If we have a negative known size (either explicit, or computed
+          // via -1), then the split sizes are invalid.
+          if (size < -1 || (size == -1 && c->ValueKnown(split_dim_size))) {
+            return errors::InvalidArgument("Split size at index ", i,
+                                           " must be >= 0. Got: ", size);
+          }
           TF_RETURN_IF_ERROR(
               c->ReplaceDim(input, split_dim, c->MakeDim(size), &output_shape));
           c->set_output(i, output_shape);
@@ -695,7 +702,7 @@ REGISTER_OP("SplitV")
         }
       }
 
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -714,7 +721,7 @@ REGISTER_OP("Const")
         dims.push_back(c->MakeDim(shape.dim_size(i)));
       }
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return OkStatus();
     });
 
 // Returns a constant tensor on the host.  Useful for writing C++ tests
@@ -770,7 +777,7 @@ REGISTER_OP("OnesLike")
     .Output("y: T")
     .Attr(
         "T: {bfloat16, half, float, double, int8, uint8, int16, uint16, int32, "
-        "int64, complex64, complex128, bool}")
+        "uint32, int64, uint64, complex64, complex128, bool}")
     .SetShapeFn(shape_inference::UnchangedShape);
 
 // --------------------------------------------------------------------------
@@ -787,7 +794,7 @@ REGISTER_OP("Diag")
       ShapeHandle out;
       TF_RETURN_IF_ERROR(c->Concatenate(in, in, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -801,7 +808,7 @@ REGISTER_OP("DiagPart")
       ShapeHandle in = c->input(0);
       if (!c->RankKnown(in)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
       // Rank must be even, and result will have rank <rank/2>.
       const int32_t rank = c->Rank(in);
@@ -818,7 +825,7 @@ REGISTER_OP("DiagPart")
             c->Merge(c->Dim(in, i), c->Dim(in, i + mid), &dims[i]));
       }
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -831,14 +838,14 @@ REGISTER_OP("MatrixDiag")
       TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), 1, &in));
       if (!c->RankKnown(in)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
       const int32_t rank = c->Rank(in);
       ShapeHandle out;
       TF_RETURN_IF_ERROR(
           c->Concatenate(in, c->Vector(c->Dim(in, rank - 1)), &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("MatrixDiagV2")
@@ -894,7 +901,7 @@ REGISTER_OP("MatrixSetDiag")
         TF_RETURN_IF_ERROR(c->Merge(input, diag, &output));
       }
       c->set_output(0, output);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("MatrixSetDiagV2")
@@ -926,7 +933,7 @@ REGISTER_OP("MatrixDiagPart")
       TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), 2, &in));
       if (!c->RankKnown(in)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
       const int32_t rank = c->Rank(in);
       std::vector<DimensionHandle> dims;
@@ -938,7 +945,7 @@ REGISTER_OP("MatrixDiagPart")
           c->Min(c->Dim(in, rank - 2), c->Dim(in, rank - 1), &min_dim));
       dims.push_back(min_dim);
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("MatrixDiagPartV2")
@@ -991,7 +998,7 @@ REGISTER_OP("Reverse")
             "reverse does not work on tensors with more than 8 dimensions");
       }
       c->set_output(0, input);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1038,7 +1045,7 @@ REGISTER_OP("ReverseV2")
         }
       }
       c->set_output(0, input);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1080,7 +1087,7 @@ REGISTER_OP("EditDistance")
       }
 
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1119,7 +1126,7 @@ REGISTER_OP("Fill")
         c->set_output_handle_shapes_and_types(0, *shape_and_type);
       }
 
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1181,7 +1188,7 @@ REGISTER_OP("Gather")
       ShapeHandle out;
       TF_RETURN_IF_ERROR(c->Concatenate(indices_shape, params_subshape, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1192,7 +1199,7 @@ REGISTER_OP("GatherV2")
     .Attr("batch_dims: int = 0")
     .Output("output: Tparams")
     .Attr("Tparams: type")
-    .Attr("Tindices: {int32,int64}")
+    .Attr("Tindices: {int16, int32,int64}")
     .Attr("Taxis: {int32,int64}")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle params_shape;
@@ -1215,7 +1222,7 @@ REGISTER_OP("GatherV2")
         } else {
           c->set_output(0, c->UnknownShape());
         }
-        return Status::OK();
+        return OkStatus();
       }
 
       // Note, axis can be negative.
@@ -1268,7 +1275,7 @@ REGISTER_OP("GatherV2")
       }
 
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1277,7 +1284,7 @@ REGISTER_OP("GatherNd")
     .Input("indices: Tindices")
     .Output("output: Tparams")
     .Attr("Tparams: type")
-    .Attr("Tindices: {int32,int64}")
+    .Attr("Tindices: {int16, int32,int64}")
     .SetShapeFn(shape_inference::GatherNdShape);
 
 // --------------------------------------------------------------------------
@@ -1285,7 +1292,7 @@ REGISTER_OP("Identity")
     .Input("input: T")
     .Output("output: T")
     .Attr("T: type")
-    .SetForwardTypeFn(full_type::ReplicateInputs())
+    .SetForwardTypeFn(full_type::ReplicateInput())
     .SetShapeFn(shape_inference::UnchangedShape);
 
 REGISTER_OP("Snapshot")
@@ -1322,7 +1329,7 @@ REGISTER_OP("IdentityN")
               " for IdentityN node because input shape #", i, " is unknown."));
         }
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1415,7 +1422,7 @@ REGISTER_OP("InvertPermutation")
       ShapeHandle x;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &x));
       c->set_output(0, x);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1463,7 +1470,7 @@ Status UniqueIdxShapeFn(InferenceContext* c) {
   const Tensor* axis_t = c->input_tensor(1);
   if (axis_t == nullptr || !c->RankKnown(input)) {
     c->set_output(1, c->Vector(InferenceContext::kUnknownDim));
-    return Status::OK();
+    return OkStatus();
   }
 
   if (c->Rank(c->input(1)) != 1) {
@@ -1476,7 +1483,7 @@ Status UniqueIdxShapeFn(InferenceContext* c) {
       return errors::InvalidArgument("x expects a 1D vector.");
     }
     c->set_output(1, input);
-    return Status::OK();
+    return OkStatus();
   } else if (n == 1) {
     int64_t axis;
     if (axis_t->dtype() == DT_INT32) {
@@ -1494,7 +1501,7 @@ Status UniqueIdxShapeFn(InferenceContext* c) {
       axis += input_rank;
     }
     c->set_output(1, c->Vector(c->Dim(input, axis)));
-    return Status::OK();
+    return OkStatus();
   }
   return errors::InvalidArgument(
       "axis does not support input tensors larger than 1 elements.");
@@ -1526,7 +1533,7 @@ REGISTER_OP("UniqueV2")
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->UnknownShapeOfRank(c->Rank(c->input(0))));
       TF_RETURN_IF_ERROR(UniqueIdxShapeFn(c));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1542,7 +1549,7 @@ REGISTER_OP("UniqueWithCounts")
       c->set_output(0, uniq);
       c->set_output(1, c->input(0));
       c->set_output(2, uniq);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("UniqueWithCountsV2")
@@ -1558,7 +1565,7 @@ REGISTER_OP("UniqueWithCountsV2")
       c->set_output(0, c->UnknownShapeOfRank(c->Rank(c->input(0))));
       TF_RETURN_IF_ERROR(UniqueIdxShapeFn(c));
       c->set_output(2, c->Vector(InferenceContext::kUnknownDim));
-      return Status::OK();
+      return OkStatus();
     });
 
 namespace {
@@ -1573,7 +1580,7 @@ Status ShapeShapeFn(InferenceContext* c) {
     }
     c->set_output(i, c->Vector(dim));
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -1615,7 +1622,7 @@ REGISTER_OP("EnsureShape")
       TF_RETURN_IF_ERROR(
           c->Merge(desired_shape_handle, input_shape_handle, &merged_shape));
       c->set_output(0, merged_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1647,9 +1654,19 @@ REGISTER_OP("ReverseSequence")
         return errors::InvalidArgument(
             "batch_dim must be < input rank: ", batch_dim, " vs. ", input_rank);
       }
+
       if (seq_dim >= input_rank) {
         return errors::InvalidArgument(
             "seq_dim must be < input rank: ", seq_dim, " vs. ", input_rank);
+      }
+
+      // To prevent out of bound access when calling c->Dim(input, batch_dim),
+      // batch_dim range [-1 * input rank, input rank) is allowed. However,
+      // the op implementation has a stricter bound for batch_dim requiring >= 0
+      // value. Thus, perform strict check here.
+      if (batch_dim < 0) {
+        return errors::InvalidArgument("batch_dim must be >=0, got ",
+                                       batch_dim);
       }
 
       DimensionHandle batch_dim_dim = c->Dim(input, batch_dim);
@@ -1661,7 +1678,7 @@ REGISTER_OP("ReverseSequence")
       TF_RETURN_IF_ERROR(
           c->ReplaceDim(input, batch_dim, batch_dim_dim, &output_shape));
       c->set_output(0, output_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1711,7 +1728,7 @@ REGISTER_OP("StridedSlice")
     .Input("strides: Index")
     .Output("output: T")
     .Attr("T: type")
-    .Attr("Index: {int32, int64}")
+    .Attr("Index: {int16, int32, int64}")
     .Attr("begin_mask: int = 0")
     .Attr("end_mask: int = 0")
     .Attr("ellipsis_mask: int = 0")
@@ -1733,7 +1750,7 @@ REGISTER_OP("StridedSlice")
       if (!c->RankKnown(input) || !c->ValueKnown(sparse_dims_dim) ||
           strides_value == nullptr) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
 
       PartialTensorShape input_shape({});
@@ -1771,7 +1788,7 @@ REGISTER_OP("StridedSlice")
         c->set_output_handle_shapes_and_types(0, *shape_and_type);
       }
 
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("StridedSliceGrad")
@@ -1792,7 +1809,7 @@ REGISTER_OP("StridedSliceGrad")
       ShapeHandle out;
       TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("StridedSliceAssign")
@@ -1877,7 +1894,7 @@ REGISTER_OP("Tile")
             c->Multiply(c->Dim(input, i), c->Dim(multiples, i), &dims[i]));
       }
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1896,7 +1913,7 @@ REGISTER_OP("Where")
     .Output("index: int64")
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Matrix(c->UnknownDim(), c->Rank(c->input(0))));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1915,7 +1932,7 @@ REGISTER_OP("BroadcastArgs")
       if (!c->ValueKnown(c->Dim(shape_x, 0)) ||
           !c->ValueKnown(c->Dim(shape_y, 0))) {
         c->set_output(0, c->Vector(InferenceContext::kUnknownDim));
-        return Status::OK();
+        return OkStatus();
       }
 
       int64_t x_dim = c->Value(c->Dim(shape_x, 0));
@@ -1923,7 +1940,7 @@ REGISTER_OP("BroadcastArgs")
 
       // Broadcasted shape is going to be as large as the largest dimension.
       c->set_output(0, c->Vector(std::max(x_dim, y_dim)));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1940,7 +1957,7 @@ REGISTER_OP("BroadcastGradientArgs")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &unused));
       c->set_output(0, c->Vector(InferenceContext::kUnknownDim));
       c->set_output(1, c->Vector(InferenceContext::kUnknownDim));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -1989,7 +2006,7 @@ Status MirrorPadKnown(InferenceContext* c, ShapeHandle input,
     TF_RETURN_IF_ERROR(c->Subtract(c->Dim(input, i), pad0 + pad1, &dims[i]));
   }
   c->set_output(0, c->MakeShape(dims));
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -2009,7 +2026,7 @@ REGISTER_OP("MirrorPadGrad")
         // We don't know the rank of the output since the first
         // padding dimension is unknown.
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
 
       int64_t input_rank = c->Value(pad_0);
@@ -2024,7 +2041,7 @@ REGISTER_OP("MirrorPadGrad")
         // input rank, so return the rank of the output with unknown
         // dimensions.
         c->set_output(0, c->UnknownShapeOfRank(input_rank));
-        return Status::OK();
+        return OkStatus();
       }
 
       if (paddings_t->dtype() == DT_INT32) {
@@ -2053,7 +2070,7 @@ REGISTER_OP("Placeholder")
       ShapeHandle out;
       TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(shape, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // Placeholder was modified in a backwards compatible way to do what
@@ -2084,7 +2101,7 @@ REGISTER_OP("PlaceholderWithDefault")
       ShapeHandle unused;
       TF_RETURN_IF_ERROR(c->Merge(input, out, &unused));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2104,7 +2121,7 @@ REGISTER_OP("ExpandDims")
       }
       if (dim_t == nullptr || !c->RankKnown(input)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return OkStatus();
       }
 
       int64_t dim;
@@ -2134,7 +2151,7 @@ REGISTER_OP("ExpandDims")
       TF_RETURN_IF_ERROR(c->Concatenate(output, c->Vector(1), &output));
       TF_RETURN_IF_ERROR(c->Concatenate(output, end, &output));
       c->set_output(0, output);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2184,7 +2201,7 @@ REGISTER_OP("Squeeze")
           // give up and return Unknown Shape.
           if (squeeze_dims.empty()) {
             c->set_output(0, c->UnknownShape());
-            return Status::OK();
+            return OkStatus();
           }
         } else if (c->Value(dim) == 1) {
           if (is_explicit_match || squeeze_dims.empty()) {
@@ -2202,7 +2219,7 @@ REGISTER_OP("Squeeze")
       }
 
       c->set_output(0, c->MakeShape(result_shape));
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2221,7 +2238,7 @@ REGISTER_OP("ListDiff")
       ShapeHandle out = c->Vector(InferenceContext::kUnknownDim);
       c->set_output(0, out);
       c->set_output(1, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 namespace {
@@ -2319,7 +2336,7 @@ Status SpaceToBatchShapeHelper(InferenceContext* c, ShapeHandle input_shape,
   TF_RETURN_IF_ERROR(c->Concatenate(c->MakeShape(output_dims),
                                     remaining_input_shape, &result));
   c->set_output(0, result);
-  return Status::OK();
+  return OkStatus();
 }
 
 Status BatchToSpaceShapeHelper(InferenceContext* c, ShapeHandle input_shape,
@@ -2394,7 +2411,7 @@ Status BatchToSpaceShapeHelper(InferenceContext* c, ShapeHandle input_shape,
   TF_RETURN_IF_ERROR(c->Concatenate(c->MakeShape(output_dims),
                                     remaining_input_shape, &result));
   c->set_output(0, result);
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -2530,7 +2547,7 @@ REGISTER_OP("SpaceToDepth")
                                              output_depth, &output_shape, c));
 
       c->set_output(0, output_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2582,7 +2599,7 @@ REGISTER_OP("DepthToSpace")
                                              output_depth, &output_shape, c));
 
       c->set_output(0, output_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2652,7 +2669,7 @@ REGISTER_OP("ExtractImagePatches")
             c->MakeShape({batch_size_dim, InferenceContext::kUnknownDim,
                           InferenceContext::kUnknownDim, output_depth_dim});
         c->set_output(0, output_shape);
-        return Status::OK();
+        return OkStatus();
       }
       auto in_rows = c->Value(in_rows_dim);
       auto in_cols = c->Value(in_cols_dim);
@@ -2671,7 +2688,7 @@ REGISTER_OP("ExtractImagePatches")
       ShapeHandle output_shape = c->MakeShape(
           {batch_size_dim, output_rows, output_cols, output_depth_dim});
       c->set_output(0, output_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2757,7 +2774,7 @@ REGISTER_OP("ExtractVolumePatches")
             c->MakeShape({batch_size_dim, InferenceContext::kUnknownDim,
                           InferenceContext::kUnknownDim, output_depth_dim});
         c->set_output(0, output_shape);
-        return Status::OK();
+        return OkStatus();
       }
       auto in_planes = c->Value(in_planes_dim);
       auto in_rows = c->Value(in_rows_dim);
@@ -2781,7 +2798,7 @@ REGISTER_OP("ExtractVolumePatches")
           c->MakeShape({batch_size_dim, output_planes, output_rows, output_cols,
                         output_depth_dim});
       c->set_output(0, output_shape);
-      return Status::OK();
+      return OkStatus();
     });
 
 // --------------------------------------------------------------------------
@@ -2794,7 +2811,7 @@ REGISTER_OP("OneHot")
     .Attr("axis: int = -1")
     .Output("output: T")
     .Attr("T: type")
-    .Attr("TI: {uint8, int32, int64} = DT_INT64")
+    .Attr("TI: {uint8, int8, int32, int64} = DT_INT64")
     .SetShapeFn([](InferenceContext* c) {
       int32_t axis;
       TF_RETURN_IF_ERROR(c->GetAttr("axis", &axis));
@@ -2819,7 +2836,7 @@ REGISTER_OP("OneHot")
       TF_RETURN_IF_ERROR(c->Concatenate(front, c->Vector(depth), &front));
       TF_RETURN_IF_ERROR(c->Concatenate(front, back, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return OkStatus();
     });
 
 // EXPERIMENTAL. DO NOT USE OR DEPEND ON THIS YET.
@@ -2857,7 +2874,10 @@ REGISTER_OP("QuantizeAndDequantizeV2")
       ShapeHandle minmax;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), minmax_rank, &minmax));
       TF_RETURN_IF_ERROR(c->Merge(c->input(2), minmax, &minmax));
-      if (axis != -1) {
+      if (axis < -1) {
+        return errors::InvalidArgument("axis should be at least -1, got ",
+                                       axis);
+      } else if (axis != -1) {
         ShapeHandle input;
         TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), axis + 1, &input));
         DimensionHandle depth;
@@ -2865,7 +2885,7 @@ REGISTER_OP("QuantizeAndDequantizeV2")
             c->Merge(c->Dim(minmax, 0), c->Dim(input, axis), &depth));
       }
       c->set_output(0, c->input(0));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizeAndDequantizeV4")
@@ -2889,7 +2909,10 @@ REGISTER_OP("QuantizeAndDequantizeV4")
       ShapeHandle minmax;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), minmax_rank, &minmax));
       TF_RETURN_IF_ERROR(c->Merge(c->input(2), minmax, &minmax));
-      if (axis != -1) {
+      if (axis < -1) {
+        return errors::InvalidArgument("axis should be at least -1, got ",
+                                       axis);
+      } else if (axis != -1) {
         ShapeHandle input;
         TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), axis + 1, &input));
         DimensionHandle depth;
@@ -2897,7 +2920,7 @@ REGISTER_OP("QuantizeAndDequantizeV4")
             c->Merge(c->Dim(minmax, 0), c->Dim(input, axis), &depth));
       }
       c->set_output(0, c->input(0));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizeAndDequantizeV4Grad")
@@ -2917,7 +2940,10 @@ REGISTER_OP("QuantizeAndDequantizeV4Grad")
       ShapeHandle minmax;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(2), minmax_rank, &minmax));
       TF_RETURN_IF_ERROR(c->Merge(c->input(3), minmax, &minmax));
-      if (axis != -1) {
+      if (axis < -1) {
+        return errors::InvalidArgument("axis should be at least -1, got ",
+                                       axis);
+      } else if (axis != -1) {
         ShapeHandle input;
         TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), axis + 1, &input));
         DimensionHandle depth;
@@ -2929,7 +2955,7 @@ REGISTER_OP("QuantizeAndDequantizeV4Grad")
       c->set_output(0, inputs);
       c->set_output(1, minmax);
       c->set_output(2, minmax);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizeAndDequantizeV3")
@@ -2950,7 +2976,10 @@ REGISTER_OP("QuantizeAndDequantizeV3")
       ShapeHandle minmax;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), minmax_rank, &minmax));
       TF_RETURN_IF_ERROR(c->Merge(c->input(2), minmax, &minmax));
-      if (axis != -1) {
+      if (axis < -1) {
+        return errors::InvalidArgument("axis should be at least -1, got ",
+                                       axis);
+      } else if (axis != -1) {
         ShapeHandle input;
         TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), axis + 1, &input));
         DimensionHandle depth;
@@ -2960,7 +2989,7 @@ REGISTER_OP("QuantizeAndDequantizeV3")
       ShapeHandle unused;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &unused));
       c->set_output(0, c->input(0));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizeV2")
@@ -3000,6 +3029,12 @@ REGISTER_OP("Dequantize")
         return errors::InvalidArgument("axis should be at least -1, got ",
                                        axis);
       }
+      auto input_dims = c->Rank(c->input(0));
+      if (axis > input_dims) {
+        return errors::InvalidArgument(
+            "Axis must be less than input dimension(", input_dims, "), got ",
+            axis);
+      }
       const int minmax_rank = (axis == -1) ? 0 : 1;
       TF_RETURN_IF_ERROR(shape_inference::UnchangedShape(c));
       ShapeHandle minmax;
@@ -3007,12 +3042,19 @@ REGISTER_OP("Dequantize")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(2), minmax_rank, &minmax));
       if (axis != -1) {
         ShapeHandle input;
+        if (axis >= kint32max) {
+          // Check int32 max bound for a corner case to prevent integer flow
+          // when input actually has kint32max rank and above bound check is not
+          // triggered.
+          return errors::InvalidArgument(
+              "Axis cannot be >= kint32max value, got ", axis);
+        }
         TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), axis + 1, &input));
         DimensionHandle depth;
         TF_RETURN_IF_ERROR(
             c->Merge(c->Dim(minmax, 0), c->Dim(input, axis), &depth));
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizedConcat")
@@ -3034,7 +3076,7 @@ REGISTER_OP("QuantizedConcat")
       }
       c->set_output(1, c->Scalar());
       c->set_output(2, c->Scalar());
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizedReshape")
@@ -3054,7 +3096,7 @@ REGISTER_OP("QuantizedReshape")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &unused));
       c->set_output(1, c->Scalar());
       c->set_output(2, c->Scalar());
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("QuantizedInstanceNorm")
@@ -3082,7 +3124,7 @@ REGISTER_OP("QuantizedInstanceNorm")
       // y_min and y_max are scalars.
       c->set_output(1, c->Scalar());
       c->set_output(2, c->Scalar());
-      return Status::OK();
+      return OkStatus();
     });
 
 namespace {
@@ -3093,7 +3135,7 @@ Status ScatterNdTensorShape(InferenceContext* c) {
   ShapeHandle indices_shape;
   TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(1), 1, &indices_shape));
   ShapeHandle updates_shape;
-  TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(2), 1, &updates_shape));
+  TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(2), 0, &updates_shape));
   return shape_inference::ScatterNdShapeHelper(c, indices_shape, updates_shape,
                                                output_shape);
 }
@@ -3111,7 +3153,7 @@ REGISTER_OP("UpperBound")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 2, &unused_shape));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 2, &unused_shape));
       c->set_output(0, c->input(1));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("LowerBound")
@@ -3125,7 +3167,7 @@ REGISTER_OP("LowerBound")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 2, &unused_shape));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 2, &unused_shape));
       c->set_output(0, c->input(1));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("ScatterNd")
@@ -3134,7 +3176,7 @@ REGISTER_OP("ScatterNd")
     .Input("shape: Tindices")
     .Output("output: T")
     .Attr("T: type")
-    .Attr("Tindices: {int32, int64}")
+    .Attr("Tindices: {int16, int32, int64}")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle indices_shape;
       TF_RETURN_IF_ERROR(c->WithRankAtLeast(c->input(0), 1, &indices_shape));
@@ -3152,7 +3194,7 @@ REGISTER_OP("TensorScatterUpdate")
     .Input("updates: T")
     .Output("output: T")
     .Attr("T: type")
-    .Attr("Tindices: {int32, int64}")
+    .Attr("Tindices: {int16, int32, int64, uint16}")
     .SetShapeFn(ScatterNdTensorShape);
 
 REGISTER_OP("TensorScatterAdd")
@@ -3231,7 +3273,7 @@ REGISTER_OP("FakeQuantWithMinMaxVars")
       ShapeHandle unused;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &unused));
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("FakeQuantWithMinMaxVarsGradient")
@@ -3257,7 +3299,7 @@ REGISTER_OP("FakeQuantWithMinMaxVarsGradient")
       c->set_output(0, inputs);
       c->set_output(1, min_max);
       c->set_output(2, min_max);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("FakeQuantWithMinMaxVarsPerChannel")
@@ -3279,7 +3321,7 @@ REGISTER_OP("FakeQuantWithMinMaxVarsPerChannel")
       TF_RETURN_IF_ERROR(c->Merge(c->Dim(min, 0), c->Dim(max, 0), &unused));
 
       c->set_output(0, input);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("FakeQuantWithMinMaxVarsPerChannelGradient")
@@ -3308,7 +3350,7 @@ REGISTER_OP("FakeQuantWithMinMaxVarsPerChannelGradient")
       c->set_output(0, inputs);
       c->set_output(1, min_max);
       c->set_output(2, min_max);
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("Fingerprint")
@@ -3339,7 +3381,7 @@ REGISTER_OP("Fingerprint")
 
       DimensionHandle batch = c->Dim(c->input(0), 0);
       c->set_output(0, c->MakeShape({batch, fingerprint_size}));
-      return Status::OK();
+      return OkStatus();
     });
 
 #ifdef INTEL_MKL

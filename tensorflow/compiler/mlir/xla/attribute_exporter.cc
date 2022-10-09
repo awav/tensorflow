@@ -15,42 +15,40 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/xla/attribute_exporter.h"
 
-#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/lhlo_gpu_ops.h"
+#include <utility>
+
+#include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Dialect/lhlo_gpu/IR/lhlo_gpu_ops.h"
+#include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/compiler/xla/stream_executor/dnn.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/stream_executor/dnn.h"
 
 namespace xla {
 
 ConvolutionDimensionNumbers ConvertConvDimensionNumbers(
-    mlir::mhlo::ConvDimensionNumbers input) {
+    mlir::mhlo::ConvDimensionNumbersAttr input) {
   ConvolutionDimensionNumbers output;
 
-  output.set_input_batch_dimension(
-      input.input_batch_dimension().getValue().getSExtValue());
-  output.set_input_feature_dimension(
-      input.input_feature_dimension().getValue().getSExtValue());
-
-  for (auto v : input.input_spatial_dimensions().getValues<int64_t>()) {
+  output.set_input_batch_dimension(input.getInputBatchDimension());
+  output.set_input_feature_dimension(input.getInputFeatureDimension());
+  for (auto v : input.getInputSpatialDimensions()) {
     output.add_input_spatial_dimensions(v);
   }
 
   output.set_kernel_input_feature_dimension(
-      input.kernel_input_feature_dimension().getValue().getSExtValue());
+      input.getKernelInputFeatureDimension());
   output.set_kernel_output_feature_dimension(
-      input.kernel_output_feature_dimension().getValue().getSExtValue());
+      input.getKernelOutputFeatureDimension());
 
-  for (auto v : input.kernel_spatial_dimensions().getValues<int64_t>()) {
+  for (auto v : input.getKernelSpatialDimensions()) {
     output.add_kernel_spatial_dimensions(v);
   }
 
-  output.set_output_batch_dimension(
-      input.output_batch_dimension().getValue().getSExtValue());
-  output.set_output_feature_dimension(
-      input.output_feature_dimension().getValue().getSExtValue());
+  output.set_output_batch_dimension(input.getOutputBatchDimension());
+  output.set_output_feature_dimension(input.getOutputFeatureDimension());
 
-  for (auto v : input.output_spatial_dimensions().getValues<int64_t>()) {
+  for (auto v : input.getOutputSpatialDimensions()) {
     output.add_output_spatial_dimensions(v);
   }
 
@@ -58,14 +56,8 @@ ConvolutionDimensionNumbers ConvertConvDimensionNumbers(
 }
 
 StatusOr<stream_executor::dnn::ActivationMode> ConvertConvActivationMode(
-    llvm::StringRef input) {
-  llvm::Optional<mlir::lmhlo_gpu::Activation> activation =
-      mlir::lmhlo_gpu::symbolizeActivation(input);
-  if (!activation) {
-    return InternalError("Unexpected activation");
-  }
-
-  switch (activation.getValue()) {
+    mlir::lmhlo_gpu::Activation activation) {
+  switch (activation) {
     case mlir::lmhlo_gpu::Activation::None:
       return stream_executor::dnn::kNone;
     case mlir::lmhlo_gpu::Activation::Sigmoid:
@@ -116,7 +108,7 @@ StatusOr<std::vector<ReplicaGroup>> ConvertReplicaGroups(
 // and source-target pairs are defined in HLO.
 StatusOr<std::vector<std::pair<int64_t, int64_t>>> ConvertNx2Attribute(
     llvm::Optional<mlir::DenseIntElementsAttr> optional_attr) {
-  if (!optional_attr.hasValue())
+  if (!optional_attr.has_value())
     return std::vector<std::pair<int64_t, int64_t>>{};
   mlir::DenseIntElementsAttr attr = *optional_attr;
   auto type = attr.getType().dyn_cast<mlir::RankedTensorType>();
@@ -183,10 +175,26 @@ StatusOr<xla::CustomCallApiVersion> ConvertCustomCallApiVersion(
       return xla::CustomCallApiVersion::API_VERSION_ORIGINAL;
     case mlir::mhlo::CustomCallApiVersion::API_VERSION_STATUS_RETURNING:
       return xla::CustomCallApiVersion::API_VERSION_STATUS_RETURNING;
+    case mlir::mhlo::CustomCallApiVersion::API_VERSION_STATUS_RETURNING_UNIFIED:
+      return xla::CustomCallApiVersion::API_VERSION_STATUS_RETURNING_UNIFIED;
     default:
       return InvalidArgument("Unknown CustomCallApiVersion enum value #%d",
                              api_version);
   }
+}
+
+StatusOr<std::vector<std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>>>
+ConvertCustomCallOutputOperandAliasing(mlir::ArrayAttr aliasArrayAttr) {
+  std::vector<std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>> aliasInfo;
+  for (auto attr : aliasArrayAttr.getValue()) {
+    auto alias = attr.cast<mlir::mhlo::OutputOperandAliasAttr>();
+    ShapeIndex outputShapeIndex(alias.getOutputTupleIndices());
+    ShapeIndex operandShapeIndex(alias.getOperandTupleIndices());
+    aliasInfo.push_back(std::make_pair(
+        outputShapeIndex,
+        std::make_pair(alias.getOperandIndex(), operandShapeIndex)));
+  }
+  return aliasInfo;
 }
 
 }  // namespace xla

@@ -13,11 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "absl/algorithm/container.h"
-#include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/execution_options_util.h"
 #include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
@@ -32,7 +32,7 @@ limitations under the License.
 namespace xla {
 namespace {
 
-string GetFloatDataType(bool use_bfloat16) {
+std::string GetFloatDataType(bool use_bfloat16) {
   return use_bfloat16 ? "bf16" : "f32";
 }
 
@@ -123,12 +123,12 @@ static std::vector<GroupedConvolution2DSpec> GetConv2DTestCases() {
   return config_set;
 }
 
-string GroupedConvolution2DTestDataToString(
+std::string GroupedConvolution2DTestDataToString(
     const ::testing::TestParamInfo<
         ::testing::tuple<GroupedConvolution2DSpec, bool>>& data) {
   const auto& spec = ::testing::get<0>(data.param);
-  const string data_type = GetFloatDataType(::testing::get<1>(data.param));
-  string str = absl::StrCat(
+  const std::string data_type = GetFloatDataType(::testing::get<1>(data.param));
+  std::string str = absl::StrCat(
       "activation_dims_", absl::StrJoin(spec.activation_dims, "x"),
       "_activation_layout_", absl::StrJoin(spec.activation_layout, "_"),
       "_kernel_dims_", absl::StrJoin(spec.kernel_dims, "x"), "_kernel_layout_",
@@ -145,9 +145,9 @@ string GroupedConvolution2DTestDataToString(
   return str;
 }
 
-string BuildHloTextGroupedConvolution2D(const GroupedConvolution2DSpec& spec,
-                                        bool use_bfloat16) {
-  const string data_type = GetFloatDataType(use_bfloat16);
+std::string BuildHloTextGroupedConvolution2D(
+    const GroupedConvolution2DSpec& spec, bool use_bfloat16) {
+  const std::string data_type = GetFloatDataType(use_bfloat16);
   if (spec.activation_dims[1] == 1 && spec.kernel_dims[1] == 2) {
     // Check for outer dim.
     return absl::StrFormat(
@@ -237,7 +237,8 @@ XLA_TEST_P(GroupedConvolution2DTest, DoIt) {
   }
 #endif
 
-  const string hlo_text = BuildHloTextGroupedConvolution2D(spec, use_bfloat16);
+  const std::string hlo_text =
+      BuildHloTextGroupedConvolution2D(spec, use_bfloat16);
 
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{0.01, 0.01},
                             [](HloModule* module) -> Status {
@@ -267,7 +268,7 @@ ENTRY convolution {
   ROOT convolution = f32[2,4,4,1]{3,2,1,0} convolution(p1, reverse), window={size=4x4 pad=3_3x3_3}, dim_labels=fb01_o01i->f01b, feature_group_count=2
 }
 )")
-                    .ValueOrDie();
+                    .value();
   TF_ASSERT_OK_AND_ASSIGN(auto fake_arguments, MakeFakeArguments(module.get()));
   std::vector<Literal*> fake_argument_ptrs;
   absl::c_transform(

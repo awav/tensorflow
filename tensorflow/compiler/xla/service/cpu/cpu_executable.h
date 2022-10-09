@@ -19,12 +19,15 @@ limitations under the License.
 #include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "absl/types/span.h"
+#include "tensorflow/compiler/xla/runtime/executable.h"
+#include "tensorflow/compiler/xla/runtime/jit_executable.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/cpu/simple_orc_jit.h"
+#include "tensorflow/compiler/xla/service/custom_call_status_internal.h"
 #include "tensorflow/compiler/xla/service/executable.h"
 #include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_execution_profile.h"
@@ -32,14 +35,60 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/shaped_buffer.h"
 #include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/compiler/xla/stream_executor/device_memory_allocator.h"
+#include "tensorflow/compiler/xla/stream_executor/stream_executor.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/core/platform/macros.h"
-#include "tensorflow/core/platform/stream_executor_no_cuda.h"
-#include "tensorflow/core/platform/types.h"
-#include "tensorflow/stream_executor/device_memory_allocator.h"
 
 namespace xla {
 namespace cpu {
+
+// Maps the descriptor table with inputs/outputs. Note that flattened_outputs
+// and result are mutually exclusive -- see below.
+//
+// Contains the same info as "xla_framework" MLIR annotations. That is:
+// - inputs: indices in the descriptor table of the input arguments.
+// - output_is_tuple: if set, the output is a tuple.
+// - flattened_outputs: if the output is a tuple, this contains the indices
+//   (if any) in the descriptor table that correspond to the expanded tuple.
+// - result: if the output is NOT a tuple, contains the index in the descriptor
+//   table of the result.
+struct XlaFrameworkMapping {
+  std::vector<int64_t> inputs;
+  std::vector<int64_t> flattened_outputs;
+  int64_t result = -1;
+  bool output_is_tuple = false;
+};
+
+// BufferDesc for passing raw `buffer` (i.e. void ptr + size) arguments.
+class BufferDesc {
+ public:
+  BufferDesc(void* data, size_t size) : data_(data), size_(size) {}
+  void* data() const { return data_; }
+  size_t size() const { return size_; }
+
+ private:
+  void* data_;
+  size_t size_;
+};
+
+class XlaRuntimeCpuExecutable {
+ public:
+  explicit XlaRuntimeCpuExecutable(
+      std::unique_ptr<xla::runtime::JitExecutable> jit_executable,
+      const XlaFrameworkMapping& xla_framework_mapping)
+      : jit_executable_(std::move(jit_executable)),
+        default_executable_(&jit_executable_->DefaultExecutable().get()),
+        xla_framework_mapping_(xla_framework_mapping) {}
+  Status Execute(const std::vector<BufferDesc>& descriptor_table);
+  xla::runtime::Executable& default_executable() {
+    return *default_executable_;
+  }
+
+ private:
+  std::unique_ptr<xla::runtime::JitExecutable> jit_executable_;
+  xla::runtime::Executable* default_executable_;  // owned by jit_executable_.
+  XlaFrameworkMapping xla_framework_mapping_;
+};
 
 // CPU-targeting implementation of the XLA Executable interface.
 //
@@ -50,10 +99,24 @@ class CpuExecutable : public Executable {
   CpuExecutable(std::unique_ptr<SimpleOrcJIT> jit,
                 std::unique_ptr<const BufferAssignment> assignment,
                 std::unique_ptr<HloModule> hlo_module,
-                const string& entry_function_name,
+                const std::string& entry_function_name,
                 std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data,
                 std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map);
+  // XLA Runtime constructor.
+  CpuExecutable(
+      std::unique_ptr<HloModule> hlo_module,
+      std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data,
+      std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map,
+      std::unique_ptr<const BufferAssignment> assignment,
+      std::unique_ptr<XlaRuntimeCpuExecutable> xla_runtime_executable);
+
   ~CpuExecutable() override;
+
+  bool IsXlaRuntime() const { return xla_runtime_executable_ != nullptr; }
+
+  Status ExecuteXlaRuntime(const std::vector<BufferDesc>& descriptor_table) {
+    return xla_runtime_executable_->Execute(descriptor_table);
+  }
 
   StatusOr<ExecutionOutput> ExecuteAsyncOnStream(
       const ServiceExecutableRunOptions* run_options,
@@ -68,9 +131,9 @@ class CpuExecutable : public Executable {
       HloExecutionProfile* hlo_execution_profile);
 
   // This should be called after set_ir_module_string.
-  const string& ir_module_string() const { return ir_module_string_; }
+  const std::string& ir_module_string() const { return ir_module_string_; }
 
-  void set_ir_module_string(const string& ir_module_string) {
+  void set_ir_module_string(const std::string& ir_module_string) {
     ir_module_string_ = ir_module_string;
   }
 
@@ -80,7 +143,7 @@ class CpuExecutable : public Executable {
   using ComputeFunctionType =
       void (*)(void* /*result*/, const ExecutableRunOptions* /*run_options*/,
                const void** /*args*/, void** /*buffer_table*/,
-               int64_t* /*profile_counters*/);
+               XlaCustomCallStatus* /*status*/, int64_t* /*profile_counters*/);
 
   const ComputeFunctionType& compute_function() const {
     return compute_function_;
@@ -137,17 +200,21 @@ class CpuExecutable : public Executable {
   // CpuExecutable. We save a string instead of an llvm::Module* because leaving
   // llvm::Module* in a singleton can cause the heap checker to emit false
   // positives.
-  string ir_module_string_;
+  std::string ir_module_string_;
 
   // Unique identifier.
-  string module_name_;
+  std::string module_name_;
 
   ComputeFunctionType compute_function_;
 
   // Entry function name for the computation.
-  const string entry_function_name_;
+  const std::string entry_function_name_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CpuExecutable);
+  // If not null, XLA Runtime is enabled.
+  std::unique_ptr<XlaRuntimeCpuExecutable> xla_runtime_executable_;
+
+  CpuExecutable(const CpuExecutable&) = delete;
+  CpuExecutable& operator=(const CpuExecutable&) = delete;
 };
 
 }  // namespace cpu

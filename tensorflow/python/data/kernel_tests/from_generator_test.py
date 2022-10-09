@@ -337,7 +337,7 @@ class FromGeneratorTest(test_base.DatasetTestBase, parameterized.TestCase):
     # Use an `Event` to signal that the generator has been deleted.
     event = threading.Event()
 
-    class GeneratorWrapper(object):
+    class GeneratorWrapper:
 
       def __iter__(self):
         return self
@@ -494,7 +494,8 @@ class FromGeneratorTest(test_base.DatasetTestBase, parameterized.TestCase):
         yield [20]
 
     with self.assertRaisesRegex(
-        TypeError, r"Cannot convert value \[tf.int64\] to a TensorFlow DType"):
+        TypeError, r"Cannot convert the argument `type_value`: "
+        r"\[tf.int64\] to a TensorFlow DType"):
       dataset_ops.Dataset.from_generator(
           generator, output_types=[dtypes.int64])
 
