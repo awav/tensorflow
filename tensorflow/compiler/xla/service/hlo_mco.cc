@@ -41,10 +41,19 @@ namespace xla {
 namespace {
 namespace m = match;
 
+// The stack use when performing an iterative DFS traversing of a graph
 using DFSStack = absl::InlinedVector<std::pair<int, HloInstruction*>, 16>;
+
+//  Debug Info printer function
+//  Input:
+//    functionName: the function name of which calls the printer
+//    content: the contents to be printed
 void DebugPrint(std::string functionName, std::string content) {
   LOG(INFO) << "[" << functionName << "]: " << content;
 }
+
+// Copied from tensorflow/compiler/xla/service/hlo_instruction.cc to print
+// cycles when traversing
 void PrintCycle(const HloInstruction* child, DFSStack* dfs_stack) {
   // This set contains HloInstructions from the top of `DFSStack` that might
   // belong to the cycle, i.e. if  DFSStack :=[back,...,child,...,top], then
@@ -84,8 +93,9 @@ void PrintCycle(const HloInstruction* child, DFSStack* dfs_stack) {
   }
 }
 
-// Push "child" onto the dfs_stack if not already visited.  Returns false if a
-// cycle was detected, and true otherwise.
+// Copied from tensorflow/compiler/xla/service/hlo_instruction.cc to push
+// "child" onto the dfs_stack if not already visited.  Returns false if a cycle
+// was detected, and true otherwise.
 template <typename Visitor>
 inline bool PushDFSChild(Visitor* visitor, DFSStack* dfs_stack,
                          HloInstruction* child) {
@@ -106,7 +116,14 @@ inline bool PushDFSChild(Visitor* visitor, DFSStack* dfs_stack,
   }
 }
 
-// perform a pre-order DFS to find an existing chain
+// Modified from PostOrderDFS provided by XLA. Perform a pre-order DFS to find
+// an existing chain
+//  Input:
+//    root: the root node of a matrix chain
+//    visitor: a ChainRecorder instance
+//    ignore_control_predecessors: a deprecated parameter, not used in MCO
+//  Output:
+//    a status which indicates whether the traversing is successful.
 template <typename Visitor>
 static Status DetectMatrixChainPreorderDFS(
     HloInstruction* root, Visitor* visitor,
@@ -233,6 +250,9 @@ StatusOr<Literal> CreateOneConstVector(const PrimitiveType primitive_type,
 
 }  // namespace
 
+// When doing a pre-order DFS, if the currently visited instruction is not a dot
+// instruction, we record it as an operand of the currently processed matrix
+// chain
 Status ChainRecorder::Preprocess(HloInstruction* hlo) {
   if (!MatrixChainDetector::CheckRealDot(hlo)) {
     chain_map[chain_root].emplace_back(hlo);
@@ -315,6 +335,9 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
   }
   return true;
 }
+
+// A dot instruction is the root of a matrix chain if it is an operand of
+// a non-dot instruction or it is the root node of the whole graph
 Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
   DebugPrint("MatrixChainDetector::Preprocess", "Start " + hlo->ToString());
   // skip 2D dot op but if it is the root_instruction, then it must be the root
@@ -371,6 +394,11 @@ StatusOr<HloInstruction*> HloMCO::ConstructOptimalChain(
   return optimal_root;
 }
 
+// Since solution[i][j] stores optimal break point in subexpression from i to j.
+// So we need to construct the optimal chain in a recursive way:
+//  Construct[start,end]
+//  = create_dot(Construct[start,solution[start_index][end_index]],
+//      Construct[solution[start_index][end_index]+1,end]);
 Status HloMCO::ConstructOptimalChainHelper(
     HloInstruction* orig_root, std::vector<std::vector<int64_t>>& solution,
     std::vector<HloInstruction*>& chain_instructions, int64_t start_index,
@@ -507,7 +535,8 @@ Status HloMCO::ConstructOptimalChainHelper(
       "HloMCO::ConstructOptimalChainHelper",
       "combile left_operand =" + left_operand->name() +
           " subgraph_stack.size= " + std::to_string(subgraph_stack.size()));
-
+  // we need to recover reduce_sum operation when construct the new optimal
+  // chain
   if (reduce_one_vector_to_orig_init_val.contains(left_operand)) {
     if (left_operand->shape().dimensions(0) ==
         right_operand->shape().dimensions(0)) {
@@ -673,12 +702,12 @@ StatusOr<bool> HloMCO::ChainOptimize(
 
 // Transpose Unfolder
 // In practice, there are often cases where the chain contains other operations
-// such as *transpose*. Take $(ABC(D(JH)^T)^T)^T$ for example. If we directly
+// such as *transpose*. Take (ABC(D(JH)^T)^T)^T for example. If we directly
 // apply MCO on this chain, this chain will be seen as three separate matrix
-// multiplication chains: $(ABCX)^T$, $(DY)^T$ and $(JH)^T$, where
-// $X=(D(JH)^T)^T, Y=(JH)^T$. However,the optimisation result is not optimal. By
-// the property of transposition we know that expression $(ABC(D(JH)^T)^T)^T$ is
-// actually equivalent to $(ABCJHD^T)^T$. That means we need to unfold such
+// multiplication chains: (ABCX)^T, (DY)^T and (JH)^T, where
+// X=(D(JH)^T)^T, Y=(JH)^T. However,the optimisation result is not optimal. By
+// the property of transposition we know that expression (ABC(D(JH)^T)^T)^T is
+// actually equivalent to (ABCJHD^T)^T. That means we need to unfold such
 // transposes before optimising matrix chains, which allows optimising longer
 // chains and thus getting more speed gains and reducing memory consumption.
 Status EinSumReduceSumConverter::TransposeSinker(
@@ -741,16 +770,15 @@ Status EinSumReduceSumConverter::TransposeSinker(
 //  Einsum(Einstein summation convention) is an elegant symbolic representation
 //  that sums elementwise products of the tensors involved in the operation on
 //  user-specified dimensions. For example, a matrix multiplication $AB$ can be
-//  expressed in einsum as $einsum('ik,kj \rightarrow ij', A, B)$. While einsum
+//  expressed in einsum as $einsum('ik,kj -> ij', A, B)$. While einsum
 //  can be very convenient for users, allowing them to write more elegant
 //  algorithms, it can cause a lot of problems for matrix chain optimisation.
-//  Let $A \in R^{20 \times 30}, B \in R^{20 \times 40}, C \in R^{10 \times
-//  30}$. and consider an expression:
+//  Let A,B,C to be matrices with dimensions [20,30], [20,40] and [10,30]
+//  respectively. Consider an expression:
 //  $$
-//  reduce\_sum(einsum('ki,jk \rightarrow ij',einsum('ki,kj \rightarrow
-//  ij',A,B),C),axis=1)
+//  reduce_sum(einsum('ki,jk -> ij',einsum('ki,kj -> ij',A,B),C),axis=1)
 //  $$
-//  This expression is actually equivalent to $reduce\_sum((A^TB)^TC^T,axis=1)$.
+//  This expression is actually equivalent to $reduce_sum((A^TB)^TC^T,axis=1)$.
 //  For a valid matrix multiplication chain, the contracting dimensions of
 //  neighbouring matrices must match, i.e. the number of columns of one matrix
 //  must be equal to the number of rows of the next matrix. This means that the
@@ -927,26 +955,26 @@ bool EinSumReduceSumConverter::IsReduceSumDot(const HloInstruction* reduce) {
 // operator is to sum all the elements of the specified dimension on the
 // operand. If the operand of reduce_sum is a two-dimensional matrix, this
 // operation can actually be seen as a multiplication of that matrix with a
-// vector whose elements are all 1s. Suppose there is a matrix $M \in R^{m
-// \times n}$. We can perform the reduce_sum operation on both dimensions of the
+// vector whose elements are all 1s. Suppose there is a matrix M with dimension
+// [m,n] We can perform the reduce_sum operation on both dimensions of the
 // matrix. The operations in each of these two dimensions are equal to the
 // following matrix-vector multiplications respectively:
 // $$
-//  reduce\_sum(M,0) = M^Tv
-//  \\reduce\_sum(M,1) = Mv
+//  reduce_sum(M,0) = M^Tv
+//  reduce_sum(M,1) = Mv
 // $$
-// So if we can convert these *reducesum*s, which are equivalent to
+// So if we can convert these reduce_sums, which are equivalent to
 // matrix-vector multiplications, into their corresponding matrix-vector
 // multiplications, our optimisation algorithm can optimise more and longer
 // matrix multiplication chains. Of course, in order not to affect the
 // processing of reducesum by other eXLA optimisers, we also need to convert the
 // matrix vector multiplication from reducesum back to the corresponding
 // reducesum operation after performing matrix chain optimisation. For example,
-// if we want to calculate $reduce\_sum(ABC,axis=1)$,where  $A \in R^{40 \times
-// 20}, B \in R^{20 \times 30}, C \in R^{30 \times 10}$. By transforming
+// if we want to calculate reduce_sum(ABC,axis=1), where A,B,C are matrices with
+// dimensions [20,30], [20,40] and [10,30] respectively. By transforming
 // reducesum into matrix vector multiplication, completing matrix chain
 // optimisation and recovering reducesum, we can obtain the following equation:
-// $reduce\_sum(ABC,axis=1) = ABCv = A(B(Cv))=A(B\cdot reduce\_sum(C,axis=1))$.
+// $reduce_sum(ABC,axis=1) = ABCv = A(B(Cv))=A(B * reduce_sum(C,axis=1))$.
 
 Status EinSumReduceSumConverter::HandleReduce(HloInstruction* reduce) {
   if (!IsReduceSumDot(reduce)) {
@@ -1062,7 +1090,7 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
     DebugPrint("HloMCO::Run", "finish matriox_chain_detector");
 
     auto chain_map = matrix_chain_detector.GetChainMap();
-    auto reduce_one_vector_to_orig_init_val = converter.GetReduceOneVetorSet();
+    auto reduce_one_vector_to_orig_init_val = converter.GetReduceOneVetorMap();
     DebugPrint("HloMCO::Run",
                "chain_map.size = " + std::to_string(chain_map.size()));
     TF_ASSIGN_OR_RETURN(bool changed_for_computation,
