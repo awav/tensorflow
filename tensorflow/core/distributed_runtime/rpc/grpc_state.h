@@ -317,7 +317,7 @@ class Exchange {
   }
 
   // If `status` is success, completes this exchange by parsing the
-  // response_buf_ and invoking cb_ with Status::OK(). Else, invokes the
+  // response_buf_ and invoking cb_ with OkStatus(). Else, invokes the
   // callback with `status`.
   void Complete(Status status);
 
@@ -418,8 +418,9 @@ class StreamingRPCState : public UntypedStreamingRPCState {
  public:
   // Default behavior is to set fail_fast = False and handle timeouts
   // manually.
-  StreamingRPCState(std::unique_ptr<grpc::GenericClientAsyncReaderWriter> call,
-                    const std::shared_ptr<::grpc::ClientContext>& context)
+  StreamingRPCState(
+      std::unique_ptr<::grpc::GenericClientAsyncReaderWriter> call,
+      const std::shared_ptr<::grpc::ClientContext>& context)
       : context_(context), call_(std::move(call)), call_state_(State::kActive) {
     Ref();
     VLOG(3) << "Created new StreamingRPCState " << this;
@@ -526,7 +527,7 @@ class StreamingRPCState : public UntypedStreamingRPCState {
     e = &exchanges_.GetFront();
     mu_.unlock();
 
-    e->Complete(Status::OK());
+    e->Complete(OkStatus());
 
     {
       mutex_lock l(mu_);
@@ -625,7 +626,7 @@ class StreamingRPCState : public UntypedStreamingRPCState {
   // Order of context_ and call_ is important because context_ must outlive
   // call_.
   const std::shared_ptr<const ::grpc::ClientContext> context_;
-  std::unique_ptr<grpc::GenericClientAsyncReaderWriter> call_;
+  std::unique_ptr<::grpc::GenericClientAsyncReaderWriter> call_;
 
   mutable mutex mu_;
   ExchangeQueue exchanges_ TF_GUARDED_BY(mu_);
@@ -711,7 +712,7 @@ class StreamingRPCDispatcher {
     // the channel to become ready.
     context_->set_wait_for_ready(true);
 
-    std::unique_ptr<grpc::GenericClientAsyncReaderWriter> call =
+    std::unique_ptr<::grpc::GenericClientAsyncReaderWriter> call =
         stub_->PrepareCall(context_.get(), method_, cq_);
 
     state_.reset(new StreamingRPCState<Response>(std::move(call), context_));

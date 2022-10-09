@@ -14,7 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/gpu/gpu_constants.h"
-#include "tensorflow/core/framework/allocator.h"
+
+#include "tensorflow/tsl/framework/allocator.h"
 
 namespace xla {
 namespace gpu {
@@ -27,8 +28,10 @@ namespace gpu {
 // TODO(b/111767313): Consider raising EIGEN_MAX_ALIGN_BYTES if it helps.
 const int64_t kEntryParameterAlignBytes = 16;
 
-const int64_t kXlaAllocatedBufferAlignBytes =
-    tensorflow::Allocator::kAllocatorAlignment;
+// cudnn requires 128-bit (16-byte) alignment for TensorCore operations, but
+// says that 1024-bit (128-byte) alignment "may deliver better performance".
+// https://docs.nvidia.com/deeplearning/cudnn/developer-guide/index.html#tensor-ops-guidelines-for-dl-compiler
+const int64_t kXlaAllocatedBufferAlignBytes = 128;
 
 const int64_t kConstantBufferAlignBytes = kXlaAllocatedBufferAlignBytes;
 

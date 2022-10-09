@@ -49,7 +49,7 @@ limitations under the License.
 #include "tensorflow/core/util/transform_output_iterator.h"
 
 #if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
+#include "tensorflow/compiler/xla/stream_executor/cuda/cuda_activation.h"
 using stream_executor::cuda::ScopedActivateExecutorContext;
 #elif TENSORFLOW_USE_ROCM
 #include "tensorflow/core/platform/rocm.h"
@@ -315,7 +315,7 @@ class DynamicPartitionOpGPU : public AsyncOpKernel {
       done();
     };
 
-    c->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
+    c->device()->tensorflow_accelerator_device_info()->event_mgr->ThenExecute(
         stream, wrapped_callback);
   }
 
@@ -467,6 +467,8 @@ class DynamicPartitionOpGPU : public AsyncOpKernel {
       Name("DynamicPartition").Device(DEVICE_GPU).TypeConstraint<T>("T"), \
       DynamicPartitionOpGPU<T>)
 
+TF_CALL_int32(REGISTER_DYNAMIC_PARTITION_GPU);
+TF_CALL_int64(REGISTER_DYNAMIC_PARTITION_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_DYNAMIC_PARTITION_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_DYNAMIC_PARTITION_GPU);
 #undef REGISTER_DYNAMIC_PARTITION_GPU

@@ -84,12 +84,12 @@ make -f tensorflow/lite/micro/tools/make/Makefile generate_projects
 
 This will take a few minutes, since it has to download some large toolchains for
 the dependencies. Once it has finished, you should see some folders created
-inside a path like `tensorflow/lite/micro/tools/make/gen/linux_x86_64/prj/` (the
+inside a path like `gen/linux_x86_64/prj/` (the
 exact path depends on your host operating system). These folders contain the
 generated project and source files.
 
 After running the command, you'll be able to find the *Hello World* projects in
-`tensorflow/lite/micro/tools/make/gen/linux_x86_64/prj/hello_world`. For
+`gen/linux_x86_64/prj/hello_world`. For
 example, `hello_world/keil` will contain the Keil project.
 
 ## Run the tests
@@ -180,10 +180,10 @@ script from the TensorFlow repository:
 ```
 
 The resulting library can be found in
-`tensorflow/lite/micro/tools/make/gen/arduino_x86_64/prj/tensorflow_lite.zip`.
+`gen/arduino_x86_64/prj/tensorflow_lite.zip`.
 
 ## Port to new devices
 
 Guidance on porting TensorFlow Lite for Microcontrollers to new platforms and
 devices can be found in
-[`micro/README.md`](https://github.com/tensorflow/tflite-micro/blob/main/tensorflow/lite/micro/README.md).
+[`micro/docs/new_platform_support.md`](https://github.com/tensorflow/tflite-micro/blob/main/tensorflow/lite/micro/docs/new_platform_support.md).

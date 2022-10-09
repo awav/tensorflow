@@ -93,6 +93,10 @@ class GpuCudaMallocAsyncAllocator : public Allocator {
 
   static int GetInstantiatedCountTestOnly() { return number_instantiated_; }
 
+  AllocatorMemoryType GetMemoryType() const override {
+    return AllocatorMemoryType::kDevice;
+  }
+
  private:
 #if TF_CUDA_MALLOC_ASYNC_SUPPORTED
   se::StreamExecutor* stream_exec_;  // Not owned.
@@ -122,7 +126,7 @@ class GpuCudaMallocAsyncAllocator : public Allocator {
 
   // Stats.
   // Structures mutable after construction
-  mutable mutex lock_;
+  mutable tsl::mutex lock_;
   std::unique_ptr<AllocatorStats> stats_ TF_PT_GUARDED_BY(lock_);
   absl::flat_hash_map<const void*, size_t> size_map_ TF_GUARDED_BY(lock_);
 };

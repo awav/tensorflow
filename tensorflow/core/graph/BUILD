@@ -1,8 +1,12 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
+)
+load(
+    "//third_party/mkl:build_defs.bzl",
+    "if_mkl",
 )
 
 package(
@@ -132,14 +136,14 @@ filegroup(
     srcs = [
         "benchmark_testlib.h",
         "testlib.h",
-    ],
+    ] + if_mkl(["mkl_testlib.h"]),
 )
 
 filegroup(
     name = "testlib_srcs",
     srcs = [
         "testlib.cc",
-    ],
+    ] + if_mkl(["mkl_testlib.cc"]),
 )
 
 filegroup(

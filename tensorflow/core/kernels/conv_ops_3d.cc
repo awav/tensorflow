@@ -16,6 +16,8 @@ limitations under the License.
 #define USE_EIGEN_TENSOR
 #define EIGEN_USE_THREADS
 
+#include <utility>
+
 #include "tensorflow/core/framework/kernel_shape_util.h"
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -42,9 +44,9 @@ using stream_executor::dnn::DimIndex;
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #if GOOGLE_CUDA
 #include "third_party/gpus/cudnn/cudnn.h"
-#include "tensorflow/stream_executor/gpu/asm_compiler.h"
-#include "tensorflow/stream_executor/gpu/redzone_allocator.h"
-#include "tensorflow/stream_executor/tf_allocator_adapter.h"
+#include "tensorflow/compiler/xla/stream_executor/gpu/asm_compiler.h"
+#include "tensorflow/compiler/xla/stream_executor/gpu/redzone_allocator.h"
+#include "tensorflow/compiler/xla/stream_executor/tf_allocator_adapter.h"
 #endif  // GOOGLE_CUDA
 
 namespace tensorflow {
@@ -208,6 +210,7 @@ class Conv3DOp : public BinaryOp<T> {
 TF_CALL_half(REGISTER_CPU_KERNEL);
 TF_CALL_float(REGISTER_CPU_KERNEL);
 TF_CALL_double(REGISTER_CPU_KERNEL);
+TF_CALL_bfloat16(REGISTER_CPU_KERNEL);
 #undef REGISTER_CPU_KERNEL
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -218,7 +221,7 @@ struct Conv3dAutotuneGroup {
 };
 
 typedef AutotuneSingleton<Conv3dAutotuneGroup, ConvParameters,
-                          se::dnn::AlgorithmConfig>
+                          AutotuneEntry<se::dnn::ConvOp>>
     AutotuneConv3d;
 
 // TODO(mjanusz): Share logic with 2d implementation as much as possible.
@@ -282,7 +285,8 @@ struct LaunchConvOp<GPUDevice, T> {
       auto no_transpose = se::blas::Transpose::kNoTranspose;
       OP_REQUIRES_OK(
           ctx, stream->ThenBlasGemm(no_transpose, no_transpose, n, m, k, b_ptr,
-                                    n, a_ptr, k, &c_ptr, n));
+                                    n, a_ptr, k, &c_ptr, n,
+                                    se::blas::kDefaultComputePrecision));
       return;
     } else if (!is_grouped_convolution && filter_planes == in_planes &&
                filter_rows == in_rows && filter_cols == in_cols &&
@@ -303,7 +307,8 @@ struct LaunchConvOp<GPUDevice, T> {
       auto no_transpose = se::blas::Transpose::kNoTranspose;
       OP_REQUIRES_OK(
           ctx, stream->ThenBlasGemm(no_transpose, no_transpose, n, m, k, b_ptr,
-                                    n, a_ptr, k, &c_ptr, n));
+                                    n, a_ptr, k, &c_ptr, n,
+                                    se::blas::kDefaultComputePrecision));
       return;
     }
 
@@ -476,8 +481,7 @@ struct LaunchConvOp<GPUDevice, T> {
         AsDeviceMemory(transformed_output.template flat<T>().data(),
                        transformed_output.template flat<T>().size());
 
-    static int64_t ConvolveScratchSize = GetDnnWorkspaceLimit(
-        "TF_CUDNN_WORKSPACE_LIMIT_IN_MB", 1LL << 32);  // 4GB by default
+    static int64_t ConvolveScratchSize = GetDnnWorkspaceLimitOrDefault();
 
     int device_id = stream->parent()->device_ordinal();
     DataType dtype = input.dtype();
@@ -504,36 +508,16 @@ struct LaunchConvOp<GPUDevice, T> {
         se::dnn::ConvolutionKind::FORWARD, input_desc, input_ptr, filter_desc,
         filter_ptr, conv_desc, output_desc, output_ptr, ConvolveScratchSize);
     OP_REQUIRES_OK(ctx, config_or.status());
-    AlgorithmConfig algorithm_config = config_or.ConsumeValueOrDie();
+    auto autotune_entry = std::move(config_or).value();
 
-    Status cudnn_launch_status;
     DnnScratchAllocator scratch_allocator(ConvolveScratchSize, ctx);
-    if (CudnnUseFrontend()) {
-      if (algorithm_config.algorithm().has_value()) {
-        VLOG(4) << "Conv3D Execution Plan: "
-                << algorithm_config.algorithm()->exec_plan_id();
-      } else {
-        VLOG(4) << "Convolution Autotune has been turned off";
-      }
-      auto plan_and_scratch_or =
-          AllocateScratchOrFallback(&scratch_allocator, algorithm_config);
-      OP_REQUIRES_OK(ctx, plan_and_scratch_or.status());
-      auto plan_and_scratch = plan_and_scratch_or.ConsumeValueOrDie();
-      cudnn_launch_status = stream->ConvolveWithExecutionPlan(
-          se::dnn::ConvolutionKind::FORWARD, input_desc, input_ptr, filter_desc,
-          filter_ptr, output_desc, output_ptr, conv_desc,
-          std::get<se::DeviceMemoryBase>(plan_and_scratch),
-          *std::get<const se::dnn::ConvolveExecutionPlan*>(plan_and_scratch),
-          nullptr);
-    } else {
-      cudnn_launch_status = stream->ConvolveWithAlgorithm(
-          se::dnn::ConvolutionKind::FORWARD, input_desc, input_ptr, filter_desc,
-          filter_ptr, output_desc, output_ptr, conv_desc, &scratch_allocator,
-          algorithm_config, nullptr);
-    }
-
+    Status cudnn_launch_status = LaunchAutotunedConv(
+        autotune_entry, &scratch_allocator, se::dnn::ConvolutionKind::FORWARD,
+        stream, input_desc, input_ptr, filter_desc, filter_ptr, conv_desc,
+        output_desc, output_ptr);
     if (!cudnn_launch_status.ok()) {
       ctx->SetStatus(cudnn_launch_status);
+      return;
     }
 
     if (data_format == FORMAT_NHWC && compute_data_format == FORMAT_NCHW) {

@@ -45,9 +45,10 @@ class FileIO(object):
   the file line by line is 1024 * 512 bytes.
   """
 
-  def __init__(self, name, mode):
+  def __init__(self, name, mode, encoding="utf-8"):
     self.__name = name
     self.__mode = mode
+    self.__encoding = encoding
     self._read_buf = None
     self._writable_file = None
     self._binary_mode = "b" in mode
@@ -86,9 +87,9 @@ class FileIO(object):
 
   def _prepare_value(self, val):
     if self._binary_mode:
-      return compat.as_bytes(val)
+      return compat.as_bytes(val, encoding=self.__encoding)
     else:
-      return compat.as_str_any(val)
+      return compat.as_str_any(val, encoding=self.__encoding)
 
   def size(self):
     """Returns the size of the file."""
@@ -97,7 +98,8 @@ class FileIO(object):
   def write(self, file_content):
     """Writes file_content to the file. Appends to the end of the file."""
     self._prewrite_check()
-    self._writable_file.append(compat.as_bytes(file_content))
+    self._writable_file.append(
+        compat.as_bytes(file_content, encoding=self.__encoding))
 
   def read(self, n=-1):
     """Returns the contents of a file as a string.
@@ -973,3 +975,30 @@ def file_crc32(filename, block_size=_DEFAULT_BLOCK_SIZE):
       crc = binascii.crc32(chunk, crc)
       chunk = f.read(n=block_size)
   return hex(crc & 0xFFFFFFFF)
+
+
+@tf_export("io.gfile.get_registered_schemes")
+def get_registered_schemes():
+  """Returns the currently registered filesystem schemes.
+
+  The `tf.io.gfile` APIs, in addition to accepting traditional filesystem paths,
+  also accept file URIs that begin with a scheme. For example, the local
+  filesystem path `/tmp/tf` can also be addressed as `file:///tmp/tf`. In this
+  case, the scheme is `file`, followed by `://` and then the path, according to
+  [URI syntax](https://datatracker.ietf.org/doc/html/rfc3986#section-3).
+
+  This function returns the currently registered schemes that will be recognized
+  by `tf.io.gfile` APIs. This includes both built-in schemes and those
+  registered by other TensorFlow filesystem implementations, for example those
+  provided by [TensorFlow I/O](https://github.com/tensorflow/io).
+
+  The empty string is always included, and represents the "scheme" for regular
+  local filesystem paths.
+
+  Returns:
+    List of string schemes, e.g. `['', 'file', 'ram']`, in arbitrary order.
+
+  Raises:
+    errors.OpError: If the operation fails.
+  """
+  return _pywrap_file_io.GetRegisteredSchemes()
