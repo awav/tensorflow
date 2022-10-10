@@ -384,19 +384,6 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
-    // TODO(dyedgreen): Figure out what the best place for this pass is ...
-    pipeline.AddPass<HloPassFix<RceOptimizer>>();
-    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
-    // pipeline.AddPass<AlgebraicRewriter>();
-    pipeline.AddPass<HloMCO>();
-    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
-    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
-    // ReshapeSinker may introduce new redundant reshape chain 
-    pipeline.AddPass<HloPassFix<RceOptimizer>>();
-    pipeline.AddPass<TensorSplitter>();
-    pipeline.AddPass<TensorSplitterV2>();
-    pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
     if (debug_options.xla_gpu_deterministic_ops()) {
       // Scatter is nondeterministic, so eliminate all Scatters.
@@ -416,6 +403,25 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<CallInliner>();
 
     pipeline.AddPass<DotDecomposer>();
+
+    // TODO(dyedgreen): Figure out what the best place for this pass is ...
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
+    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+    // pipeline.AddPass<AlgebraicRewriter>();
+    pipeline.AddPass<HloMCO>();
+    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+    // ReshapeSinker may introduce new redundant reshape chain 
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
+    pipeline.AddPass<TensorSplitter>();
+    pipeline.AddPass<TensorSplitterV2>();
+    pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+    
+    pipeline.AddPass<SortSimplifier>();
+    pipeline.AddPass<TupleSimplifier>();
+    pipeline.AddPass<WhileLoopConstantSinking>();
+    pipeline.AddPass<WhileLoopSimplifier>();
 
     pipeline.AddPass<Convolution4DExpander>();
 

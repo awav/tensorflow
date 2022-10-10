@@ -457,18 +457,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   pipeline.AddPass<DynamicIndexSplitter>();
 
-  // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<HloPassFix<RceOptimizer>>();
-  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
-  pipeline.AddPass<HloMCO>();
-  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
-  pipeline.AddPass<HloPassFix<ReshapeSinker>>();
-  // ReshapeSinker may introduce new redundant reshape chain 
-  pipeline.AddPass<HloPassFix<RceOptimizer>>();
-  pipeline.AddPass<TensorSplitter>();
-  pipeline.AddPass<TensorSplitterV2>();
-  pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
   pipeline.AddPass<ConditionalToSelect>();
   pipeline.AddPass<MapInliner>();
@@ -486,6 +474,20 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
   pipeline.AddPass<BatchDotSimplification>();
   pipeline.AddPass<DotDecomposer>();
+
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloMCO>();
+  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+  pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+  // ReshapeSinker may introduce new redundant reshape chain 
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<TensorSplitter>();
+  pipeline.AddPass<TensorSplitterV2>();
+  pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+
   // Convert BF16 operations to F32 operations so that the CPU backend can
   // support BF16 operations without directly implementing a BF16 lowering for
   // most ops.
