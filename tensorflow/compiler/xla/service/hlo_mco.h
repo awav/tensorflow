@@ -25,7 +25,9 @@ class HloMCO : public HloModulePass {
 
   // Run MCO on the given module. Returns whether the module was changed
   // (matrix chains were found and optimizesd).
-  StatusOr<bool> Run(HloModule* module) override;
+  StatusOr<bool> Run(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
   StatusOr<bool> ChainOptimize(
       HloComputation* computation,
       absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&

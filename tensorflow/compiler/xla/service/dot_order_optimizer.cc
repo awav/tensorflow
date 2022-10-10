@@ -169,9 +169,11 @@ Status DotOrderOptimizerVisitor::HandleDot(HloInstruction* dot) {
   return Status::OK();
 }
 
-StatusOr<bool> DotOrderOptimizer::Run(HloModule* module) {
+StatusOr<bool> DotOrderOptimizer::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) override {
   DotOrderOptimizerVisitor visitor;
-  return visitor.RunOnModule(module);
+  return visitor.RunOnModule(module, execution_threads);
 }
 
 }  // namespace xla

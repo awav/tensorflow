@@ -2539,13 +2539,15 @@ int64_t TensorSplitter::TensorBytes(const std::string& option) {
     return raw;  // interpret as bytes
 }
 
-StatusOr<bool> TensorSplitter::Run(HloModule* module) {
+StatusOr<bool> TensorSplitter::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   int64_t size_threshold;
   int64_t split_size;
   std::tie(size_threshold, split_size) = SplitSettings();
   TensorSplitterRewriteVisitor rewrite(size_threshold, split_size, module);
   LOG(INFO) << "Running tensor splitter for '" << module->name() << "'";
-  return rewrite.RunOnModule(module);
+  return rewrite.RunOnModule(module, execution_threads);
 }
 
 }  // namespace xla

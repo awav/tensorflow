@@ -280,11 +280,12 @@ Status RceOptimizerVisitor::HandleConvert(HloInstruction* convert) {
   return Status::OK();
 }
 
-StatusOr<bool> RceOptimizer::Run(HloModule* module) {
+StatusOr<bool> RceOptimizer::Run(HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) override {
   RceOptimizerVisitor visitor;
   LOG(INFO) << "Running RCE optimizer for " << module->name() << "'";
   bool changed = false;
-  TF_ASSIGN_OR_RETURN(auto rce_change, visitor.RunOnModule(module));
+  TF_ASSIGN_OR_RETURN(auto rce_change, visitor.RunOnModule(module, execution_threads));
   changed |= rce_change;
   // {
   //   LOG(INFO) << "Running subpipeline in RCE optimizer for " << module->name() << "'";

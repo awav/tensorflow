@@ -35,7 +35,8 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   HloInstruction* core_expr = nullptr;
   HloInstruction* reduce_operand = nullptr;
   HloInstruction* reduce_init = nullptr;
-  if (!Match(reduce, m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
+  if (!Match(reduce,
+             m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
     return false;
   }
   auto is_pow_based = reduce_operand->opcode() == HloOpcode::kPower;
@@ -57,7 +58,7 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   }
 
   // Check add or sub
-  HloInstruction *lhs = nullptr;
+  HloInstruction* lhs = nullptr;
   HloInstruction* rhs = nullptr;
   if (Match(core_expr, m::Add(m::Op(&lhs), m::Op(&rhs)))) {
     *is_sub = false;
@@ -121,7 +122,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
 }
 
 Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
-
   HloInstruction *x, *y;
   bool is_sub;
   int64_t x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
@@ -209,10 +209,12 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
                   xy->shape(), HloOpcode::kAdd, x_y_sum, xy)));
 }
 
-StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
+StatusOr<bool> AlgebraicRewriter::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   LOG(INFO) << "Running algebraic rewriter for '" << module->name() << "'";
   AlgebraicRewriterVisitor visitor;
-  return visitor.RunOnModule(module);
+  return visitor.RunOnModule(module, execution_threads);
 }
 
 }  // namespace xla

@@ -15,7 +15,9 @@ class BroadcastSimplifier : public HloModulePass {
  public:
   absl::string_view name() const override { return "broadcast-simplifier"; }
 
-  StatusOr<bool> Run(HloModule* module) override;
+  StatusOr<bool> Run(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 };
 
 }  // namespace xla

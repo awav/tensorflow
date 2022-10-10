@@ -104,10 +104,12 @@ Status BroadcastSimplifierVisitor::HandleConvert(HloInstruction* convert) {
   return Status::OK();
 }
 
-StatusOr<bool> BroadcastSimplifier::Run(HloModule* module) {
+StatusOr<bool> BroadcastSimplifier::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   BroadcastSimplifierVisitor visitor;
   LOG(INFO) << "Running broadcast simplifier for '" << module->name() << "'";
-  return visitor.RunOnModule(module);
+  return visitor.RunOnModule(module, execution_threads);
 }
 
 }  // namespace xla
