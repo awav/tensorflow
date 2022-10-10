@@ -396,9 +396,9 @@ message DebugOptions {
 
   // If true, the remainder part of a splitting result will be merged into
   // it's corresponding while-loop.
-  bool xla_tensor_split_merge_rest = 125;
+  bool xla_tensor_split_merge_rest = 170;
 
-  // Next id: 170
+  // Next id: 171
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.
