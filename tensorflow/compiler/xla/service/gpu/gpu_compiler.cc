@@ -182,6 +182,8 @@ limitations under the License.
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/util/env_var.h"
+#include "tensorflow/compiler/xla/service/triangular_solve_expander.h"
+#include "tensorflow/compiler/xla/service/reduce_scatter_decomposer.h"
 
 #if XLA_ENABLE_XLIR
 #include "tensorflow/compiler/mlir/tfrt/transforms/lmhlo_to_gpu/pass_utils.h"
@@ -409,6 +411,10 @@ Status GpuCompiler::OptimizeHloModule(
     // cuSOLVER.
     pipeline.AddPass<QrExpander>();
     pipeline.AddPass<EighExpander>();
+    pipeline.AddPass<TriangularSolveExpander>();
+    pipeline.AddPass<AllGatherDecomposer>();
+    pipeline.AddPass<AllToAllDecomposer>();
+    pipeline.AddPass<ReduceScatterDecomposer>();
 
     pipeline.AddPass<DynamicIndexSplitter>();
 

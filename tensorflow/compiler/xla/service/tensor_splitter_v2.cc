@@ -70,22 +70,34 @@ const int64_t prime_numbers[PRIME_SIZE] = {
 
 namespace {
 namespace m = match;
-// TensorSplitProperties is a tuple with (size, count, rest) elements
+// TensorSplitProperties is a tuple with the format of (split_size, split_count,
+// split_rest)
 using TensorSplitProperties = std::tuple<int64_t, int64_t, int64_t>;
-#define CREATE_CONSTANT_INT64(number) \
-  HloInstruction::CreateConstant(LiteralUtil::CreateR0<int64_t>(number))
+#define CREATE_CONSTANT_INT32(number) \
+  HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32_t>(number))
 
-// SplitNodeKey = inst_id where inst_id is the final result node of the
-// path
+// SplitNodeKey = inst_id, a key is the inst_id of the final result node of the
+// split path
 using SplitNodeKey = int64_t;
-// <inst,split_dim,split_size,parent_inst>
+// SplitNodeVal = <inst_ptr,split_dim,split_size,parent_inst_ptr>
 using SplitNodeVal =
     std::tuple<HloInstruction*, int64_t, int64_t, HloInstruction*>;
 
+// A helper function to generate a SplitNodeKey instance
+//  Input:
+//    inst: the target instruction
+//  Output:
+//    the SplitNodeKey of the given inst
 SplitNodeKey MakeSplitNodeKey(const HloInstruction* inst) {
   return inst->unique_id();
 }
 
+// A helper function to check if two SplitNodeVal are equal
+//  Input:
+//    first_val: first SplitNodeVal
+//    second_val: second SplitNodeVal
+//  Output:
+//    a bool value indicates if the two values are equal
 bool SplitNodeValEqual(const SplitNodeVal& first_val,
                        const SplitNodeVal& second_val) {
   if (std::get<1>(first_val) == -1 || std::get<1>(second_val) == -1) {
@@ -99,47 +111,101 @@ bool SplitNodeValEqual(const SplitNodeVal& first_val,
          std::get<2>(first_val) == std::get<2>(second_val);
 }
 
+//  Input:
+//    inst: an instruction pointer
+//    split_dim: the split dimension of the instruction
+//    split_size: the split size of the instruction
+//  Output:
+//    a SplitNodeVal made from the given input
 SplitNodeVal MakeSplitNodeVal(HloInstruction* inst, int64_t split_dim,
                               int64_t split_size,
                               HloInstruction* parent_inst = nullptr) {
   return std::make_tuple(inst, split_dim, split_size, parent_inst);
 }
 
-// a visitor which decide splitting
+// A base visitor class which decides splitting information like whether to
+// split an instruction or not, best split dimension and split size
 class SplitDeterminer : public DfsHloRewriteVisitor {
  public:
+  // Constructor of SplitDeterminer
+  //  Input:
+  //    max_size_threshold: a thereshold decides whether an instruction is big
+  //      enought to split
+  //    target_split_size: the target size of an instruction after splitting
+  //    split_size: the split size of the instruction
+  //  Output:
+  //    a SplitDeterminer instance
   explicit SplitDeterminer(int64_t max_size_threshold,
                            int64_t target_split_size)
       : max_size_threshold(max_size_threshold),
         target_split_size(target_split_size) {}
-  // Determine if an operand is large enough such that we are
-  // interested in splitting it.
+
+  //  Input:
+  //    inst: an instruction pointer
+  //  Output:
+  //    a bool value indicates if an operand is large enough such that we
+  //    are interested in splitting it.
   bool OperandShouldBeSplit(HloInstruction* inst);
 
   // Determine if an operand can be split by traversing it's
   // inputs until a splittable node is found. This will also
-  // return a list leafs and a list of dimensions which can
-  // not be split (if an internal op is only partially point-
-  // wise).
+  // directly modifies the list of leafs, the list of exclude_dimensions which
+  // can not be split (if an internal op is only partially point- wise).
+  //  Input:
+  //    inst: an instruction pointer
+  //    split_leafs: a vector stores all found leaf nodes during the path
+  //    traversal original_dimensions: a vector mapping the current instruction
+  //    dimensions to the dimensions
+  //      root node of the split_path.
+  //    exclude_dimensions: a vector stores all non-splittable dimensions of the
+  //      root node of the spit_path
+  //  Output:
+  //    a bool value indicates whether an operation can be split
   bool OperandCanBeSplit(HloInstruction* inst,
                          std::vector<HloInstruction*>* split_leafs = nullptr,
                          std::vector<int64_t>* original_dimensions = nullptr,
                          std::vector<int64_t>* exclude_dimensions = nullptr);
-  // Matches any pointwise unary operator which has no side effects.
+
+  // Matches any pointwise unary operator which has no side effects. If so,
+  // assign the pointer of its operand to the input operand pointer
+  //  Input:
+  //    inst: an instruction pointer
+  //    operand: an pointer used to record the operand of the PointwiseUnary
+  //      instruction
+  //  Output:
+  //    a bool value indicates whether an operation is a PointwiseUnary and
+  //    doesn't have any side effections
   static bool MatchPointwiseUnary(HloInstruction* inst,
                                   HloInstruction** operand = nullptr);
 
   // Matches any pointwise n-ary operator.
+  //  Input:
+  //    inst: an instruction pointer
+  //    operands: an vector used to record all the operands of the PointwiseNary
+  //      instruction
+  //  Output:
+  //    a bool value indicates whether an operation is a PointwiseNary and
+  //    doesn't have any side effections
   static bool MatchPointwiseNary(
       HloInstruction* inst, std::vector<HloInstruction*>* operands = nullptr);
 
   // Matches a reduce operation where all operands have the same shape
   // and all initilizers are scalars.
+  //  Input:
+  //    inst: an instruction pointer
+  //  Output:
+  //    a bool value indicates whether an operation is a reduce operation where
+  //    all operands have the same shape and all initilizers are scalars.
   static bool MatchSupportedReduce(HloInstruction* inst);
 
   static bool MatchSupportedNestedReduce(HloInstruction* inst);
 
   // Determine all the best dimesions to split on, excluding a given one.
+  //  Input:
+  //    inst: an instruction pointer
+  //    excluded: a vector all non-splittable dimensions of the given inst
+  //  Output:
+  //    a vector contains all best split dimensions of the inst
   std::vector<int64_t> BestSplitDim(HloInstruction* inst,
                                     absl::Span<const int64_t> excluded);
 
@@ -149,17 +215,30 @@ class SplitDeterminer : public DfsHloRewriteVisitor {
 
   // Given a split dimension, determine the best possible split
   // size with equally shaped pieces. If no split size is possible, returns -1.
+  //  Input:
+  //    inst: an instruction pointer
+  //    split_dim: the split dimension of the given inst
+  //  Output:
+  //    a number represents the best even split size on split_dim of the inst
   int64_t BestEvenSplitSize(HloInstruction* inst, int64_t split_dim);
 
   // Given a split dimension, determine the best possible split
   // size, allowing for un uneven split. Split_count denotes the
   // number of pieces of split_size size; split_rest is the size of
   // the last piece.
+  //  Input:
+  //    inst: an instruction pointer
+  //    split_dim: the split dimension of the given inst
+  //  Output:
+  //    a TensorSplitProperties class contains the best split information on
+  //    split_dim of the given inst
   TensorSplitProperties DetermineSplitSize(HloInstruction* inst,
                                            int64_t split_dim);
 
  protected:
+  // thereshold determines if we are interested to split an instruction
   int64_t max_size_threshold;
+  // the target instruction size after splitting
   int64_t target_split_size;
 };
 
@@ -183,9 +262,19 @@ class SplitDeterminer : public DfsHloRewriteVisitor {
 // they accept a small tensor as input, but output a very large tensor. eXLA-v2
 // continues to use these as split_leaves.
 
-// a visitor which records all splittable paths and decides how to merge paths
+// a visitor class which records all splittable paths and decides how to merge
+// paths
 class SplittablePathRecorder : public SplitDeterminer {
  public:
+  // Constructor of SplittablePathRecorder
+  //  Input:
+  //    max_size_threshold: a thereshold decides whether an instruction is big
+  //      enought to split
+  //    target_split_size: the target size of an instruction after splitting
+  //    split_size: the split size of the instruction
+  //    input_parent_module: the pointer of the parent module
+  //  Output:
+  //    a SplittablePathRecorder instance
   explicit SplittablePathRecorder(int64_t max_size_threshold,
                                   int64_t target_split_size,
                                   HloModule* input_parent_module)
@@ -198,41 +287,110 @@ class SplittablePathRecorder : public SplitDeterminer {
   Status DefaultAction(HloInstruction* hlo) override { return Status::OK(); }
   Status FinishVisit(HloInstruction* hlo) override { return Status::OK(); }
 
+  // Create a new empty split path using the give key and inst, store the path
+  // information into corresponding data structure
+  //  Input:
+  //    key: the key of a split path
+  //    inst: the root instruction of a split path
+  //  Output:
+  //    a status indicates if the path is created successfully
   Status CreateNewEmptyPath(SplitNodeKey key, HloInstruction* inst);
+
+  // Add a node into a split path
+  //  Input:
+  //    path_key: the key of a split path
+  //    path_index: the path index of the path of the given path_key(a key may
+  //      has several paths because a root node can be split in multiple ways)
+  //    inst: the node instruction
+  //    split_dim: the split dimension of the inst
+  //    split_size: the split size of the inst
+  //    parent_inst: the parent instruction of the inst
+  //  Output:
+  //    a status indicates if the node is added into the path successfully
   Status AppendToPath(SplitNodeKey path_key, int64_t path_index,
                       HloInstruction* inst, int64_t split_dim,
                       int64_t split_size, HloInstruction* parent_inst);
 
-  // recursively record the path with the given key
+  // Recursively record the path with the given key
+  //  Input:
+  //    path_key: the key of a split path
+  //    path_index: the path index of the path of the given path_key(a key may
+  //      has several paths because a root node can be split in multiple ways)
+  //    inst: the node instruction
+  //    split_dim: the split dimension of the inst
+  //    split_size: the split size of the inst
+  //    split_leafs: all leaf nodes of the split path
+  //    parent_inst: the parent instruction of the inst
+  //  Output:
+  //    a status indicates if the path is recorded successfully
   Status RecordPath(SplitNodeKey path_key, int64_t path_index,
                     HloInstruction* inst, int64_t split_dim, int64_t split_size,
                     std::vector<HloInstruction*>& split_leafs,
                     HloInstruction* parent_inst);
 
+  // Recording handle function when visiting a dot instruction
+  //  Input:
+  //    dot: currently visited dot instruction
+  //  Output:
+  //    a status indicates if the recording process is successful
   Status HandleDot(HloInstruction* dot) override;
 
+  // Recording handle function when visiting a reduce instruction
+  //  Input:
+  //    reduce: currently visited reduce instruction
+  //  Output:
+  //    a status indicates if the recording process is successful
   Status HandleReduce(HloInstruction* reduce) override;
 
+  // Recording handle function when visiting a sort instruction
+  //  Input:
+  //    reduce: currently visited sort instruction
+  //  Output:
+  //    a status indicates if the recording process is successful
   Status HandleSort(HloInstruction* sort) override;
 
-  // Decide how to merge paths and allocate while_loop num to each path
-  // Can only be called after recording all paths
+  // Decide how to merge recorded paths and allocate while_loop num to each path
+  //  Output:
+  //    a status indicates if all paths are allocted with a while loop
+  //    successfully
   Status AllocateWhileLoops();
+
+  // Helper function to access start_node_to_splittable_paths
+  //  Output:
+  //    a reference to start_node_to_splittable_paths
   absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
   GetStartNodeToSplittablePaths() {
     return start_node_to_splittable_paths;
   }
+
+  // Helper function to access start_node_to_while_loop_num
+  //  Output:
+  //    a reference to start_node_to_while_loop_num
   absl::flat_hash_map<SplitNodeKey, int64_t>& GetStartNodeToWhileLoopNum() {
     return start_node_to_while_loop_num;
   }
+
+  // Helper function to access while_loop_num_to_start_node
+  //  Output:
+  //    a reference to while_loop_num_to_start_node
   absl::flat_hash_map<int64_t, std::vector<SplitNodeKey>>&
   GetWhileLoopNumToStartNode() {
     return while_loop_num_to_start_node;
   }
+
+  // Helper function to access while_loop_num_to_instructions
+  //  Output:
+  //    a reference to while_loop_num_to_instructions
   absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
   GetWhileLoopNumToInstructions() {
     return while_loop_num_to_instructions;
   }
+
+  // Helper function to decide whether two SplitNodeVal contain the same
+  // instruction but different split dimensions
+  //  Output:
+  //    a bool indicates if two SplitNodeVal contain the same instruction but
+  //    different split dimensions
   bool IsSplitNodeValSameInstDifferentDim(const SplitNodeVal& first_val,
                                           const SplitNodeVal& second_val) {
     // two node_val are equal if and onlf if they have the same inst_id,
@@ -244,56 +402,178 @@ class SplittablePathRecorder : public SplitDeterminer {
   }
 
  private:
+  // Helper function to generate increasingly unique while loop number
+  //  Output:
+  //    next availabe while loop number
   int64_t GenerateNewWhileLoopNum() { return while_loop_num_counter++; }
 
   // Init all starting_node with a unique while_loop_num
+  //  Output:
+  //    a status indicates if all paths are allocted with an initial while loop
+  //    number
   Status InitWhileLoops();
 
-  // Find all decedant starting_nodes for all starting_nodes
+  // Record all dependence relationships
+  //  Output:
+  //    a status indicates if the searching process is successful
   Status RecordAllDescdantStartNodes();
+
   // Find all decedant starting_nodes for start_node_key
+  //  Input:
+  //    start_node_key: search all descdants of the give key
+  //  Output:
+  //    a status indicates if the searching process is successful
   Status FindAllDescdantStartNodes(SplitNodeKey start_node_key);
-  // check whether the two key's while_loops can be merged
+
+  // Check whether the two keys' while_loops can be merged
+  //  Input:
+  //    first_key: the fisrt key
+  //    second_key: the second key
+  //  Output:
+  //    a status indicates if the two nodes have dependency
   bool HasDesedantRelationship(SplitNodeKey first_key, SplitNodeKey second_key);
-  // Try to merge two while_loops with some relative relationshiops
+
+  // Try to merge two while_loops using the given available paths, paths which
+  // the same index in path arrays are corresponding pair which can be used to
+  // merge the two while-loops
+  //  Input:
+  //    first_key: the key of the root node of the first while-loop
+  //    second_key: the key of the root node of the second while-loop
+  //    first_path_indices: the availabe paths of the first while-loop
+  //    second_path_indices: the availabe paths of the second while-loop
+  // Output:
+  //    a status indicates if the two nodes have dependency
   Status TryMergableRelativeWhileLoop(
       SplitNodeKey first_key, SplitNodeKey second_key,
       const std::vector<size_t>& first_path_indices,
       const std::vector<size_t>& second_path_indices);
-  // if the leaf_dot/leaf_broadcast's operand is another while-loop, record the
-  // information
+
+  // If the leaf_dot's operand is another while-loop, record the
+  // start node the another while-loop used for furthur merging
+  // this is used for the cashe that the root node of a split path is a
+  // parameter of another split path. If the two path are split on the same
+  // non-contracting/non-reduce dimension the part result of the first split
+  // root instruction can be used to compute the part result of the second split
+  // path, which means the two paths can be merged into a single while-loop to
+  // speed up the computation
+  //  Input:
+  //    path_key: the key of the split path
+  //    path_index: the index of the split path
+  //    dot: the pointer of the leaf dot instruction
+  //    split_dim: the split dimension of the split path
+  //    split_size: the split size of the split path
+  // Output:
+  //    a status indicates if the recording is successfully
   Status FinishRecordLeafDot(SplitNodeKey path_key, int64_t path_index,
                              HloInstruction* dot, int64_t split_dim,
                              int64_t split_size);
+
+  // The function is the same as the above funciton but used for leaf broadcast
+  //  Input:
+  //    path_key: the key of the split path
+  //    path_index: the index of the split path
+  //    broadcast: the pointer of the leaf broadcast instruction
+  //    split_dim: the split dimension of the split path
+  //    split_size: the split size of the split path
+  //  Output:
+  //    a status indicates if the recording is successfully
   Status FinishRecordLeafBroadcast(SplitNodeKey path_key, int64_t path_index,
                                    HloInstruction* broadcast, int64_t split_dim,
                                    int64_t split_size);
+
+  // Infer the split dim of a dot instruction given its operand and the split
+  // dim of the operand when the splitting is performed on a non-contracting
+  // dimension i.e. the split dimension will exist in the dot instruction
+  //  Input:
+  //    dot: the dot instruction
+  //    operand_split_diim: the split dimension of its operand
+  //    split_is_lhs: a bool value indicate whetehr the lhs of the dot will be
+  //    split
+  //  Output:
+  //    the split dimension of the dot instruction
   int64_t InferDotResultSplitDim(HloInstruction* dot,
                                  int64_t operand_split_diim, bool split_is_lhs);
+
+  // Infer the split dim of a reduce instruction given its operand and the split
+  // dim of the operand when the splitting is performed on a non-reduce
+  // dimension i.e. the split dimension will exist in the reduce instruction
+  //  Input:
+  //    reduce: the reduce instruction
+  //    operand_split_diim: the split dimension of its operand
+  //  Output:
+  //    the split dimension of the reduce instruction
   int64_t InferReduceResultSplitDim(HloInstruction* reduce,
                                     int64_t operand_split_diim);
+
+  // Mark two while loops as unmergable
+  //  Input:
+  //    first_num: the while-loop number of the first while-loop
+  //    second_num: the while-loop number of the second while-loop
+  //  Output:
+  //    a status indicates whether the recording is successful
   Status RecordUnmergableWhileLoops(int64_t first_num, int64_t second_num);
-  // Check whether second_key can be merged into first_key's while_loop
+
+  // Check whether the two while loops of the two given split paths will not
+  // exceed the memory threshold after merging
+  //  Input:
+  //    first_num: the root key of the first split path
+  //    second_num: the root key of the second split path
+  // Output:
+  //    a bool value indicates whether the two while loop can be merged
   bool SizeCanMerge(SplitNodeKey first_key, SplitNodeKey second_key);
 
-  // Check whether first_key and second_key have already been merged into the
-  // same while_loop
+  // Check whether the two given split paths have already been merged into a
+  // single while_loop
+  //  Input:
+  //    first_num: the root key of the first split path
+  //    second_num: the root key of the second split path
+  //  Output:
+  //    a bool value indicates whether the two paths have already been merged
   bool Merged(SplitNodeKey first_key, SplitNodeKey second_key);
-  // Calculate the longest common subsequence of two given paths
+
+  // Calculate the longest common subsequence(the common subpath) of two given
+  // paths
+  //  Input:
+  //    first_path: the first path
+  //    second_path: the second path
+  //  Output:
+  //    the length of the longest common sub-sequence (the length of the common
+  //    path)
   int64_t LCS(const std::vector<SplitNodeVal>& first_path,
               const std::vector<SplitNodeVal>& second_path);
 
+  // Determin whether two paths should be merged give their path lengths and the
+  // common sub-path length
+  //  Input:
+  //    lcs_len: the length of their common sub-path
+  //    first_path_len: the length of the first path
+  //    second_path_len: the length of the second path
+  //  Output:
+  //   a bool value indicates whether the two paths should be merged
   bool ShouldMerge(int64_t lcs_len, int64_t first_path_len,
                    int64_t second_path_len);
-  // update available split paths for a while loop
+
+  // Update available split paths for the while loop of the given split path key
+  //  Input:
+  //    node_key: the root key of a split path
+  //    path_indices: new availabe path indices
+  //    input_start_node_to_splittable_paths: the updated
+  //    start_node_to_splittable_paths hash table
+  //  Output:
+  //   a bool value indicates whether the update is successful, the updated
+  //   result will be stored in
+  //    the given input_start_node_to_splittable_paths parameter
   Status UpdateNewPaths(
       SplitNodeKey node_key, const std::vector<size_t>& path_indices,
       absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
           input_start_node_to_splittable_paths);
 
   // Reocrd all instructions in all while_loops
+  //  Output:
+  //    a status indicates whether the recording is successful
   Status RecordInstructionsInWhileLoop();
 
+  // the pointer to the graph's parent module
   HloModule* parent_module;
   // starting_node -> all possbile best splittable paths of the node (pre-order)
   // splittable_paths doesn't contain start_node itself
@@ -322,6 +602,8 @@ class SplittablePathRecorder : public SplitDeterminer {
   // absl::flat_hash_map<SplitNodeVal, std::vector<int64_t>>
   //     node_to_while_loop_nums;
   int64_t while_loop_num_counter;
+  // The threshold indicates the minimum common path length when merging two
+  // while-loops
   float lcs_merge_threshold;
 };
 
@@ -331,6 +613,22 @@ class SplittablePathRecorder : public SplitDeterminer {
 // perform real splitting and create while_loops
 class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
  public:
+  // Constructor of TensorSplitterRewriteVisitorV2
+  //  Input:
+  //    max_size_threshold: a thereshold decides whether an instruction is big
+  //      enought to split
+  //    target_split_size: the target size of an instruction after splitting
+  //    split_size: the split size of the instruction
+  //    input_parent_module: the pointer of the parent module
+  //    input_start_node_to_splittable_paths: a hashtable from a root node to
+  //    all of its splittable paths input_start_node_to_while_loop_num: a
+  //    hashtable from a root node to its while_loop_num
+  //    input_while_loop_num_to_start_node: a hashtable from a while_loop_num to
+  //    all of its splittable root nodes in the while loop
+  //    input_while_loop_num_to_instructions: a hashtable from a while_loop_num
+  //    to all instructions in the while loop
+  //  Output:
+  //    a TensorSplitterRewriteVisitorV2 instance
   explicit TensorSplitterRewriteVisitorV2(
       int64_t max_size_threshold, int64_t target_split_size,
       HloModule* input_parent_module,
@@ -350,31 +648,67 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
         while_loop_num_to_instructions(input_while_loop_num_to_instructions) {
     while_loop_num_to_info.clear();
   }
-
+  // Deprecated function in V2
   HloComputation* CreateWhileSplitCondition(const std::string& name,
                                             const Shape& parameters_shape,
                                             int64_t stop_at);
 
+  // Deprecated function in V2
   std::vector<HloInstruction*> CreateWhileSplitWithResults(
       HloComputation* parent_comp, HloComputation* condition,
       HloComputation* body, std::vector<HloInstruction*> parameters,
       std::vector<std::tuple<int64_t, Shape>> ids_and_shapes);
 
+  // Splitting handle function when visiting a dot instruction
+  //  Input:
+  //    dot: currently visited dot instruction
+  //  Output:
+  //    a status indicates if the splitting process is successful
   Status HandleDot(HloInstruction* dot) override;
 
+  // Splitting handle function when visiting a reduce instruction
+  //  Input:
+  //    reduce: currently visited reduce instruction
+  //  Output:
+  //    a status indicates if the splitting process is successful
   Status HandleReduce(HloInstruction* reduce) override;
 
+  // Splitting handle function when visiting a sort instruction
+  //  Input:
+  //    sort: currently visited sort instruction
+  //  Output:
+  //    a status indicates if the splitting process is successful
   Status HandleSort(HloInstruction* sort) override;
+
+  // a tuple<instruction_id, split_dim, split_size> used to identify
+  // instructions after splitting
   using VisitedInstructionKey = std::tuple<int, int64_t, int64_t>;
-  // for each while_loop create a visited_instructions
+
+  // a hashtable from a while_loop_num to a hashtable(from VisitedInstructionKey
+  // to origianl instruction) to avoid duplicate splitting
   absl::flat_hash_map<
       int64_t, absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>>
       while_loop_num_to_visited_instructions;
 
-  // Represents the output of a single starting_node in the while-loop
+  // Represents the output information of a single split path in a while-loop
   class SubOutputInfo {
    public:
     SubOutputInfo() {}
+    // Constructor of SubOutputInfo
+    //  Input:
+    //    output_index: the index of the suboutput in the output of the while
+    //    loop node_inst: the instructon of the original instruciton of the
+    //    suboutput s_dim: the split dimension ids_and_shapes: only used for
+    //    sort instruction, empty vector for other cases sort_leafs: only used
+    //    for sort instruction, empty vector for other cases combine_with_sum:
+    //    only used for dot instruction, a flag indicating wether to combine
+    //    part results by sum combine_with_sum: only used for reduce
+    //    instruction, a flag indicating wether to combine part results by
+    //    reduce dot_s_dim: only used when splitting one side of a dot
+    //    instruction and the split dimension is a non-contracting dimension.
+    //      dot_s_dim is the split dimension of the original dot instruction
+    //  Output:
+    //    a SubOutputInfo instance
     SubOutputInfo(int64_t output_index, HloInstruction* node_inst,
                   int64_t s_dim,
                   std::vector<std::tuple<int64_t, Shape>>& ids_and_shapes,
@@ -394,12 +728,13 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
           dot_split_dim(dot_s_dim) {
       result_rest = nullptr;
     }
-    // index of result in the while_loop's param
+    // index of result in the while_loop's output
     int64_t result_index;
+    // index of rest part result in the while_loop's rest output
     int64_t result_rest_index;  // * only valid if the split_rest >0
+    // the pointer to the original instruction before splitting
     HloInstruction* starting_node_inst;
-    // // * only for Dot and Reduce for now, not for Sort; only valid when
-    // // * split_rest >0
+    // the pointer to the rest part of the sub-result
     HloInstruction* result_rest;
 
     std::vector<std::tuple<int64_t, Shape>>
@@ -407,21 +742,37 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     std::vector<HloInstruction*>
         sort_split_leafs;  // * only valid if starting_node_inst is sort
                            // * and split_rest >0
+    // the rest part size of the sub-output
     int64_t split_rest;
+    // split dimension of the sub-output
     int64_t split_dim;            // * invalid and useless for dot case2
+    // indicate whether part results should be combied by sum
     bool combine_parts_with_sum;  // * only valid if starting_node_inst is dot
                                   // * and split_rest >0
+    // the split dimension of a dot instruction
     int64_t
         dot_split_dim;  // * only valid if starting_node_inst is dot case 3
                         // * and split_rest >0 and combine_parts_with_sum=false
 
+    // indicate whether part results should be combied by reduce
     bool split_along_reduce_dim;  // * only valid if starting_node_inst is
                                   // * reduce and split_rest >0
   };
 
+  // Represents the output information of a while-loop
   class WhileLoopInfo {
    public:
     WhileLoopInfo() { final_sub_main_output_elements.resize(0); }
+    // Constructor of WhileLoopInfo
+    //  Input:
+    //    loop_num: the while_loop_num of a while loop
+    //    size: split size
+    //    count: split count
+    //    rest: the rest size after splitting
+    //    builder: builder for the while loop
+    //    rest_builder: the builder of the rest part if there is a rest part
+    //  Output:
+    //    a WhileLoopInfo instance
     WhileLoopInfo(int64_t loop_num, int64_t size, int64_t count, int64_t rest,
                   std::unique_ptr<HloComputation::Builder>&& builder,
                   std::unique_ptr<HloComputation::Builder>&& rest_builder)
@@ -437,23 +788,31 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       while_rest_output_elements.resize(0);
       while_loop_param = nullptr;
     }
+
+    // Add suboutput to the output of the while loop
+    // Input:
+    //    sub_output: the sub-output to be added
     void AddSubOutput(SubOutputInfo sub_output) {
       final_sub_main_output_elements.emplace_back(sub_output);
     }
     // final output for the while-loop, including all outputs from all
     // staring_nodes included in the while-loop
     std::vector<SubOutputInfo> final_sub_main_output_elements;
+    // builder of the while loop computation
     std::unique_ptr<HloComputation::Builder> while_builder;
+    // builder of the rest part computation of the while loop
     std::unique_ptr<HloComputation::Builder> while_rest_builder;
     // single tuple param instruction
     HloInstruction* while_loop_param;
     // single tuple param instruction
     HloInstruction* while_rest_param;
-    // initialize tuple parameter elements
+    // tuple parameter elements for the while loop
     std::vector<HloInstruction*> while_loop_parameters;
-    // initialize tuple parameter elements
+    // tuple parameter elements for the rest part of the while loop
     std::vector<HloInstruction*> while_rest_parameters;
+    // output elements for the while loop
     std::vector<HloInstruction*> while_loop_output_elements;
+    // output elements for the rest part of the while loop
     std::vector<HloInstruction*> while_rest_output_elements;
     // used in while-loop
     absl::flat_hash_map<HloInstruction*, HloInstruction*>
@@ -461,9 +820,13 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     // used in the rest part
     absl::flat_hash_map<HloInstruction*, HloInstruction*>
         rest_starting_node_inst_to_cloned_inst;
+    // identifier number of the while loop
     int64_t while_loop_num;
+    // rest part size of the while loop
     int64_t split_rest;
+    // split size of the while loop
     int64_t split_size;
+    // split count of the while loop
     int64_t split_count;
   };
 
@@ -477,20 +840,39 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     HloInstruction* offset_;  // get offset from tuple param
     std::vector<HloInstruction*>&
         parameters_;  // initialize tuple parameter elements
-
+    // builder used when performing splitting
     HloComputation::Builder& builder_;
+    // leaf nodes of the split path
     absl::Span<HloInstruction*> leafs_;
+    // a hashtable used to recorde instructions which have already been split
     absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>&
         visited_instructions_;
+    // a hastable from a while_loop_num to all instructions involved in the while loop
     absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
         while_loop_num_to_instructions_;
-
+    // a flag indicating whether to merge the rest part into a dynamic loop
     bool merged_splitter_flag;
+    // the while loop info of the split path
     WhileLoopInfo* while_loop_info;
 
    public:
+    // the output of the while loop of the split path
     std::vector<HloInstruction*>& while_loop_output_elements;
     int64_t param_start_index;
+    // Constructor of Splitter
+    //  Input:
+    //    merged_flag: the flag to indicate wheter to merge the rest part into a
+    //    dynamic while loop loop_info: the information of the while loop
+    //    containing the split path loop_parameters: the vector of parameters of
+    //    the while loop loop_output_elements: the vector of sub-outputs of the
+    //    while loop builder: the builder of the while loop parent: the parent
+    //    compution leafs: leaf nodes of the split path visited_instructions: a
+    //    map from an instruction to the new instruction after splitting, used
+    //    to avoid duplicate splitting while_loop_num_to_instructions: a map
+    //    from a while_loop_num to all instructions in the while loop offset:
+    //    the start offset when splitting
+    //  Output:
+    //    a Splitter instance
     explicit Splitter(
         bool merged_flag, WhileLoopInfo* loop_info,
         std::vector<HloInstruction*>& loop_parameters,
@@ -519,7 +901,7 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       msg << "]";
       LOG(INFO) << "\n> " << msg.str();
       param_start_index = parameters_.size();
-      auto tmp_offset = CREATE_CONSTANT_INT64(offset);
+      auto tmp_offset = CREATE_CONSTANT_INT32(offset);
       Shape param_shape = ShapeUtil::MakeTupleShape({tmp_offset->shape()});
       if (merged_splitter_flag) {
         // used for while_loop
@@ -560,33 +942,75 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
 
       if (param_start_index == 0) {
         HloInstruction* init_offset =
-            parent->AddInstruction(CREATE_CONSTANT_INT64(offset));
+            parent->AddInstruction(CREATE_CONSTANT_INT32(offset));
         parameters_.push_back(init_offset);
       }
       offset_ = builder.AddInstruction(HloInstruction::CreateGetTupleElement(
           tmp_offset->shape(), param_, 0));
     }
 
+    // Split the inst given its split dimension and split size
+    // Input:
+    //  inst: the pointer of the instruction to be split
+    //  split_dim: split dimension of the instruciton
+    //  split_dim: split size of inst on split_dim
+    // Output:
+    //  the pointer of the new instruction after splitting
     StatusOr<HloInstruction*> SplitInstruction(HloInstruction* inst,
                                                int64_t split_dim,
                                                int64_t split_size);
 
+    // Split the leaf dot instuction given its split dimension and split size
+    // Input:
+    //  dot: the pointer of the leaf dot instruction
+    //  split_dim: split dimension of the dot operation
+    //  split_dim: split size of dot on split_dim
+    // Output:
+    //  the pointer of the new dot instruction after splitting
     StatusOr<HloInstruction*> SplitLeafDot(HloInstruction* dot,
                                            int64_t split_dim,
                                            int64_t split_size);
 
+    // Split the leaf broadcast instuction given its split dimension and split
+    // size Input:
+    //  broadcast: the pointer of the leaf broadcast instruction
+    //  split_dim: split dimension of the broadcast instruction
+    //  split_dim: split size of broadcast on split_dim
+    // Output:
+    //  the pointer of the new broadcast instruction after splitting
     StatusOr<HloInstruction*> SplitLeafBroadcast(HloInstruction* broadcast,
                                                  int64_t split_dim,
                                                  int64_t split_size);
 
+    // Split the leaf parameter instuction given its split dimension and split
+    // size Input:
+    //  parameter: the pointer of the leaf parameter instruction
+    //  split_dim: split dimension of the parameter instruction
+    //  split_dim: split size of parameter on split_dim
+    // Output:
+    //  the pointer of the new parameter instruction after splitting
     StatusOr<HloInstruction*> SplitLeafParameter(HloInstruction* parameter,
                                                  int64_t split_dim,
                                                  int64_t split_size);
 
+    // Split the leaf iota instuction given its split dimension and split size
+    // Input:
+    //  parameter: the pointer of the iota parameter instruction
+    //  split_dim: split dimension of the iota instruction
+    //  split_dim: split size of iota on split_dim
+    // Output:
+    //  the pointer of the new iota instruction after splitting
     StatusOr<HloInstruction*> SplitLeafIota(HloInstruction* iota,
                                             int64_t split_dim,
                                             int64_t split_size);
 
+    // A helper function to generate a VisitedInstructionKey instance
+    //  Input:
+    //    inst: the target instruction
+    //    split_dim: split dimension
+    //    split_size: split size
+    //  Output:
+    //    a VisitedInstructionKey instance
     VisitedInstructionKey MakeVisitedInstructionKey(const HloInstruction* inst,
                                                     int64_t split_dim,
                                                     int64_t split_size) {
@@ -596,6 +1020,12 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
 
     // Add the parameter and returnd it's index in the tuple. If get_tuple
     // is passed, it will also create an accessor for the parameter.
+    //  Input:
+    //    inst: the pointer of the parameter instruction
+    //    get_tuple: a instruction pointer used to store the accessor for the
+    //    parameter
+    //  Output:
+    //    the index of the parameter instruction in the input tuple
     int64_t AddParameter(HloInstruction* inst,
                          HloInstruction** get_tuple = nullptr) {
       if (merged_splitter_flag &&
@@ -637,62 +1067,147 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       return idx;
     }
 
-    // Generates the final output tuple from the given root
+    // Generates the rest part output tuple from the given root
     // computation part. Return the result index in the whole_loop_output
+    //  Input:
+    //    split_dim: the split dimension of the original insturction
+    //    split_size: the split size of the original insturction
+    //    original: the pointer of the original instruction
+    //    part: the pointer of the new part result instruction after splitting
+    //    combine_with_sum: a flag which indicates whether part results should
+    //    be combied by sum combine_with_reduce: a flag which indicates whether
+    //    part results should be combied by reduce operation
+    //  Output:
+    //    the index of the rest part result in the whole_loop_output
     int64_t BuildRestOutputTuple(int64_t split_dim, int64_t split_size,
                                  HloInstruction* original, HloInstruction* part,
                                  bool combine_with_sum = false,
                                  bool combine_with_reduce = false);
-    // Return the result index in the whole_loop_output
+
+    // Generates the output tuple from the given root
+    // computation part. Return the result index in the whole_loop_output
+    //  Input:
+    //    split_dim: the split dimension of the original insturction
+    //    split_size: the split size of the original insturction
+    //    original: the pointer of the original instruction
+    //    part: the pointer of the new part result instruction after splitting
+    //    combine_with_sum: a flag which indicates whether part results should
+    //    be combied by sum combine_with_reduce: a flag which indicates whether
+    //    part results should be combied by reduce operation
+    //  Output:
+    //    the index of the result in the whole_loop_output
     int64_t BuildMergedLoopOutput(int64_t split_dim, int64_t split_size,
                                   HloInstruction* original,
                                   HloInstruction* part,
                                   bool combine_with_sum = false,
                                   bool combine_with_reduce = false);
 
+    // Return the parameter size in the while loop
     int64_t parameters_size() { return parameters_.size(); }
 
+    // Return the paramter located in the given index
+    //  Input:
+    //    idx: the index of the parameter
+    //  Output:
+    //    the parameter instruction in the given idx
     HloInstruction* parameters(int64_t idx) { return parameters_.at(idx); }
 
+    // Return the tuple paramter
+    //  Output:
+    //    the tuple parameter
     HloInstruction* tuple_parameters() { return param_; }
 
+    // Return the vector of all parameters
+    //  Output:
+    //    the vector of all parameters
     std::vector<HloInstruction*>& parameters() { return parameters_; }
 
+    // Return the offset instruction
+    //  Output:
+    //    offset instruction
     HloInstruction* offset() { return offset_; }
   };
 
  private:
+  // Generate while loop name of the given loop_num
+  //  Input:
+  //    loop_num: a while loop number
+  //  Output:
+  //    the name of the while loop with loop_num
   static std::string GenerateBuilderName(int64_t loop_num) {
     return std::string("merged_while_loop" + std::to_string(loop_num));
   }
 
-  // Check whether can finish a merged while-loop
+  // Check whether can finish a merged while-loop, we can build a while loop if
+  // all split paths in the loop have been split
+  //  Input:
+  //    while_loop_num: a while loop number
+  //  Output:
+  //    a bool value indicating if we can build the while loop computation with
+  //    the given while_loop_num
   bool CanFinishMergedWhileLoop(int64_t while_loop_num);
-  // Create a merged while-loop and build correspoinding outputs
+
+  // Create a merged while-loop computation and build the correspoinding output
+  //  Input:
+  //    while_loop_num: a while loop number
+  //  Output:
+  //    a status indicating if the while loop has been built successfully
   Status FinalizeMergedWhileLoop(int64_t while_loop_num);
-  // return (output_inst,init_inst)
-  StatusOr<std::pair<HloInstruction*, HloInstruction*>> BuildSubOutput(
-      SubOutputInfo& sub_info);
+  // // return (output_inst,init_inst)
+  // StatusOr<std::pair<HloInstruction*, HloInstruction*>> BuildSubOutput(
+  //     SubOutputInfo& sub_info);
+
+  // Build the final output instruction of the while loop
+  //  Input:
+  //    loop_info: the information of the while loop
+  //    loop: the pointer of the while loop instruction
+  //  Output:
+  //    a status indicating if the output instruction of the while loop has been
+  //    built successfully
   Status BuildFinalOutput(WhileLoopInfo& loop_info, HloInstruction* loop);
 
-  // Add dot starting-node to while-loop info
+  // Add the information of a splittable dot instruction to its while-loop info
+  //  Input:
+  //    dot: the pointer of the dot instruction
+  //    lhs: the pointer of the left hand side instruction of dot
+  //    rhs: the pointer of the right hand side instruction of dot
+  //  Output:
+  //    a status indicating if the dot splitting information has been added to
+  //    its while loop inforamtion successfully
   Status AddDotToMergedWhileLoop(HloInstruction* dot, HloInstruction* lhs,
                                  HloInstruction* rhs);
-  // Add reduce starting-node to while-loop info
-  Status AddReduceToMergedWhileLoop(HloInstruction* reduce);
-  // Add sort starting-node to while-loop info
-  Status AddSortToMergedWhileLoop(HloInstruction* sort);
 
+  // Add the information of a splittable reduce instruction to its while-loop
+  // info
+  //  Input:
+  //    reduce: the pointer of the reduce instruction
+  //  Output:
+  //    a status indicating if the reduce splitting information has been added
+  //    to its while loop inforamtion successfully
+  Status AddReduceToMergedWhileLoop(HloInstruction* reduce);
+
+  // Add the information of a splittable sort instruction to its while-loop info
+  //  Input:
+  //    sort: the pointer of the sort instruction
+  //  Output:
+  //    a status indicating if the sort splitting information has been added to
+  //    its while loop inforamtion successfully
+  Status AddSortToMergedWhileLoop(HloInstruction* sort);
+  // the instruction of the graph's parent module
   HloModule* parent_module;
-  // splittable_paths doesn't contain start_node itself
+  // A hashtable from SplitNodeKey to all possible split paths of the key
+  // Note: splittable_paths doesn't contain start_node itself
   absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>
       start_node_to_splittable_paths;
+  // A hashtable from SplitNodeKey to its while loop number
   absl::flat_hash_map<SplitNodeKey, int64_t> start_node_to_while_loop_num;
+  // A hashtable from while loop number to all SplitNodeKeys contained in the while loop
   absl::flat_hash_map<int64_t, std::vector<SplitNodeKey>>
       while_loop_num_to_start_node;
 
   // record how many staring_nodes have been procesed for a while-loop
   absl::flat_hash_map<int64_t, int64_t> while_loop_num_to_processed_count;
+  // A hashtable from while loop number to the while loop information of the loop
   absl::flat_hash_map<int64_t, WhileLoopInfo> while_loop_num_to_info;
   // while_loop_num -> all instructions(including starting_nodes) included in
   // the while_loop
@@ -2542,6 +3057,28 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
                 << start_node_to_start_inst[first_key]->name()
                 << " second_start_node_inst="
                 << start_node_to_start_inst[second_key]->name();
+      for (int i = 0; i < best_lcs_path_indices_first.size(); ++i) {
+        std::stringstream msg;
+        msg << start_node_to_start_inst[first_key]->name() << " # path_"
+            << best_lcs_path_indices_first[i] << ": {";
+        for (int j = 0; j < first_paths[best_lcs_path_indices_first[i]].size();
+             ++j) {
+          msg << std::get<0>(first_paths[best_lcs_path_indices_first[i]][j])
+                     ->name()
+              << " ";
+        }
+        msg << "}\n";
+        msg << start_node_to_start_inst[second_key]->name() << " # path_"
+            << best_lcs_path_indices_second[i] << ": {";
+        for (int j = 0;
+             j < second_paths[best_lcs_path_indices_second[i]].size(); ++j) {
+          msg << std::get<0>(second_paths[best_lcs_path_indices_second[i]][j])
+                     ->name()
+              << " ";
+        }
+        msg << "}\n";
+        LOG(INFO) << msg.str();
+      }
       TryMergableRelativeWhileLoop(first_key, second_key,
                                    best_lcs_path_indices_first,
                                    best_lcs_path_indices_second);
@@ -2565,7 +3102,6 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
               << split_dim << ", " << split_size << ">";
     return visited_instructions_[visited_inst_key];
   }
-
   if (absl::c_linear_search(leafs_, inst)) {
     LOG(INFO) << "\n> Found in leafs '" << inst->name() << "'";
     if (Match(inst, m::Dot())) {
@@ -2596,6 +3132,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
   } else {
     HloInstruction *operand, *lhs, *rhs;
     std::vector<HloInstruction*> operands;
+    bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
 
     if (Match(inst, m::Transpose(m::Op(&operand)))) {
       // For a transpose, the transpose might change which dimension is
@@ -2611,8 +3148,23 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      HloInstruction* new_inst = builder_.AddInstruction(
-          inst->CloneWithNewOperands(new_shape, {new_operand}));
+      HloInstruction* new_inst;
+      int64_t inst_split_dim_size = inst->shape().dimensions(split_dim);
+      int64_t main_split_size =
+          int64_t(inst_split_dim_size / split_size) * split_size;
+      if (merge_rest && main_split_size < inst_split_dim_size) {
+        std::vector<bool> dynamic_dimensions(new_shape.dimensions_size(),
+                                             false);
+        dynamic_dimensions[split_dim] = true;
+        Shape dynamic_new_shape =
+            ShapeUtil::MakeShape(new_shape.element_type(),
+                                 new_shape.dimensions(), dynamic_dimensions);
+        new_inst = builder_.AddInstruction(
+            inst->CloneWithNewOperands(dynamic_new_shape, {new_operand}));
+      } else {
+        new_inst = builder_.AddInstruction(
+            inst->CloneWithNewOperands(new_shape, {new_operand}));
+      }
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (MatchSupportedNestedReduce(inst)) {
@@ -2639,9 +3191,23 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      HloInstruction* new_inst =
-          builder_.AddInstruction(inst->CloneWithNewOperands(
-              new_shape, {new_operand, new_init_operand}));
+      HloInstruction* new_inst;
+      int64_t inst_split_dim_size = inst->shape().dimensions(split_dim);
+      int64_t main_split_size =
+          int64_t(inst_split_dim_size / split_size) * split_size;
+      if (merge_rest && main_split_size < inst_split_dim_size) {
+        std::vector<bool> dynamic_dimensions(new_shape.dimensions_size(),
+                                             false);
+        dynamic_dimensions[split_dim] = true;
+        Shape dynamic_new_shape =
+            ShapeUtil::MakeShape(new_shape.element_type(),
+                                 new_shape.dimensions(), dynamic_dimensions);
+        new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
+            dynamic_new_shape, {new_operand, new_init_operand}));
+      } else {
+        new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
+            new_shape, {new_operand, new_init_operand}));
+      }
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (inst->opcode() == HloOpcode::kTriangularSolve) {
@@ -2652,8 +3218,24 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
           SplitInstruction(inst->mutable_operand(1), split_dim, split_size));
       HloInstruction* mat;
       AddParameter(inst->mutable_operand(0), &mat);
-      HloInstruction* new_inst = builder_.AddInstruction(
-          inst->CloneWithNewOperands(new_operand->shape(), {mat, new_operand}));
+      HloInstruction* new_inst;
+      int64_t inst_split_dim_size =
+          inst->mutable_operand(1)->shape().dimensions(split_dim);
+      int64_t main_split_size =
+          int64_t(inst_split_dim_size / split_size) * split_size;
+      if (merge_rest && main_split_size < inst_split_dim_size) {
+        std::vector<bool> dynamic_dimensions(
+            new_operand->shape().dimensions_size(), false);
+        dynamic_dimensions[split_dim] = true;
+        Shape dynamic_new_shape = ShapeUtil::MakeShape(
+            new_operand->shape().element_type(),
+            new_operand->shape().dimensions(), dynamic_dimensions);
+        new_inst = builder_.AddInstruction(
+            inst->CloneWithNewOperands(dynamic_new_shape, {mat, new_operand}));
+      } else {
+        new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
+            new_operand->shape(), {mat, new_operand}));
+      }
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else if (Match(inst, m::Dot(m::Op(&lhs), m::Op(&rhs)))) {
@@ -2684,8 +3266,23 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
         Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                                inst->shape().dimensions());
         new_shape.set_dimensions(split_dim, split_size);
-        HloInstruction* new_inst = builder_.AddInstruction(
-            inst->CloneWithNewOperands(new_shape, {new_lhs, param_rhs}));
+        HloInstruction* new_inst;
+        int64_t inst_split_dim_size = inst->shape().dimensions(split_dim);
+        int64_t main_split_size =
+            int64_t(inst_split_dim_size / split_size) * split_size;
+        if (merge_rest && main_split_size < inst_split_dim_size) {
+          std::vector<bool> dynamic_dimensions(new_shape.dimensions_size(),
+                                               false);
+          dynamic_dimensions[split_dim] = true;
+          Shape dynamic_new_shape =
+              ShapeUtil::MakeShape(new_shape.element_type(),
+                                   new_shape.dimensions(), dynamic_dimensions);
+          new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
+              dynamic_new_shape, {new_lhs, param_rhs}));
+        } else {
+          new_inst = builder_.AddInstruction(
+              inst->CloneWithNewOperands(new_shape, {new_lhs, param_rhs}));
+        }
         visited_instructions_[visited_inst_key] = new_inst;
         return new_inst;
       } else {
@@ -2705,8 +3302,23 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
         AddParameter(lhs, &param_lhs);
 
         new_shape.set_dimensions(split_dim, split_size);
-        HloInstruction* new_inst = builder_.AddInstruction(
-            inst->CloneWithNewOperands(new_shape, {param_lhs, new_rhs}));
+        HloInstruction* new_inst;
+        int64_t inst_split_dim_size = inst->shape().dimensions(split_dim);
+        int64_t main_split_size =
+            int64_t(inst_split_dim_size / split_size) * split_size;
+        if (merge_rest && main_split_size < inst_split_dim_size) {
+          std::vector<bool> dynamic_dimensions(new_shape.dimensions_size(),
+                                               false);
+          dynamic_dimensions[split_dim] = true;
+          Shape dynamic_new_shape =
+              ShapeUtil::MakeShape(new_shape.element_type(),
+                                   new_shape.dimensions(), dynamic_dimensions);
+          new_inst = builder_.AddInstruction(inst->CloneWithNewOperands(
+              dynamic_new_shape, {param_lhs, new_rhs}));
+        } else {
+          new_inst = builder_.AddInstruction(
+              inst->CloneWithNewOperands(new_shape, {param_lhs, new_rhs}));
+        }
         visited_instructions_[visited_inst_key] = new_inst;
         return new_inst;
       }
@@ -2724,8 +3336,23 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
       Shape new_shape = ShapeUtil::MakeShape(inst->shape().element_type(),
                                              inst->shape().dimensions());
       new_shape.set_dimensions(split_dim, split_size);
-      HloInstruction* new_inst = builder_.AddInstruction(
-          inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
+      HloInstruction* new_inst;
+      int64_t inst_split_dim_size = inst->shape().dimensions(split_dim);
+      int64_t main_split_size =
+          int64_t(inst_split_dim_size / split_size) * split_size;
+      if (merge_rest && main_split_size < inst_split_dim_size) {
+        std::vector<bool> dynamic_dimensions(new_shape.dimensions_size(),
+                                             false);
+        dynamic_dimensions[split_dim] = true;
+        Shape dynamic_new_shape =
+            ShapeUtil::MakeShape(new_shape.element_type(),
+                                 new_shape.dimensions(), dynamic_dimensions);
+        new_inst = builder_.AddInstruction(
+            inst->CloneWithNewOperands(dynamic_new_shape, absl::MakeSpan(ops)));
+      } else {
+        new_inst = builder_.AddInstruction(
+            inst->CloneWithNewOperands(new_shape, absl::MakeSpan(ops)));
+      }
       visited_instructions_[visited_inst_key] = new_inst;
       return new_inst;
     } else {
@@ -2751,7 +3378,8 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
 
   Shape dot_shape = ShapeUtil::MakeShape(dot->shape().element_type(),
                                          dot->shape().dimensions());
-  dot_shape.set_dimensions(split_dim, split_size);
+  int64_t dot_split_dim = split_dim;
+  dot_shape.set_dimensions(dot_split_dim, split_size);
 
   auto& dnums = dot->dot_dimension_numbers();
   int64_t dims_lhs =
@@ -2781,19 +3409,60 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
   }
 
   LOG(INFO) << "<<< "
-            << "Splitting leaf dot " << dot->name()
-            << "; split_dim=" << split_dim << "; split_size=" << split_size
-            << "; split_lhs=" << (split_is_lhs ? "yes" : "no");
+            << "Splitting leaf dot " << dot->ToString()
+            << "; split_dim=" << dot_split_dim << "; split_size=" << split_size
+            << "; split_lhs=" << (split_is_lhs ? "yes" : "no")
+            << "; op_split_dim=" << split_dim;
 
   // add parameters
   HloInstruction* split_op_param;
   int64_t split_op_tuple_idx = AddParameter(split_op, &split_op_param);
   HloInstruction* join_op_param;
   int64_t join_op_tuple_idx = AddParameter(join_op, &join_op_param);
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+  int64_t split_dim_size = split_op_param->shape().dimensions(split_dim);
+  int64_t main_split_size = int64_t(split_dim_size / split_size) * split_size;
+  if (merge_rest && main_split_size < split_dim_size) {
+    // need padding to (split_count+1)*split_size
+    int64_t padded_split_dim_size = main_split_size + split_size;
+    PaddingConfig padding;
+    Shape padded_shape =
+        ShapeUtil::MakeShape(split_op_param->shape().element_type(),
+                             split_op_param->shape().dimensions());
+    padded_shape.set_dimensions(split_dim, padded_split_dim_size);
+    for (int dim = 0; dim < split_op_param->shape().dimensions_size(); ++dim) {
+      PaddingConfig::PaddingConfigDimension* dimension =
+          padding.add_dimensions();
+      dimension->set_edge_padding_low(0);
+      if (dim == split_dim) {
+        dimension->set_edge_padding_high(padded_split_dim_size -
+                                         split_dim_size);
+      } else {
+        dimension->set_edge_padding_high(0);
+      }
+      dimension->set_interior_padding(0);
+    }
+    LOG(INFO) << "[SplitLeafDot] "
+              << "split_op_param=" << split_op_param->ToString()
+              << " split_dim=" << split_dim
+              << " split_dim_size=" << split_dim_size
+              << " split_op_param.shpe=" << split_op_param->shape().ToString();
+    HloInstruction* zero =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::Zero(padded_shape.element_type())));
+    split_op_param = builder_.AddInstruction(
+        HloInstruction::CreatePad(padded_shape, split_op_param, zero, padding));
+    LOG(INFO) << "[SplitLeafDot] "
+              << "After Padding: split_op=" << split_op_param->ToString()
+              << " split_dim=" << split_dim
+              << " split_dim_size=" << split_dim_size
+              << " split_op.shpe=" << split_op_param->shape().ToString();
+  }
 
   // dynamic slice by index
-  Shape split_shape = ShapeUtil::MakeShape(split_op->shape().element_type(),
-                                           split_op->shape().dimensions());
+  Shape split_shape =
+      ShapeUtil::MakeShape(split_op_param->shape().element_type(),
+                           split_op_param->shape().dimensions());
   split_shape.set_dimensions(split_dim, split_size);
 
   std::vector<HloInstruction*> start_indices;
@@ -2802,7 +3471,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
       start_indices.push_back(offset_);
     } else {
       start_indices.push_back(
-          builder_.AddInstruction(CREATE_CONSTANT_INT64(0)));
+          builder_.AddInstruction(CREATE_CONSTANT_INT32(0)));
     }
   }
   HloInstruction* split_slice =
@@ -2810,10 +3479,35 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
           split_shape, split_op_param, absl::MakeSpan(start_indices),
           split_shape.dimensions()));
 
+  if (merge_rest && main_split_size < split_dim_size) {
+    HloInstruction* orig_split_dim_size =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_dim_size)));
+    HloInstruction* split_size_const =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_size)));
+    // offset starts form zero, so
+    // dynamic_size=min(orig_split_dim_size-offset_,split_size_const)
+    HloInstruction* tmp_split_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kSubtract,
+                                     orig_split_dim_size, offset_));
+    HloInstruction* dynamic_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kMinimum,
+                                     tmp_split_size, split_size_const));
+    std::vector<bool> dynamic_dimensions(split_shape.dimensions_size(), false);
+    dynamic_dimensions[split_dim] = true;
+    Shape dynamic_split_slice_shape = ShapeUtil::MakeShape(
+        split_slice->shape().element_type(), split_slice->shape().dimensions(),
+        dynamic_dimensions);
+    split_slice =
+        builder_.AddInstruction(HloInstruction::CreateSetDimensionSize(
+            dynamic_split_slice_shape, split_slice, dynamic_size, split_dim));
+  }
+
   LOG(INFO) << "[SplitLeafDot] "
             << "dot.name=" << dot->name() << " split_dim=" << split_dim
-            << " offset_=" << offset_->name()
-            << " Create split_slice: slice.name=" << split_slice->name()
+            << " offset_=" << offset_->ToString()
+            << " Create split_slice: slice=" << split_slice->ToString()
             << " slice_shape=" << split_slice->shape().ToString();
   // build the final dot
   std::vector<HloInstruction*> ops;
@@ -2822,8 +3516,15 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
   } else {
     ops = {join_op_param, split_slice};
   }
-  return builder_.AddInstruction(
-      dot->CloneWithNewOperands(dot_shape, absl::MakeSpan(ops)));
+  std::vector<bool> dynamic_dimensions(dot_shape.dimensions_size(), false);
+  dynamic_dimensions[dot_split_dim] = true;
+  Shape dynamic_dot_shape = ShapeUtil::MakeShape(
+      dot_shape.element_type(), dot_shape.dimensions(), dynamic_dimensions);
+  HloInstruction* new_leaf_dot = builder_.AddInstruction(
+      dot->CloneWithNewOperands(dynamic_dot_shape, absl::MakeSpan(ops)));
+  LOG(INFO) << "[SplitLeafDot] "
+            << "new_dot=" << new_leaf_dot->ToString();
+  return new_leaf_dot;
 }
 
 StatusOr<HloInstruction*>
@@ -2844,7 +3545,8 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
                                                operand->shape().dimensions());
 
   std::stringstream msg;
-  msg << "broadcast->dimentions[";
+  msg << "broadcast=" << broadcast->ToString();
+  msg << " broadcast->dimentions[";
   for (auto d : broadcast->dimensions()) msg << d << ",";
   msg << "], broadcast->dimentions().size=" << broadcast->dimensions().size();
   msg << ", split_dim=" << split_dim << ", split_size=" << split_size;
@@ -2854,7 +3556,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
   LOG(INFO) << "\n> @@@ " << msg.str();
 
   HloInstruction* new_operand;
-
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
   if (split_on_original_dim) {
     // we need to slice the parameter ...
     int64_t operand_split_dim;
@@ -2873,16 +3575,92 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
         start_indices.push_back(offset_);
       } else {
         start_indices.push_back(
-            builder_.AddInstruction(CREATE_CONSTANT_INT64(0)));
+            builder_.AddInstruction(CREATE_CONSTANT_INT32(0)));
       }
     }
 
     HloInstruction* parameter;
     parameter_idx = AddParameter(operand, &parameter);
 
+    int64_t operand_split_dim_size =
+        parameter->shape().dimensions(operand_split_dim);
+    int64_t main_split_size =
+        int64_t(operand_split_dim_size / split_size) * split_size;
+    if (merge_rest && main_split_size < operand_split_dim_size) {
+      // need padding to (split_count+1)*split_size
+      int64_t padded_split_dim_size = main_split_size + split_size;
+      PaddingConfig padding;
+      Shape padded_shape = ShapeUtil::MakeShape(
+          parameter->shape().element_type(), parameter->shape().dimensions());
+      padded_shape.set_dimensions(operand_split_dim, padded_split_dim_size);
+      for (int dim = 0; dim < parameter->shape().dimensions_size(); ++dim) {
+        PaddingConfig::PaddingConfigDimension* dimension =
+            padding.add_dimensions();
+        dimension->set_edge_padding_low(0);
+        if (dim == operand_split_dim) {
+          dimension->set_edge_padding_high(padded_split_dim_size -
+                                           operand_split_dim_size);
+        } else {
+          dimension->set_edge_padding_high(0);
+        }
+        dimension->set_interior_padding(0);
+      }
+      LOG(INFO) << "[SplitLeafBroadcast] "
+                << " broadcast.shape=" << broadcast->shape().ToString()
+                << " parameter.name=" << parameter->name()
+                << " operand_split_dim=" << operand_split_dim
+                << " operand_split_dim_size=" << operand_split_dim_size
+                << " split_op.shape=" << parameter->shape().ToString()
+                << " main_split_size=" << main_split_size
+                << " padded_split_dim_size=" << padded_split_dim_size;
+      HloInstruction* zero =
+          builder_.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::Zero(padded_shape.element_type())));
+      parameter = builder_.AddInstruction(
+          HloInstruction::CreatePad(padded_shape, parameter, zero, padding));
+      LOG(INFO) << "[SplitLeafBroadcast] "
+                << "After Padding: parameter.name=" << parameter->name()
+                << " operand_split_dim=" << operand_split_dim
+                << " operand_split_dim_size=" << operand_split_dim_size
+                << " parameter=" << parameter->ToString();
+    }
+
     new_operand = builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
         parameter_shape, parameter, absl::MakeSpan(start_indices),
         parameter_shape.dimensions()));
+    if (merge_rest && main_split_size < operand_split_dim_size) {
+      HloInstruction* orig_split_dim_size =
+          builder_.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<int32_t>(operand_split_dim_size)));
+      HloInstruction* split_size_const =
+          builder_.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<int32_t>(split_size)));
+      // offset starts form zero, so
+      // dynamic_size=min(orig_split_dim_size-offset_,split_size_const)
+      HloInstruction* tmp_split_size = builder_.AddInstruction(
+          HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kSubtract,
+                                       orig_split_dim_size, offset_));
+      HloInstruction* dynamic_size = builder_.AddInstruction(
+          HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kMinimum,
+                                       tmp_split_size, split_size_const));
+      std::vector<bool> dynamic_dimensions(
+          new_operand->shape().dimensions_size(), false);
+      dynamic_dimensions[operand_split_dim] = true;
+      Shape dynamic_new_operand_shape = ShapeUtil::MakeShape(
+          new_operand->shape().element_type(),
+          new_operand->shape().dimensions(), dynamic_dimensions);
+      new_operand =
+          builder_.AddInstruction(HloInstruction::CreateSetDimensionSize(
+              dynamic_new_operand_shape, new_operand, dynamic_size,
+              operand_split_dim));
+      LOG(INFO) << "[SplitLeafBroadcast] "
+                << "Create SetDimensionSize after new_operand="
+                << new_operand->name()
+                << " operand_split_dim=" << operand_split_dim
+                << " operand_split_dim_size=" << operand_split_dim_size
+                << " new_operand" << new_operand->ToString();
+    }
+
   } else {
     // This will be a parameter and we just modify the broadcast ...
     parameter_idx = AddParameter(operand, &new_operand);
@@ -2892,8 +3670,28 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
       broadcast->shape().element_type(), broadcast->shape().dimensions());
   broadcast_shape.set_dimensions(split_dim, split_size);
   std::vector<HloInstruction*> params = {new_operand};
-  return builder_.AddInstruction(
-      broadcast->CloneWithNewOperands(broadcast_shape, absl::MakeSpan(params)));
+  HloInstruction* new_boradcast_inst;
+  int64_t split_dim_size = broadcast->shape().dimensions(split_dim);
+  int64_t main_split_size = int64_t(split_dim_size / split_size) * split_size;
+  if (merge_rest && main_split_size < split_dim_size) {
+    std::vector<bool> dynamic_dimensions(broadcast_shape.dimensions_size(),
+                                         false);
+    dynamic_dimensions[split_dim] = true;
+    Shape dynamic_broadcast_shape =
+        ShapeUtil::MakeShape(broadcast_shape.element_type(),
+                             broadcast_shape.dimensions(), dynamic_dimensions);
+    new_boradcast_inst =
+        builder_.AddInstruction(broadcast->CloneWithNewOperands(
+            broadcast_shape, absl::MakeSpan(params)));
+  } else {
+    new_boradcast_inst =
+        builder_.AddInstruction(broadcast->CloneWithNewOperands(
+            broadcast_shape, absl::MakeSpan(params)));
+  }
+  LOG(INFO) << "[SplitLeafBroadcast] "
+            << "new_broadcast=" << new_boradcast_inst->ToString();
+
+  return new_boradcast_inst;
 }
 
 StatusOr<HloInstruction*>
@@ -2917,7 +3715,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafParameter(
       start_indices.push_back(offset_);
     } else {
       start_indices.push_back(
-          builder_.AddInstruction(CREATE_CONSTANT_INT64(0)));
+          builder_.AddInstruction(CREATE_CONSTANT_INT32(0)));
     }
   }
 
@@ -2937,9 +3735,83 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafParameter(
             << get_tuple_parameter->name() << " get_tuple_parameter.shape="
             << get_tuple_parameter->shape().ToString()
             << " slice_shape=" << slice_shape.ToString();
-  return builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
-      slice_shape, get_tuple_parameter, absl::MakeSpan(start_indices),
-      slice_shape.dimensions()));
+
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+  int64_t split_dim_size = get_tuple_parameter->shape().dimensions(split_dim);
+  int64_t main_split_size = int64_t(split_dim_size / split_size) * split_size;
+  if (merge_rest && main_split_size < split_dim_size) {
+    // need padding to (split_count+1)*split_size
+    int64_t padded_split_dim_size = main_split_size + split_size;
+    PaddingConfig padding;
+    Shape padded_shape =
+        ShapeUtil::MakeShape(get_tuple_parameter->shape().element_type(),
+                             get_tuple_parameter->shape().dimensions());
+    padded_shape.set_dimensions(split_dim, padded_split_dim_size);
+    for (int dim = 0; dim < get_tuple_parameter->shape().dimensions_size();
+         ++dim) {
+      PaddingConfig::PaddingConfigDimension* dimension =
+          padding.add_dimensions();
+      dimension->set_edge_padding_low(0);
+      if (dim == split_dim) {
+        dimension->set_edge_padding_high(padded_split_dim_size -
+                                         split_dim_size);
+      } else {
+        dimension->set_edge_padding_high(0);
+      }
+      dimension->set_interior_padding(0);
+    }
+    LOG(INFO) << "[SplitParameter] "
+              << "get_tuple_parameter.name=" << get_tuple_parameter->name()
+              << " split_dim=" << split_dim
+              << " split_dim_size=" << split_dim_size
+              << " get_tuple_parameter.shpe="
+              << get_tuple_parameter->shape().ToString();
+    HloInstruction* zero =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::Zero(padded_shape.element_type())));
+    get_tuple_parameter = builder_.AddInstruction(HloInstruction::CreatePad(
+        padded_shape, get_tuple_parameter, zero, padding));
+    LOG(INFO) << "[SplitParameter] "
+              << "After Padding: get_tuple_parameter.name="
+              << get_tuple_parameter->name() << " split_dim=" << split_dim
+              << " split_dim_size=" << split_dim_size
+              << " get_tuple_parameter.shpe="
+              << get_tuple_parameter->shape().ToString();
+  }
+
+  HloInstruction* split_slice =
+      builder_.AddInstruction(HloInstruction::CreateDynamicSlice(
+          slice_shape, get_tuple_parameter, absl::MakeSpan(start_indices),
+          slice_shape.dimensions()));
+
+  if (merge_rest && main_split_size < split_dim_size) {
+    HloInstruction* orig_split_dim_size =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_dim_size)));
+    HloInstruction* split_size_const =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_size)));
+    // offset starts form zero, so
+    // dynamic_size=min(orig_split_dim_size-offset_,split_size_const)
+    HloInstruction* tmp_split_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kSubtract,
+                                     orig_split_dim_size, offset_));
+    HloInstruction* dynamic_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kMinimum,
+                                     tmp_split_size, split_size_const));
+    std::vector<bool> dynamic_dimensions(split_slice->shape().dimensions_size(),
+                                         false);
+    dynamic_dimensions[split_dim] = true;
+    Shape dynamic_split_slice_shape = ShapeUtil::MakeShape(
+        split_slice->shape().element_type(), split_slice->shape().dimensions(),
+        dynamic_dimensions);
+    split_slice =
+        builder_.AddInstruction(HloInstruction::CreateSetDimensionSize(
+            dynamic_split_slice_shape, split_slice, dynamic_size, split_dim));
+  }
+  LOG(INFO) << "[SplitParameter] "
+            << "new_parameter=" << split_slice->ToString();
+  return split_slice;
 }
 
 StatusOr<HloInstruction*>
@@ -2950,6 +3822,9 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafIota(HloInstruction* iota,
 
   // For an iota, we simply produce smaller iota and add the
   // loop offset to each parameter
+  LOG(INFO) << "[SplitLeafParameter] "
+            << "iota=" << iota->ToString() << " split_dim=" << split_dim
+            << " split_size=" << split_size;
 
   auto* iota_inst = DynCast<HloIotaInstruction>(iota);
   CHECK(iota_inst != nullptr);
@@ -2958,6 +3833,10 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafIota(HloInstruction* iota,
   Shape iota_shape = ShapeUtil::MakeShape(iota->shape().element_type(),
                                           iota->shape().dimensions());
   iota_shape.set_dimensions(split_dim, split_size);
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+  int64_t split_dim_size = iota->shape().dimensions(split_dim);
+  int64_t main_split_size = int64_t(split_dim_size / split_size) * split_size;
+  HloInstruction* new_iota_inst;
 
   if (split_dim == iota_inst->iota_dimension()) {
     // The split is along the iota dimension, create offsets add
@@ -2979,15 +3858,42 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafIota(HloInstruction* iota,
     HloInstruction* broadcast =
         builder_.AddInstruction(HloInstruction::CreateBroadcast(
             iota_shape, param, absl::MakeSpan(broadcast_dims)));
-
-    return builder_.AddInstruction(HloInstruction::CreateBinary(
+    new_iota_inst = builder_.AddInstruction(HloInstruction::CreateBinary(
         iota_shape, HloOpcode::kAdd, small_iota, broadcast));
   } else {
     // The split is not along an iota dimension, simply
     // create a smaller iota and add that as parameters.
-    return builder_.AddInstruction(
+    new_iota_inst = builder_.AddInstruction(
         HloInstruction::CreateIota(iota_shape, iota_inst->iota_dimension()));
   }
+  if (merge_rest && main_split_size < split_dim_size) {
+    HloInstruction* orig_split_dim_size =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_dim_size)));
+    HloInstruction* split_size_const =
+        builder_.AddInstruction(HloInstruction::CreateConstant(
+            LiteralUtil::CreateR0<int32_t>(split_size)));
+    // offset starts form zero, so
+    // dynamic_size=min(orig_split_dim_size-offset_,split_size_const)
+    HloInstruction* tmp_split_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kSubtract,
+                                     orig_split_dim_size, offset_));
+    HloInstruction* dynamic_size = builder_.AddInstruction(
+        HloInstruction::CreateBinary(offset_->shape(), HloOpcode::kMinimum,
+                                     tmp_split_size, split_size_const));
+    std::vector<bool> dynamic_dimensions(
+        new_iota_inst->shape().dimensions_size(), false);
+    dynamic_dimensions[split_dim] = true;
+    Shape dynamic_parameter_shape = ShapeUtil::MakeShape(
+        new_iota_inst->shape().element_type(),
+        new_iota_inst->shape().dimensions(), dynamic_dimensions);
+    new_iota_inst =
+        builder_.AddInstruction(HloInstruction::CreateSetDimensionSize(
+            dynamic_parameter_shape, new_iota_inst, dynamic_size, split_dim));
+  }
+  LOG(INFO) << "[SplitParameter] "
+            << "new_iota_inst=" << new_iota_inst->ToString();
+  return new_iota_inst;
 }
 
 int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildRestOutputTuple(
@@ -3045,7 +3951,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildRestOutputTuple(
         start_indices.push_back(offset_);
       } else {
         start_indices.push_back(
-            builder_.AddInstruction(CREATE_CONSTANT_INT64(0)));
+            builder_.AddInstruction(CREATE_CONSTANT_INT32(0)));
       }
     }
     updated_output =
@@ -3074,6 +3980,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
     HloInstruction* part, bool combine_with_sum, bool combine_with_reduce) {
   HloInstruction* output;
   int64_t output_idx;
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
   if (combine_with_reduce) {
     CHECK(original->opcode() == HloOpcode::kReduce);
     CHECK(original->operand_count() == 2);
@@ -3086,13 +3993,32 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
     }
     output_idx = AddParameter(output_init, &output);
   } else {
-    // create the output init (broadcast off of 0)
-    HloInstruction* output_init =
-        original->parent()->AddInstruction(HloInstruction::CreateConstant(
-            LiteralUtil::Zero(original->shape().element_type())));
-    output_init = original->parent()->AddInstruction(
-        HloInstruction::CreateBroadcast(original->shape(), output_init, {}));
-    output_idx = AddParameter(output_init, &output);
+    if (combine_with_sum || (!merge_rest)) {
+      // create the output init (broadcast off of 0)
+      HloInstruction* output_init =
+          original->parent()->AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::Zero(original->shape().element_type())));
+      output_init = original->parent()->AddInstruction(
+          HloInstruction::CreateBroadcast(original->shape(), output_init, {}));
+      output_idx = AddParameter(output_init, &output);
+    } else {
+      // create the output init (broadcast off of 0)
+      HloInstruction* output_init =
+          original->parent()->AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::Zero(original->shape().element_type())));
+      Shape padded_shape = ShapeUtil::MakeShape(
+          original->shape().element_type(), original->shape().dimensions());
+      int64_t main_split_size =
+          int64_t(original->shape().dimensions(split_dim) / split_size) *
+          split_size;
+      if (main_split_size < original->shape().dimensions(split_dim)) {
+        main_split_size += split_size;
+      }
+      padded_shape.set_dimensions(split_dim, main_split_size);
+      output_init = original->parent()->AddInstruction(
+          HloInstruction::CreateBroadcast(padded_shape, output_init, {}));
+      output_idx = AddParameter(output_init, &output);
+    }
   }
 
   HloInstruction* updated_output;
@@ -3124,7 +4050,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
         start_indices.push_back(offset_);
       } else {
         start_indices.push_back(
-            builder_.AddInstruction(CREATE_CONSTANT_INT64(0)));
+            builder_.AddInstruction(CREATE_CONSTANT_INT32(0)));
       }
     }
     updated_output =
@@ -3145,7 +4071,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
   int64_t output_index_offset = 0;
   if (param_start_index == 0) {
     HloInstruction* split_size_const =
-        builder_.AddInstruction(CREATE_CONSTANT_INT64(split_size));
+        builder_.AddInstruction(CREATE_CONSTANT_INT32(split_size));
     HloInstruction* updated_index =
         builder_.AddInstruction(HloInstruction::CreateBinary(
             offset_->shape(), HloOpcode::kAdd, offset_, split_size_const));
@@ -3181,7 +4107,7 @@ HloComputation* TensorSplitterRewriteVisitorV2::CreateWhileSplitCondition(
       builder.AddInstruction(HloInstruction::CreateGetTupleElement(
           parameters_shape.tuple_shapes(0), parameter, 0));
   HloInstruction* stop_iteration =
-      builder.AddInstruction(CREATE_CONSTANT_INT64(stop_at));
+      builder.AddInstruction(CREATE_CONSTANT_INT32(stop_at));
   HloInstruction* compare = builder.AddInstruction(
       HloInstruction::CreateCompare(ShapeUtil::MakeShape(PRED, {}), iteration,
                                     stop_iteration, ComparisonDirection::kLt));
@@ -3227,12 +4153,12 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
   // sort is special since it needs result from the final while-loop
   for (auto& sub_info : loop_info.final_sub_main_output_elements) {
     HloInstruction* orig_inst = sub_info.starting_node_inst;
-    int64_t sub_output_idx = sub_info.result_index;
-    HloInstruction* result = orig_inst->parent()->AddInstruction(
-        HloInstruction::CreateGetTupleElement(orig_inst->shape(), loop,
-                                              sub_output_idx));
     if (orig_inst->opcode() == HloOpcode::kSort) {
       if (sub_info.split_rest > 0) {
+        int64_t sub_output_idx = sub_info.result_index;
+        HloInstruction* result = orig_inst->parent()->AddInstruction(
+            HloInstruction::CreateGetTupleElement(orig_inst->shape(), loop,
+                                                  sub_output_idx));
         auto sort_comp = orig_inst->parent();
         HloInstruction* array = orig_inst->mutable_operand(0);
         HloInstruction* indices = orig_inst->mutable_operand(1);
@@ -3247,10 +4173,6 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
         auto slice_k = array_slice->shape().dimensions(last_dim);
         Shape body_acc_array_shape = array_slice->shape();
         Shape body_acc_indices_shape = indices_slice->shape();
-        // body_acc_array_shape.set_dimensions(split_dim, split_dim_size); //
-        // TODO body_acc_indices_shape.set_dimensions(split_dim,
-        // split_dim_size); //
-        // TODO
         Shape body_acc_shape = ShapeUtil::MakeTupleShape(
             {body_acc_array_shape, body_acc_indices_shape});
 
@@ -3326,8 +4248,11 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
     }
   }
 
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
   HloInstruction* rest_result = nullptr;
-  if (loop_info.split_rest > 0) {
+  // TODO: may be need to check if there is a sort in the loop, need to build
+  // rest
+  if (loop_info.split_rest > 0 && (!merge_rest)) {
     // after the first loop, we can build the fianal rest computation
     HloInstruction* rest_output_tuple =
         loop_info.while_rest_builder->AddInstruction(
@@ -3341,7 +4266,7 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
         loop_info.final_sub_main_output_elements.front()
             .starting_node_inst->parent();
     loop_info.while_rest_parameters[0] =
-        parent_comp->AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
+        parent_comp->AddInstruction(CREATE_CONSTANT_INT32(main_split_size));
     HloInstruction* args = parent_comp->AddInstruction(
         HloInstruction::CreateTuple(loop_info.while_rest_parameters));
     rest_result = parent_comp->AddInstruction(HloInstruction::CreateCall(
@@ -3354,10 +4279,14 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
   for (auto& sub_info : loop_info.final_sub_main_output_elements) {
     HloInstruction* orig_inst = sub_info.starting_node_inst;
     int64_t sub_output_idx = sub_info.result_index;
+
+    Shape result_shape =
+        ShapeUtil::GetTupleElementShape(loop->shape(), sub_output_idx);
     HloInstruction* result = orig_inst->parent()->AddInstruction(
-        HloInstruction::CreateGetTupleElement(orig_inst->shape(), loop,
+        HloInstruction::CreateGetTupleElement(result_shape, loop,
                                               sub_output_idx));
-    LOG(INFO) << prefix << " result.name()=" << result->name()
+
+    LOG(INFO) << prefix << " result=" << result->ToString()
               << " sub_output_idx=" << std::to_string(sub_output_idx)
               << " parent.name()=" << orig_inst->parent()->name()
               << " shape=" << result->shape().ToString();
@@ -3365,7 +4294,8 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
       continue;
     }
     if (orig_inst->opcode() == HloOpcode::kDot) {
-      if (sub_info.split_rest == 0) {
+      if (sub_info.split_rest == 0 ||
+          (sub_info.combine_parts_with_sum && merge_rest)) {
         LOG(INFO) << prefix << " Start Replace "
                   << "'" << orig_inst->name() << "' with"
                   << " '" << result->name() << "' ";
@@ -3373,6 +4303,25 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
         LOG(INFO) << prefix << " Finish "
                   << "'" << orig_inst->name() << "' with"
                   << " '" << result->name() << "' ";
+      } else if (merge_rest) {
+        Shape slice_shape = ShapeUtil::MakeShape(
+            orig_inst->shape().element_type(), orig_inst->shape().dimensions());
+        std::vector<int64_t> starts;
+        std::vector<int64_t> limits;
+        std::vector<int64_t> strides;
+        for (int64_t d = 0; d < orig_inst->shape().dimensions_size(); d++) {
+          strides.push_back(1);
+          starts.push_back(0);
+          limits.push_back(orig_inst->shape().dimensions(d));
+        }
+        HloInstruction* full_result =
+            orig_inst->parent()->AddInstruction(HloInstruction::CreateSlice(
+                slice_shape, result, absl::MakeSpan(starts),
+                absl::MakeSpan(limits), absl::MakeSpan(strides)));
+        TF_RETURN_IF_ERROR(ReplaceInstruction(orig_inst, full_result));
+        LOG(INFO) << prefix << " Replace "
+                  << "'" << orig_inst->name() << "' with"
+                  << " '" << full_result->name() << "' ";
       } else {
         // get rest_result for the dot
         sub_info.result_rest = orig_inst->parent()->AddInstruction(
@@ -3420,11 +4369,66 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
         }
       }
     } else if (orig_inst->opcode() == HloOpcode::kReduce) {
-      if (sub_info.split_rest == 0) {
+      if (sub_info.split_rest == 0 ||
+          (sub_info.split_along_reduce_dim && merge_rest)) {
+        std::stringstream msg;
+        for (auto user : orig_inst->users()) {
+          msg << user->name() << " ";
+        }
+        LOG(INFO) << prefix << " orig_inst: "
+                  << "'" << orig_inst->name() << "' users: " << msg.str();
         TF_RETURN_IF_ERROR(ReplaceInstruction(orig_inst, result));
         LOG(INFO) << prefix << " Replace "
                   << "'" << orig_inst->name() << "' with"
                   << " '" << result->name() << "' ";
+        msg.str("");
+        for (auto user : result->users()) {
+          msg << user->name() << " ";
+        }
+        LOG(INFO) << prefix << " new_inst: "
+                  << "'" << result->name() << "' users: " << msg.str();
+      } else if (merge_rest) {
+        HloInstruction* old_output;
+        if (orig_inst->shape().IsTuple()) {
+          CHECK(orig_inst->user_count() == 1);
+          old_output = orig_inst->users()[0];
+
+        } else {
+          old_output = orig_inst;
+        }
+        Shape slice_shape =
+            ShapeUtil::MakeShape(old_output->shape().element_type(),
+                                 old_output->shape().dimensions());
+        std::vector<int64_t> starts;
+        std::vector<int64_t> limits;
+        std::vector<int64_t> strides;
+        for (int64_t d = 0; d < old_output->shape().dimensions_size(); d++) {
+          strides.push_back(1);
+          starts.push_back(0);
+          limits.push_back(old_output->shape().dimensions(d));
+        }
+        HloInstruction* full_result =
+            orig_inst->parent()->AddInstruction(HloInstruction::CreateSlice(
+                slice_shape, result, absl::MakeSpan(starts),
+                absl::MakeSpan(limits), absl::MakeSpan(strides)));
+        std::stringstream msg;
+        for (auto user : orig_inst->users()) {
+          msg << user->name() << " ";
+        }
+        LOG(INFO) << prefix << " orig_inst: "
+                  << "'" << orig_inst->name() << "' users: " << msg.str();
+
+        TF_RETURN_IF_ERROR(ReplaceInstruction(orig_inst, full_result));
+        LOG(INFO) << prefix << " Replace "
+                  << "'" << orig_inst->name() << "' with"
+                  << " '" << full_result->name() << "' ";
+
+        msg.str("");
+        for (auto user : full_result->users()) {
+          msg << user->name() << " ";
+        }
+        LOG(INFO) << prefix << " new_inst: "
+                  << "'" << full_result->name() << "' users: " << msg.str();
       } else {
         // get rest_result for the reduce
         sub_info.result_rest = orig_inst->parent()->AddInstruction(
@@ -3540,10 +4544,6 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
       auto slice_k = array_slice->shape().dimensions(last_dim);
       Shape body_acc_array_shape = array_slice->shape();
       Shape body_acc_indices_shape = indices_slice->shape();
-      // body_acc_array_shape.set_dimensions(split_dim, split_dim_size); //
-      // TODO body_acc_indices_shape.set_dimensions(split_dim,
-      // split_dim_size); //
-      // TODO
       Shape body_acc_shape = ShapeUtil::MakeTupleShape(
           {body_acc_array_shape, body_acc_indices_shape});
 
@@ -3655,9 +4655,13 @@ Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
             << " shape=" << cond_offset->shape().ToString();
 
   int64_t main_split_size = loop_info.split_count * loop_info.split_size;
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+  if (merge_rest && loop_info.split_rest > 0) {
+    main_split_size += loop_info.split_size;
+  }
   LOG(INFO) << prefix << " main_split_size=" << main_split_size;
   HloInstruction* offset_less_than =
-      cond_builder.AddInstruction(CREATE_CONSTANT_INT64(main_split_size));
+      cond_builder.AddInstruction(CREATE_CONSTANT_INT32(main_split_size));
   HloInstruction* compare =
       cond_builder.AddInstruction(HloInstruction::CreateCompare(
           ShapeUtil::MakeShape(PRED, {}), cond_offset, offset_less_than,
@@ -3791,14 +4795,15 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
 
     int64_t output_index = splitter.BuildMergedLoopOutput(
         -1, split_size, dot, part, /*combine_with_sum =*/true);
-    if (split_rest == 0) {
+    bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+    if (split_rest == 0 || merge_rest) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
       std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
       std::vector<HloInstruction*> empty_leafs;
       while_loop_num_to_info[while_loop_num].AddSubOutput(
           SubOutputInfo(output_index, dot, split_dim, empty_id_shapes,
-                        empty_leafs, 0, -1, false, false));
+                        empty_leafs, split_rest, -1, false, false));
       while_loop_num_to_processed_count[while_loop_num] += 1;
       if (CanFinishMergedWhileLoop(while_loop_num)) {
         return FinalizeMergedWhileLoop(while_loop_num);
@@ -3931,8 +4936,8 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
 
     int64_t output_index = splitter.BuildMergedLoopOutput(
         -1, split_size, dot, part, /*combine_with_sum =*/true);
-
-    if (split_rest == 0) {
+    bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+    if (split_rest == 0 || merge_rest) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
       std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
@@ -3940,7 +4945,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
       // * slit_dim is usesless for this case, thus we just send split_dim_lhs
       while_loop_num_to_info[while_loop_num].AddSubOutput(
           SubOutputInfo(output_index, dot, split_dim_lhs, empty_id_shapes,
-                        empty_leafs, 0, -1, false, false));
+                        empty_leafs, split_rest, -1, false, false));
       while_loop_num_to_processed_count[while_loop_num] += 1;
       if (CanFinishMergedWhileLoop(while_loop_num)) {
         return FinalizeMergedWhileLoop(while_loop_num);
@@ -4092,8 +5097,8 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
     }
     if (!combine_parts_with_sum)
       part_shape.set_dimensions(dot_split_dim, split_size);
-
-    if (combine_parts_with_sum) {
+    bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+    if (combine_parts_with_sum && (split_rest == 0 || !merge_rest)) {
       Shape sliced_shape =
           ShapeUtil::MakeShape(reduce_param->shape().element_type(),
                                reduce_param->shape().dimensions());
@@ -4103,7 +5108,6 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
                                     ? dnums.rhs_contracting_dimensions()[0]
                                     : dnums.lhs_contracting_dimensions()[0];
       sliced_shape.set_dimensions(param_split_dim, split_size);
-
       std::vector<HloInstruction*> start_indices;
       for (int64_t dim = 0; dim < reduce_param->shape().dimensions_size();
            dim++) {
@@ -4112,7 +5116,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
         } else {
           start_indices.push_back(
               body_builder.AddInstruction(HloInstruction::CreateConstant(
-                  LiteralUtil::CreateR0<int64_t>(0))));
+                  LiteralUtil::CreateR0<int32_t>(0))));
         }
       }
       reduce_param =
@@ -4124,6 +5128,86 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
                 << " Create reduce_param_slice: reduce_param_slice.name="
                 << reduce_param->name()
                 << " slice_shape=" << reduce_param->shape().ToString();
+    } else if (combine_parts_with_sum) {
+      // need to merge rest
+      Shape sliced_shape =
+          ShapeUtil::MakeShape(reduce_param->shape().element_type(),
+                               reduce_param->shape().dimensions());
+      // FIXME: This assumes dots only contract once (which is currently
+      // always true)
+      int64_t param_split_dim = split_is_lhs
+                                    ? dnums.rhs_contracting_dimensions()[0]
+                                    : dnums.lhs_contracting_dimensions()[0];
+      sliced_shape.set_dimensions(param_split_dim, split_size);
+      int64_t split_dim_size =
+          reduce_param->shape().dimensions(param_split_dim);
+      int64_t tmp_main_split_size =
+          int64_t(split_dim_size / split_size) * split_size;
+
+      int64_t padded_split_dim_size = tmp_main_split_size + split_size;
+      PaddingConfig padding;
+      Shape padded_shape =
+          ShapeUtil::MakeShape(reduce_param->shape().element_type(),
+                               reduce_param->shape().dimensions());
+      padded_shape.set_dimensions(param_split_dim, padded_split_dim_size);
+      for (int dim = 0; dim < reduce_param->shape().dimensions_size(); ++dim) {
+        PaddingConfig::PaddingConfigDimension* dimension =
+            padding.add_dimensions();
+        dimension->set_edge_padding_low(0);
+        if (dim == param_split_dim) {
+          dimension->set_edge_padding_high(padded_split_dim_size -
+                                           split_dim_size);
+        } else {
+          dimension->set_edge_padding_high(0);
+        }
+        dimension->set_interior_padding(0);
+      }
+      HloInstruction* zero =
+          body_builder.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::Zero(padded_shape.element_type())));
+      reduce_param = body_builder.AddInstruction(
+          HloInstruction::CreatePad(padded_shape, reduce_param, zero, padding));
+
+      HloInstruction* orig_split_dim_size =
+          body_builder.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<int32_t>(split_dim_size)));
+
+      std::vector<HloInstruction*> start_indices;
+      for (int64_t dim = 0; dim < reduce_param->shape().dimensions_size();
+           dim++) {
+        if (dim == param_split_dim) {
+          start_indices.push_back(splitter.offset());
+        } else {
+          start_indices.push_back(
+              body_builder.AddInstruction(HloInstruction::CreateConstant(
+                  LiteralUtil::CreateR0<int32_t>(0))));
+        }
+      }
+      reduce_param =
+          body_builder.AddInstruction(HloInstruction::CreateDynamicSlice(
+              sliced_shape, reduce_param, absl::MakeSpan(start_indices),
+              sliced_shape.dimensions()));
+      LOG(INFO) << prefix << "combine_parts_with_sum: dot.name=" << dot->name()
+                << " param_split_dim=" << param_split_dim
+                << " Create reduce_param_slice: reduce_param_slice.name="
+                << reduce_param->name()
+                << " slice_shape=" << reduce_param->shape().ToString();
+      HloInstruction* split_size_const =
+          body_builder.AddInstruction(HloInstruction::CreateConstant(
+              LiteralUtil::CreateR0<int32_t>(split_size)));
+      // offset starts form zero, so
+      // dynamic_size=min(orig_split_dim_size-offset_,split_size_const)
+      HloInstruction* tmp_split_size =
+          body_builder.AddInstruction(HloInstruction::CreateBinary(
+              splitter.offset()->shape(), HloOpcode::kSubtract,
+              orig_split_dim_size, splitter.offset()));
+      HloInstruction* dynamic_size =
+          body_builder.AddInstruction(HloInstruction::CreateBinary(
+              splitter.offset()->shape(), HloOpcode::kMinimum, tmp_split_size,
+              split_size_const));
+      reduce_param =
+          body_builder.AddInstruction(HloInstruction::CreateSetDimensionSize(
+              sliced_shape, reduce_param, dynamic_size, param_split_dim));
     }
 
     std::vector<HloInstruction*> ops;
@@ -4138,14 +5222,14 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
     int64_t output_index = splitter.BuildMergedLoopOutput(
         dot_split_dim, split_size, dot, part, combine_parts_with_sum);
 
-    if (split_rest == 0) {
+    if (split_rest == 0 || merge_rest) {
       ss << "\n ----< Exit HandleDot for '" << dot->name() << "' SUCCESS";
       LOG(INFO) << ss.str();
       std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
       std::vector<HloInstruction*> empty_leafs;
       while_loop_num_to_info[while_loop_num].AddSubOutput(
           SubOutputInfo(output_index, dot, split_dim, empty_id_shapes,
-                        empty_leafs, 0, -1, false, false));
+                        empty_leafs, split_rest, -1, false, false));
       while_loop_num_to_processed_count[while_loop_num] += 1;
       if (CanFinishMergedWhileLoop(while_loop_num)) {
         return FinalizeMergedWhileLoop(while_loop_num);
@@ -4211,7 +5295,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
           } else {
             start_indices.push_back(
                 rest_builder.AddInstruction(HloInstruction::CreateConstant(
-                    LiteralUtil::CreateR0<int64_t>(0))));
+                    LiteralUtil::CreateR0<int32_t>(0))));
           }
         }
         reduce_param =
@@ -4425,8 +5509,8 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   int64_t output_index = splitter.BuildMergedLoopOutput(
       reduce_split_dim, split_size, old_output, output_part, false,
       split_along_reduce_dim);
-
-  if (split_rest > 0) {
+  bool merge_rest = GetDebugOptionsFromFlags().xla_tensor_split_merge_rest();
+  if (split_rest > 0 && (!merge_rest)) {
     HloComputation::Builder& rest_builder =
         *while_loop_num_to_info[while_loop_num].while_rest_builder;
     Splitter rest_splitter(
@@ -4517,9 +5601,9 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   }
   std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
   std::vector<HloInstruction*> empty_leafs;
-  while_loop_num_to_info[while_loop_num].AddSubOutput(
-      SubOutputInfo(output_index, reduce, split_dim, empty_id_shapes,
-                    empty_leafs, 0, -1, false, split_along_reduce_dim));
+  while_loop_num_to_info[while_loop_num].AddSubOutput(SubOutputInfo(
+      output_index, reduce, split_dim, empty_id_shapes, empty_leafs, split_rest,
+      -1, false, split_along_reduce_dim));
   while_loop_num_to_processed_count[while_loop_num] += 1;
   ss << "\n <---- Exit HandleReduce for '" << old_output->name() << "' SUCCESS";
   LOG(INFO) << ss.str();
@@ -4670,7 +5754,7 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
 
   HloInstruction* body_offset = body_splitter.offset();
   HloInstruction* body_split_size =
-      body_builder.AddInstruction(CREATE_CONSTANT_INT64(split_size));
+      body_builder.AddInstruction(CREATE_CONSTANT_INT32(split_size));
 
   // Create the body of while loop
   // The body sort operation acts on slices of the original tensor
@@ -4822,7 +5906,7 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
       parent_module->AddEmbeddedComputation(true_builder.Build());
 
   HloInstruction* body_init_offset =
-      body_builder.AddInstruction(CREATE_CONSTANT_INT64(0));
+      body_builder.AddInstruction(CREATE_CONSTANT_INT32(0));
   HloInstruction* body_cond_pred =
       body_builder.AddInstruction(HloInstruction::CreateCompare(
           ShapeUtil::MakeShape(PRED, {}), body_offset, body_init_offset,
@@ -4868,9 +5952,9 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
 
   if (split_rest == 0) {
     std::vector<HloInstruction*> empty_leafs;
-    while_loop_num_to_info[while_loop_num].AddSubOutput(
-        SubOutputInfo(while_parameter_updates.size() - 1, sort, split_dim,
-                      ids_and_shapes, empty_leafs, 0, -1, false, false));
+    while_loop_num_to_info[while_loop_num].AddSubOutput(SubOutputInfo(
+        while_parameter_updates.size() - 1, sort, split_dim, ids_and_shapes,
+        empty_leafs, split_rest, -1, false, false));
     while_loop_num_to_processed_count[while_loop_num] += 1;
     LOG(INFO) << "\n <---- Exit HandleSort for '" << sort->name()
               << "' SUCCESS";

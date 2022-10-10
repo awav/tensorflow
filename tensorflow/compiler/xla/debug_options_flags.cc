@@ -91,6 +91,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_redzone_scratch_max_megabytes(1LL << 12);
   opts.set_xla_tensor_size_threshold("1GB");
   opts.set_xla_tensor_split_size("0B");
+  opts.set_xla_tensor_split_merge_rest(false);
   return opts;
 }
 
@@ -740,7 +741,11 @@ static void AllocateFlags() {
       flag_values->xla_tensor_split_size(),
       "The value in bytes for splitting size of tensors. When the value is 0, "
       "the value of xla_tensor_size_threshold is be used instead."));
-
+  flag_objects->push_back(tensorflow::Flag(
+      "xla_tensor_split_merge_rest",
+      bool_setter_for(&DebugOptions::set_xla_tensor_split_merge_rest),
+      flag_values->xla_tensor_split_merge_rest(),
+      "Merge the remainder part of a splitting result will into it's corresponding while-loop."));
   ParseFlagsFromEnvAndDieIfUnknown("XLA_FLAGS", *flag_objects);
 }  // NOLINT(readability/fn_size)
 
