@@ -386,19 +386,6 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
-    // TODO(dyedgreen): Figure out what the best place for this pass is ...
-    pipeline.AddPass<HloPassFix<RceOptimizer>>();
-    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
-    // pipeline.AddPass<AlgebraicRewriter>();
-    pipeline.AddPass<HloMCO>();
-    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
-    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
-    // ReshapeSinker may introduce new redundant reshape chain 
-    pipeline.AddPass<HloPassFix<RceOptimizer>>();
-    pipeline.AddPass<TensorSplitter>();
-    pipeline.AddPass<TensorSplitterV2>();
-    pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
 
     if (debug_options.xla_gpu_deterministic_ops()) {
       // Scatter is nondeterministic, so eliminate all Scatters.
@@ -411,10 +398,6 @@ Status GpuCompiler::OptimizeHloModule(
     // cuSOLVER.
     pipeline.AddPass<QrExpander>();
     pipeline.AddPass<EighExpander>();
-    pipeline.AddPass<TriangularSolveExpander>();
-    pipeline.AddPass<AllGatherDecomposer>();
-    pipeline.AddPass<AllToAllDecomposer>();
-    pipeline.AddPass<ReduceScatterDecomposer>();
 
     pipeline.AddPass<DynamicIndexSplitter>();
 
@@ -444,6 +427,91 @@ Status GpuCompiler::OptimizeHloModule(
     auto dynamic_padder_options = DynamicPadderOptions();
     dynamic_padder_options.shape_check_mode =
         DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+    pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+
+        pipeline.AddInvariantCheckerDebug<HloVerifier>(
+        /*layout_sensitive=*/false,
+        /*allow_mixed_precision=*/false);
+
+    // BatchNormExpander can create zero-sized ops, so zero-sized HLO
+    // elimination has to come after that pass.
+    pipeline.AddPass<ZeroSizedHloElimination>();
+
+    pipeline.AddPass<GatherExpander>(GatherExpander::kEliminateSimpleGathers);
+    pipeline.AddPass<ScatterExpander>(
+        ScatterExpander::kEliminateSimpleScatters);
+
+    AlgebraicSimplifierOptions options({}, ConvIsLowerable);
+    // "slow" minmax means we propagate nan.
+    options.set_minmax_propagate_nan(
+        !debug_options.xla_gpu_enable_fast_min_max());
+
+    // When transposes appear in a fusion node, we can easily adjust the
+    // multi-dimensional index to create the one needed for the operand.
+    // This is not as easy with bitcasts, because we don't have the
+    // information readily available which dimensions are permuted. In
+    // addition to that, if we have a transpose and a reshape next to each
+    // other, they will both be replaced by a bitcast, and we replace
+    // bitcast(bitcast) with one bitcast. This leads to having to
+    // linearize and then delinearize the index.
+    options.set_replace_transpose_with_bitcast(false);
+    const se::Platform* platform = stream_exec->platform();
+    if (platform->Name() == "ROCM") {
+      // SwapConvOperands does not yet work on ROCM
+      options.set_enable_conv_operand_swap(false);
+    }
+    pipeline.AddPass<AlgebraicSimplifier>(options);
+    pipeline.AddPass<BitcastDtypesExpander>();
+    // AlgebraicSimplifier may add contracting dimensions to a dot.
+    pipeline.AddPass<DotDecomposer>();
+    // Only merge "smallish" dots.  This threshold was not set carefully, but
+    // so far we know that 1mb is too small.
+    pipeline.AddPass<DotMerger>(/*max_size_to_merge=*/int64_t{16} << 20);
+    pipeline.AddPass<SortSimplifier>();
+
+    // TODO(dyedgreen): Figure out what the best place for this pass is ...
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
+    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+    pipeline.AddPass<HloMCO>();
+    pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+    // ReshapeSinker may introduce new redundant reshape chain 
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
+    pipeline.AddPass<TensorSplitter>();
+    pipeline.AddPass<TensorSplitterV2>();
+    pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+    
+    pipeline.AddPass<QrExpander>();
+    pipeline.AddPass<EighExpander>();
+    pipeline.AddPass<TriangularSolveExpander>();
+    pipeline.AddPass<AllGatherDecomposer>();
+    pipeline.AddPass<AllToAllDecomposer>();
+    pipeline.AddPass<ReduceScatterDecomposer>();
+
+    pipeline.AddPass<DynamicIndexSplitter>();
+
+    // TODO(b/64094172): make Call work on GPU instead of inlining.
+    pipeline.AddPass<CallInliner>();
+
+    pipeline.AddPass<DotDecomposer>();
+
+    pipeline.AddPass<Convolution4DExpander>();
+
+    // Expand the sort op to support stable sorting if required.
+    pipeline.AddPass<StableSortExpander>();
+
+    pipeline.AddPass<BFloat16Normalization>(&bf16);
+
+    pipeline.AddPass<BatchNormExpander>(
+        /*rewrite_training_op=*/true,
+        /*rewrite_inference_op=*/true,
+        /*rewrite_grad_op=*/true);
+
+    pipeline.AddPass<LogisticExpander>(
+        /*expansion_type=*/LogisticExpansionType::kExp);
+    pipeline.AddPass<ConditionalCanonicalizer>();
+    pipeline.AddPass<DynamicDimensionSimplifier>();
     pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
 
     // Build simplification pipeline.  The passes in here are run to a fixed

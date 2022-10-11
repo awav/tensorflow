@@ -457,31 +457,6 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   pipeline.AddPass<DynamicIndexSplitter>();
 
-  // TODO(dyedgreen): Figure out what the best place for this pass is ...
-  pipeline.AddPass<HloPassFix<RceOptimizer>>();
-  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
-  pipeline.AddPass<HloMCO>();
-  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
-  pipeline.AddPass<HloPassFix<ReshapeSinker>>();
-  // ReshapeSinker may introduce new redundant reshape chain 
-  pipeline.AddPass<HloPassFix<RceOptimizer>>();
-  pipeline.AddPass<TensorSplitter>();
-  pipeline.AddPass<TensorSplitterV2>();
-  pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
-
-  pipeline.AddPass<ConditionalToSelect>();
-  pipeline.AddPass<MapInliner>();
-
-  pipeline.AddPass<ComparisonExpander>();
-  pipeline.AddPass<CholeskyExpander>();
-  pipeline.AddPass<QrExpander>();
-  pipeline.AddPass<EighExpander>();
-  pipeline.AddPass<TriangularSolveExpander>();
-  pipeline.AddPass<AllGatherDecomposer>();
-  pipeline.AddPass<AllToAllDecomposer>();
-  pipeline.AddPass<ReduceScatterDecomposer>();
-
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
   pipeline.AddPass<BatchDotSimplification>();
@@ -522,6 +497,63 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<ConditionalCanonicalizer>();
   pipeline.AddPass<DynamicDimensionSimplifier>();
   auto dynamic_padder_options = DynamicPadderOptions();
+  dynamic_padder_options.shape_check_mode =
+      DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+  pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+  pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
+  pipeline.AddPass<ConvCanonicalization>(target_machine_features);
+
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloMCO>();
+  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+  pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+  // ReshapeSinker may introduce new redundant reshape chain 
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<TensorSplitter>();
+  pipeline.AddPass<TensorSplitterV2>();
+  pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+
+  pipeline.AddPass<ConditionalToSelect>();
+  pipeline.AddPass<MapInliner>();
+
+  pipeline.AddPass<ComparisonExpander>();
+  pipeline.AddPass<CholeskyExpander>();
+  pipeline.AddPass<QrExpander>();
+  pipeline.AddPass<EighExpander>();
+  pipeline.AddPass<TriangularSolveExpander>();
+  pipeline.AddPass<AllGatherDecomposer>();
+  pipeline.AddPass<AllToAllDecomposer>();
+  pipeline.AddPass<ReduceScatterDecomposer>();
+
+  // Inline computations with a single call site.
+  pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
+  pipeline.AddPass<BatchDotSimplification>();
+  pipeline.AddPass<DotDecomposer>();
+  // Convert BF16 operations to F32 operations so that the CPU backend can
+  // support BF16 operations without directly implementing a BF16 lowering for
+  // most ops.
+  pipeline.AddPass<BFloat16Normalization>(&bf16);
+  // After canonicalization, there may be more batch dots that can be
+  // simplified.
+  pipeline.AddPass<BatchDotSimplification>();
+  pipeline.AddPass<ConvolutionGroupConverter>(
+      /*should_expand=*/[](HloInstruction* conv) { return true; }, cost_model,
+      /*convert_batch_groups_only=*/true);
+  pipeline.AddPass<ConvolutionGroupConverter>(
+      feature_group_should_expand, cost_model,
+      /*convert_batch_groups_only=*/false);
+  pipeline.AddPass<BatchNormExpander>(
+      /*rewrite_training_op=*/true,
+      /*rewrite_inference_op=*/true,
+      /*rewrite_grad_op=*/true);
+  pipeline.AddPass<LogisticExpander>(
+      /*expansion_type=*/LogisticExpansionType::kExp);
+  pipeline.AddPass<ConditionalCanonicalizer>();
+  pipeline.AddPass<DynamicDimensionSimplifier>();
+  dynamic_padder_options = DynamicPadderOptions();
   dynamic_padder_options.shape_check_mode =
       DynamicDimensionInference::ShapeCheckMode::kCompileTime;
   pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
