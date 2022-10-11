@@ -126,8 +126,10 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_sharding_metadata.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/reshape_sinker.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
 #include "tensorflow/compiler/xla/service/loop_schedule_linearizer.h"
@@ -168,6 +170,8 @@ limitations under the License.
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/util/env_var.h"
+#include "tensorflow/compiler/xla/service/triangular_solve_expander.h"
+#include "tensorflow/compiler/xla/service/reduce_scatter_decomposer.h"
 
 #if BEF_EXECUTABLE
 #include "tensorflow/compiler/mlir/tfrt/transforms/lhlo_gpu_to_tfrt_gpu/gpu_passes.h"
@@ -341,12 +345,68 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
+    pipeline.AddPass<GpuScatterExpander>();
+    // TODO(phawkins): replace QR and Eigh decompositions with calls to
+    // cuSOLVER.
+    pipeline.AddPass<QrExpander>();
+    pipeline.AddPass<EighExpander>();
+    pipeline.AddPass<TriangularSolveExpander>();
+    pipeline.AddPass<AllGatherDecomposer>();
+    pipeline.AddPass<AllToAllDecomposer>();
+    pipeline.AddPass<ReduceScatterDecomposer>();
+
+    pipeline.AddPass<DynamicIndexSplitter>();
+
+    // TODO(b/64094172): make Call work on GPU instead of inlining.
+    pipeline.AddPass<CallInliner>();
+
+    pipeline.AddPass<DotDecomposer>();
+
+    pipeline.AddPass<Convolution4DExpander>();
+
+    // Expand the sort op to support stable sorting if required.
+    pipeline.AddPass<StableSortExpander>();
+
+    GpuBfloat16Support bf16(/*supports_matrix_multiplication=*/true,
+                            stream_exec);
+    pipeline.AddPass<BFloat16Normalization>(&bf16);
+
+    // If cudnn batchnorms are enabled, rewrite batchnorm HLOs to cudnn calls
+    // where possible.  Not every batchnorm op can be implemented as a call to
+    // cudnn, so decompose any remaining batchnorm ops into a soup of HLOs.
+    if (debug_options.xla_gpu_use_cudnn_batchnorm()) {
+      // Since BatchNorm inference is essentially pointwise operations, it is
+      // always advantageous to use kernel fusion rather than cudnn.
+      pipeline.AddPass<BatchNormExpander>(
+          /*rewrite_training_op=*/false,
+          /*rewrite_inference_op=*/true,
+          /*rewrite_grad_op=*/false);
+      pipeline.AddPass<CudnnBatchNormRewriter>();
+    }
+    pipeline.AddPass<BatchNormExpander>(
+        /*rewrite_training_op=*/true,
+        /*rewrite_inference_op=*/true,
+        /*rewrite_grad_op=*/true);
+
+    pipeline.AddPass<LogisticExpander>(
+        /*expansion_type=*/LogisticExpansionType::kExp);
+    pipeline.AddPass<ConditionalCanonicalizer>();
+    pipeline.AddPass<DynamicDimensionSimplifier>();
+    auto dynamic_padder_options = DynamicPadderOptions();
+    dynamic_padder_options.shape_check_mode =
+        DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+    pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
     // pipeline.AddPass<AlgebraicRewriter>();
+    pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+    pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+    // ReshapeSinker may introduce new redundant reshape chain 
+    pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<TensorSplitter>();
     pipeline.AddPass<TensorSplitterV2>();
     pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
@@ -356,6 +416,10 @@ Status GpuCompiler::OptimizeHloModule(
     // cuSOLVER.
     pipeline.AddPass<QrExpander>();
     pipeline.AddPass<EighExpander>();
+    pipeline.AddPass<TriangularSolveExpander>();
+    pipeline.AddPass<AllGatherDecomposer>();
+    pipeline.AddPass<AllToAllDecomposer>();
+    pipeline.AddPass<ReduceScatterDecomposer>();
 
     pipeline.AddPass<DynamicIndexSplitter>();
 
