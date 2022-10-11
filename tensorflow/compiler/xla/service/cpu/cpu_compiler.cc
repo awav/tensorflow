@@ -331,6 +331,43 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
   pipeline.AddPass<DynamicIndexSplitter>();
 
+  // Inline computations with a single call site.
+  pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
+  pipeline.AddPass<BatchDotSimplification>();
+  pipeline.AddPass<DotDecomposer>();
+  // Convert BF16 operations to F32 operations so that the CPU backend can
+  // support BF16 operations without directly implementing a BF16 lowering for
+  // most ops.
+  BFloat16Support bf16;
+  pipeline.AddPass<BFloat16Normalization>(&bf16);
+  // After canonicalization, there may be more batch dots that can be
+  // simplified.
+  pipeline.AddPass<BatchDotSimplification>();
+  auto cost_model = [](HloInstruction* conv) {
+    // We need a cost model for CPUs. Currently, do nothing.
+    return false;
+  };
+  pipeline.AddPass<ConvolutionGroupConverter>(
+      cost_model,
+      /*convert_batch_groups_only=*/true);
+  pipeline.AddPass<ConvolutionGroupConverter>(
+      cost_model,
+      /*convert_batch_groups_only=*/false);
+  pipeline.AddPass<BatchNormExpander>(
+      /*rewrite_training_op=*/true,
+      /*rewrite_inference_op=*/true,
+      /*rewrite_grad_op=*/true);
+  pipeline.AddPass<LogisticExpander>(
+      /*expansion_type=*/LogisticExpansionType::kExp);
+  pipeline.AddPass<ConditionalCanonicalizer>();
+  pipeline.AddPass<DynamicDimensionSimplifier>();
+  auto dynamic_padder_options = DynamicPadderOptions();
+  dynamic_padder_options.shape_check_mode =
+      DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+  pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+  pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
+  pipeline.AddPass<ConvCanonicalization>(target_machine_features);
+
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<HloPassFix<RceOptimizer>>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
@@ -363,15 +400,10 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // Convert BF16 operations to F32 operations so that the CPU backend can
   // support BF16 operations without directly implementing a BF16 lowering for
   // most ops.
-  BFloat16Support bf16;
   pipeline.AddPass<BFloat16Normalization>(&bf16);
   // After canonicalization, there may be more batch dots that can be
   // simplified.
   pipeline.AddPass<BatchDotSimplification>();
-  auto cost_model = [](HloInstruction* conv) {
-    // We need a cost model for CPUs. Currently, do nothing.
-    return false;
-  };
   pipeline.AddPass<ConvolutionGroupConverter>(
       cost_model,
       /*convert_batch_groups_only=*/true);
@@ -386,7 +418,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
       /*expansion_type=*/LogisticExpansionType::kExp);
   pipeline.AddPass<ConditionalCanonicalizer>();
   pipeline.AddPass<DynamicDimensionSimplifier>();
-  auto dynamic_padder_options = DynamicPadderOptions();
+  dynamic_padder_options = DynamicPadderOptions();
   dynamic_padder_options.shape_check_mode =
       DynamicDimensionInference::ShapeCheckMode::kCompileTime;
   pipeline.AddPass<DynamicPadder>(dynamic_padder_options);

@@ -345,6 +345,58 @@ Status GpuCompiler::OptimizeHloModule(
     // handle it.
     pipeline.AddPass<ZeroSizedHloElimination>();
 
+    pipeline.AddPass<GpuScatterExpander>();
+    // TODO(phawkins): replace QR and Eigh decompositions with calls to
+    // cuSOLVER.
+    pipeline.AddPass<QrExpander>();
+    pipeline.AddPass<EighExpander>();
+    pipeline.AddPass<TriangularSolveExpander>();
+    pipeline.AddPass<AllGatherDecomposer>();
+    pipeline.AddPass<AllToAllDecomposer>();
+    pipeline.AddPass<ReduceScatterDecomposer>();
+
+    pipeline.AddPass<DynamicIndexSplitter>();
+
+    // TODO(b/64094172): make Call work on GPU instead of inlining.
+    pipeline.AddPass<CallInliner>();
+
+    pipeline.AddPass<DotDecomposer>();
+
+    pipeline.AddPass<Convolution4DExpander>();
+
+    // Expand the sort op to support stable sorting if required.
+    pipeline.AddPass<StableSortExpander>();
+
+    GpuBfloat16Support bf16(/*supports_matrix_multiplication=*/true,
+                            stream_exec);
+    pipeline.AddPass<BFloat16Normalization>(&bf16);
+
+    // If cudnn batchnorms are enabled, rewrite batchnorm HLOs to cudnn calls
+    // where possible.  Not every batchnorm op can be implemented as a call to
+    // cudnn, so decompose any remaining batchnorm ops into a soup of HLOs.
+    if (debug_options.xla_gpu_use_cudnn_batchnorm()) {
+      // Since BatchNorm inference is essentially pointwise operations, it is
+      // always advantageous to use kernel fusion rather than cudnn.
+      pipeline.AddPass<BatchNormExpander>(
+          /*rewrite_training_op=*/false,
+          /*rewrite_inference_op=*/true,
+          /*rewrite_grad_op=*/false);
+      pipeline.AddPass<CudnnBatchNormRewriter>();
+    }
+    pipeline.AddPass<BatchNormExpander>(
+        /*rewrite_training_op=*/true,
+        /*rewrite_inference_op=*/true,
+        /*rewrite_grad_op=*/true);
+
+    pipeline.AddPass<LogisticExpander>(
+        /*expansion_type=*/LogisticExpansionType::kExp);
+    pipeline.AddPass<ConditionalCanonicalizer>();
+    pipeline.AddPass<DynamicDimensionSimplifier>();
+    auto dynamic_padder_options = DynamicPadderOptions();
+    dynamic_padder_options.shape_check_mode =
+        DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+    pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
