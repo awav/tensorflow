@@ -80,6 +80,14 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     return false;
   }
 
+  std::stringstream ss;
+  ss << "LHS Broadcasting name: " << lhs->name() << "\n";
+  ss << "LHS Broadcasting shape: " << lhs->shape() << "\n";
+  ss << "LHS Broadcasting dimensions: [";
+  for (auto dim: lhs->dimensions()) ss << dim << ", ";
+  ss << "]\n";
+  LOG(INFO) << ss.str();
+
   // Check the broadcast + reduce dimensions are correct
   int64_t reduce_dim = reduce->dimensions(0);
   // the reduce dimension must NOT be a broadcasted one
@@ -130,17 +138,14 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
 
 Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   HloInstruction *x, *y;
-
   bool is_sub;
-
-  std::stringstream ss;
-
   int64_t x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
   if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
                            &y_dim, &y_reduce_dim)) {
     return Status::OK();
   }
 
+  std::stringstream ss;
   ss << ">>> ";
   ss << "Rules match for the euclidean distance matrix. \n";
   ss << "Distance X: " << x->name() << "\n";
