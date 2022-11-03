@@ -19,9 +19,11 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
   explicit AlgebraicRewriterVisitor() {}
 
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
-                           HloInstruction** y, bool* is_sub, int64_t* x_dim,
-                           int64_t* x_reduce_dim, int64_t* y_dim,
-                           int64_t* y_reduce_dim);
+                           HloInstruction** y, bool* is_sub,
+                           std::vector<int64_t>* lhs_reduce_dims,
+                           std::vector<int64_t>* rhs_reduce_dims,
+                           std::vector<int64_t>* lhs_broadcast_dims,
+                           std::vector<int64_t>* rhs_broadcast_dims);
 
   Status HandleReduce(HloInstruction* reduce) override;
 };
@@ -29,9 +31,11 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 }  // namespace
 
 bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
-    HloInstruction* reduce, HloInstruction** x, HloInstruction** y,
-    bool* is_sub, int64_t* x_dim, int64_t* x_reduce_dim, int64_t* y_dim,
-    int64_t* y_reduce_dim) {
+    HloInstruction* reduce, HloInstruction** lhs, HloInstruction** rhs,
+    bool* is_sub, std::vector<int64_t>* lhs_reduce_dims,
+    std::vector<int64_t>* rhs_reduce_dims,
+    std::vector<int64_t>* lhs_broadcast_dims,
+    std::vector<int64_t>* rhs_broadcast_dims) {
   HloInstruction* core_expr = nullptr;
   HloInstruction* reduce_operand = nullptr;
   HloInstruction* reduce_init = nullptr;
@@ -58,11 +62,12 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   }
 
   // Check add or sub
-  HloInstruction* lhs = nullptr;
-  HloInstruction* rhs = nullptr;
-  if (Match(core_expr, m::Add(m::Op(&lhs), m::Op(&rhs)))) {
+  HloInstruction* lhs_broadcast = nullptr;
+  HloInstruction* rhs_broadcast = nullptr;
+  if (Match(core_expr, m::Add(m::Op(&lhs_broadcast), m::Op(&rhs_broadcast)))) {
     *is_sub = false;
-  } else if (Match(core_expr, m::Subtract(m::Op(&lhs), m::Op(&rhs)))) {
+  } else if (Match(core_expr,
+                   m::Subtract(m::Op(&lhs_broadcast), m::Op(&rhs_broadcast)))) {
     *is_sub = true;
   } else {
     return false;
@@ -75,185 +80,222 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   }
 
   // Check broadcast
-  if (!Match(lhs, m::Broadcast(m::Op(x))) ||
-      !Match(rhs, m::Broadcast(m::Op(y)))) {
+  if (!Match(lhs_broadcast, m::Broadcast(m::Op(lhs))) ||
+      !Match(rhs_broadcast, m::Broadcast(m::Op(rhs)))) {
     return false;
   }
 
-  std::stringstream ss;
-  ss << "LHS Broadcasting name: " << lhs->name() << "\n";
-  ss << "LHS Broadcasting shape: " << lhs->shape() << "\n";
-  ss << "LHS Broadcasting dimensions: [";
-  for (auto dim: lhs->dimensions()) ss << dim << ", ";
-  ss << "]\n";
-  LOG(INFO) << ss.str();
-
-  // Check the broadcast + reduce dimensions are correct
-  int64_t reduce_dim = reduce->dimensions(0);
-  // the reduce dimension must NOT be a broadcasted one
-  *x_reduce_dim = -1;
-  *y_reduce_dim = -1;
-  for (int64_t i = 0; i < lhs->dimensions().size(); i++) {
-    if (lhs->dimensions(i) == reduce_dim) {
-      *x_reduce_dim = i;
-    }
-  }
-  for (int64_t i = 0; i < rhs->dimensions().size(); i++) {
-    if (rhs->dimensions(i) == reduce_dim) {
-      *y_reduce_dim = i;
-    }
-  }
-  if (*x_reduce_dim == -1 || *y_reduce_dim == -1) {
-    return false;
-  }
-  // there must be a pair of dims i =/= j such that:
-  // x -> i : R, j : B and y -> i : B, j : R
-  CHECK(ShapeUtil::Equal(lhs->shape(), rhs->shape()));
-  if (lhs->shape().rank() != 3) return false;
-  int64_t rank = lhs->shape().rank();
-  *x_dim = -1;
-  *y_dim = -1;
-  for (int64_t i = 0; i < rank; i++) {
-    for (int64_t j = 0; j < rank; j++) {
-      if (i == j || i == reduce_dim || j == reduce_dim) {
-        continue;
-      }
-      if (absl::c_linear_search(lhs->dimensions(), i) &&
-          !absl::c_linear_search(lhs->dimensions(), j) &&
-          !absl::c_linear_search(rhs->dimensions(), i) &&
-          absl::c_linear_search(rhs->dimensions(), j)) {
-        *x_dim = i;
-        *y_dim = j;
+  Shape prod_shape = reduce->shape();
+  Shape reduce_input_shape = reduce_operand->shape();
+  auto reduce_dims = reduce->dimensions();
+  auto lhs_broadcast_dims_orig = lhs_broadcast->dimensions();
+  auto rhs_broadcast_dims_orig = rhs_broadcast->dimensions();
+  auto dimension_indices_intersection = [](const auto& reference,
+                                           const auto& dimensions) {
+    auto matched_count = 0;
+    std::vector<int64_t> output;
+    for (auto i = 0; i < reference.size(); ++i) {
+      for (auto j = 0; j < dimensions.size(); ++j) {
+        if (reference[i] == dimensions[j]) {
+          output.push_back(i);
+          ++matched_count;
+        }
       }
     }
-  }
-  if (*x_dim == -1 || *y_dim == -1) {
+    return std::make_tuple(matched_count == dimensions.size(), output);
+  };
+
+  bool lhs_has_reduced_dims;
+  bool rhs_has_reduced_dims;
+  std::tie(lhs_has_reduced_dims, *lhs_reduce_dims) =
+      dimension_indices_intersection(lhs_broadcast_dims_orig, reduce_dims);
+  std::tie(rhs_has_reduced_dims, *rhs_reduce_dims) =
+      dimension_indices_intersection(rhs_broadcast_dims_orig, reduce_dims);
+
+  if (!lhs_has_reduced_dims || !rhs_has_reduced_dims) {
+    // Add failure message here
     return false;
   }
 
-  // TODO: Check reduce computation is add
+  auto update_broadcast_dimensions_after_reduce =
+      [](const auto& broadcast_dimensions, const auto& reduce_dimensions) {
+        std::vector<int64_t> updated_dimensions;
+        absl::c_remove_copy_if(
+            broadcast_dimensions, std::back_inserter(updated_dimensions),
+            [&reduce_dimensions](const auto& value) {
+              return absl::c_linear_search(reduce_dimensions, value);
+            });
+        std::vector<int64_t> updated_dimensions_origin = updated_dimensions;
+        for (auto reduce_dim : reduce_dimensions) {
+          for (auto i = 0; i < updated_dimensions.size(); ++i) {
+            if (updated_dimensions_origin[i] > reduce_dim) {
+              updated_dimensions[i] -= 1;
+            }
+          }
+        }
+        return updated_dimensions;
+      };
+
+  *lhs_broadcast_dims = update_broadcast_dimensions_after_reduce(
+      lhs_broadcast_dims_orig, reduce_dims);
+  *rhs_broadcast_dims = update_broadcast_dimensions_after_reduce(
+      rhs_broadcast_dims_orig, reduce_dims);
+
+  for (auto dim = 0; dim < lhs_broadcast_dims->size(); ++dim) {
+    if (lhs_broadcast_dims->at(dim) > rhs_broadcast_dims->at(dim)) {
+      std::swap(*lhs_broadcast_dims, *rhs_broadcast_dims);
+      std::swap(*lhs_reduce_dims, *rhs_reduce_dims);
+      std::swap(*lhs, *rhs);
+      break;
+    }
+  }
 
   return true;
 }
 
 Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
-  HloInstruction *x, *y;
+  HloInstruction *lhs, *rhs;
   bool is_sub;
-  int64_t x_dim, x_reduce_dim, x_dot_dim, y_dim, y_reduce_dim, y_dot_dim;
-  if (!MatchDistanceMatrix(reduce, &x, &y, &is_sub, &x_dim, &x_reduce_dim,
-                           &y_dim, &y_reduce_dim)) {
+  std::vector<int64_t> lhs_reduce_dims;
+  std::vector<int64_t> rhs_reduce_dims;
+  std::vector<int64_t> lhs_broadcast_dims;
+  std::vector<int64_t> rhs_broadcast_dims;
+  if (!MatchDistanceMatrix(reduce, &lhs, &rhs, &is_sub, &lhs_reduce_dims,
+                           &rhs_reduce_dims, &lhs_broadcast_dims,
+                           &rhs_broadcast_dims)) {
     return Status::OK();
   }
 
-  std::stringstream ss;
-  ss << ">>> ";
-  ss << "Rules match for the euclidean distance matrix. \n";
-  ss << "Distance X: " << x->name() << "\n";
-  ss << "Distance Y: " << y->name() << "\n";
-  ss << "X dimension: " << x_dim << "\n";
-  ss << "Y dimension: " << y_dim << "\n";
-  ss << "X reduce dimension: " << x_reduce_dim << "\n";
-  ss << "Y reduce dimension: " << y_reduce_dim << "\n";
-  ss << "Reduce operation: ";
-  ss << reduce->name() << "\n";
-
-  // HloComputation* reduce_sum = reduce->called_computations()[0];
   HloComputation* comp = reduce->parent();
+  Shape lhs_shape = lhs->shape();
+  Shape rhs_shape = rhs->shape();
 
   // constants
+  auto type = lhs_shape.element_type();
+  auto zero_literal = LiteralUtil::CreateR0(0)
+                          .ConvertToShape(ShapeUtil::MakeShape(type, {}))
+                          .ValueOrDie();
   HloInstruction* zero = comp->AddInstruction(
-      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0)));
-  HloInstruction* two = comp->AddInstruction(
-      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(2)));
-    
-  Shape x_shape = x->shape();
-  Shape y_shape = y->shape();
+      HloInstruction::CreateConstant(std::move(zero_literal)));
 
-  // squares
-  HloInstruction* two_x = comp->AddInstruction(
-      HloInstruction::CreateBroadcast(x_shape, two, {}));
-  HloInstruction* x_squared = comp->AddInstruction(
-      HloInstruction::CreateBinary(x_shape, HloOpcode::kPower, x, two_x));
-  HloInstruction* two_y = comp->AddInstruction(
-      HloInstruction::CreateBroadcast(y_shape, two, {}));
-  HloInstruction* y_squared = comp->AddInstruction(
-      HloInstruction::CreateBinary(y_shape, HloOpcode::kPower, y, two_y));
+  // Squares
+  HloInstruction* lhs_squared = comp->AddInstruction(
+      HloInstruction::CreateBinary(lhs_shape, HloOpcode::kMultiply, lhs, lhs));
+  HloInstruction* rhs_squared = comp->AddInstruction(
+      HloInstruction::CreateBinary(rhs_shape, HloOpcode::kMultiply, rhs, rhs));
 
-  // reduce the squares
+  // Reduce the squares
 
-  Shape x_reduce_shape = x_squared->shape();
-  // x_reduce_shape.DeleteDimension(x_reduce_dim);
-  x_reduce_shape.set_dimensions(y_reduce_dim, 1);
-  HloInstruction* x_reduce = comp->AddInstruction(HloInstruction::CreateReduce(
-      x_reduce_shape, x_squared, zero, {x_reduce_dim}, comp));
+  auto lhs_reduce_shape = ShapeUtil::FilterDimensions(
+      [&lhs_reduce_dims](auto dim) {
+        return !absl::c_linear_search(lhs_reduce_dims, dim);
+      },
+      lhs_shape);
+  auto rhs_reduce_shape = ShapeUtil::FilterDimensions(
+      [&rhs_reduce_dims](auto dim) {
+        return !absl::c_linear_search(rhs_reduce_dims, dim);
+      },
+      rhs_shape);
 
-  Shape y_reduce_shape = y_squared->shape();
-  // y_reduce_shape.DeleteDimension(y_reduce_dim);
-  y_reduce_shape.set_dimensions(y_reduce_dim, 1);
+  HloInstruction* lhs_reduced = comp->AddInstruction(
+      HloInstruction::CreateReduce(lhs_reduce_shape, lhs_squared, zero,
+                                   lhs_reduce_dims, reduce->to_apply()));
+  HloInstruction* rhs_reduced = comp->AddInstruction(
+      HloInstruction::CreateReduce(rhs_reduce_shape, rhs_squared, zero,
+                                   rhs_reduce_dims, reduce->to_apply()));
 
-  HloInstruction* y_reduce = comp->AddInstruction(HloInstruction::CreateReduce(
-      y_reduce_shape, y_squared, zero, {y_reduce_dim}, comp));
+  // Start constructing an outer product
+  // LHS and RHS outer products
 
-  ss << "x_square_shape: " << x_squared->shape() << "\n";
-  ss << "y_square_shape: " << y_squared->shape() << "\n";
-  ss << "x_reduce_shape: " << x_reduce->shape() << "\n";
-  ss << "y_reduce_shape: " << y_reduce->shape() << "\n";
-  LOG(INFO) << ss.str();
-
-  // Start construction outer product
-  // x y outer product
-  auto lhs_reduce_dim = x_reduce_dim;
-  auto rhs_reduce_dim = y_reduce_dim;
-  HloInstruction* lhs = x;
-  HloInstruction* rhs = y;
-  if (x_dim < y_dim) {
-    lhs_reduce_dim = y_reduce_dim;
-    rhs_reduce_dim = x_reduce_dim;
-    lhs = y;
-    rhs = x;
-  } else {
-    // failed pre-condition :/
-    CHECK((x_dim == 0 && y_dim == 1) || (x_dim == 1 && y_dim == 0));
-  }
-
-  Shape outer_shape = lhs->shape();
-  Shape rhs_shape = rhs->shape();
-  outer_shape.DeleteDimension(lhs_reduce_dim);
-  rhs_shape.DeleteDimension(rhs_reduce_dim);
-  for (auto i = 0; i < rhs_shape.dimensions_size(); i++) {
-    outer_shape.add_dimensions(rhs_shape.dimensions(i));
-  }
-
-  PrecisionConfig conf;
   DotDimensionNumbers dnums;
-  dnums.add_lhs_contracting_dimensions(lhs_reduce_dim);
-  dnums.add_rhs_contracting_dimensions(rhs_reduce_dim);
-  HloInstruction* outer = comp->AddInstruction(
-      HloInstruction::CreateDot(outer_shape, lhs, rhs, dnums, conf));
-  
-  HloInstruction* x_broadcast = comp->AddInstruction(
-      HloInstruction::CreateBroadcast(outer_shape, x_reduce, {x_dim}));
-  HloInstruction* y_broadcast = comp->AddInstruction(
-      HloInstruction::CreateBroadcast(outer_shape, y_reduce, {y_dim}));
 
-  ss << "Outer product shape: " << outer->shape() << "\n";
-  ss << "x broadcast shape: " << x_broadcast->shape() << "\n";
-  ss << "y broadcast shape: " << y_broadcast->shape() << "\n";
-  LOG(INFO) << ss.str();
+  // Add LHS dot dimensions
+  for (auto dim = 0; dim < lhs_shape.dimensions_size(); ++dim) {
+    if (absl::c_linear_search(lhs_reduce_dims, dim)) {
+      dnums.add_lhs_contracting_dimensions(dim);
+    } else {
+      auto broadcast_to_dim = lhs_broadcast_dims[dim];
+      if (absl::c_linear_search(rhs_broadcast_dims, broadcast_to_dim)) {
+        dnums.add_lhs_batch_dimensions(dim);
+      }
+    }
+  }
 
-  HloInstruction* x_y_sum = comp->AddInstruction(HloInstruction::CreateBinary(
-      outer_shape, HloOpcode::kAdd, x_broadcast, y_broadcast));
+  // Add RHS dot dimensions
+  for (auto dim = 0; dim < rhs_shape.dimensions_size(); ++dim) {
+    if (absl::c_linear_search(rhs_reduce_dims, dim)) {
+      dnums.add_rhs_contracting_dimensions(dim);
+    } else {
+      auto broadcast_to_dim = rhs_broadcast_dims[dim];
+      if (absl::c_linear_search(lhs_broadcast_dims, broadcast_to_dim)) {
+        dnums.add_rhs_batch_dimensions(dim);
+      }
+    }
+  }
 
-  ss << "x_y_sum shape: " << x_y_sum->shape() << "\n";
-  LOG(INFO) << ss.str();
+  PrecisionConfig precision_config;
+  precision_config.mutable_operand_precision()->Resize(
+      2, PrecisionConfig::DEFAULT);
+  Shape prod_shape = reduce->shape();
+  HloInstruction* prod = comp->AddInstruction(
+      HloInstruction::CreateDot(prod_shape, lhs, rhs, dnums, precision_config));
 
-  HloInstruction* replacement = comp->AddInstruction(
-      HloInstruction::CreateBinary(outer_shape, HloOpcode::kAdd, x_y_sum, outer));
-  
-  ss << "x_y_sum shape: " << x_y_sum->shape() << "\n";
-  ss << "replacement shape: " << replacement->shape() << "\n";
-  ss << "reduce shape: " << reduce->shape() << "\n";
-  LOG(INFO) << ss.str();
+  HloInstruction* lhs_broadcast =
+      comp->AddInstruction(HloInstruction::CreateBroadcast(
+          prod_shape, lhs_reduced, lhs_broadcast_dims));
+
+  HloInstruction* rhs_broadcast =
+      comp->AddInstruction(HloInstruction::CreateBroadcast(
+          prod_shape, rhs_reduced, rhs_broadcast_dims));
+
+  auto two_literal = LiteralUtil::CreateR0(2)
+                         .ConvertToShape(ShapeUtil::MakeShape(type, {}))
+                         .ValueOrDie();
+  HloInstruction* two = comp->AddInstruction(
+      HloInstruction::CreateConstant(std::move(two_literal)));
+  HloInstruction* two_broadcast = comp->AddInstruction(
+      HloInstruction::CreateBroadcast(prod_shape, two, {}));
+
+  HloInstruction* two_prod = comp->AddInstruction(HloInstruction::CreateBinary(
+      prod_shape, HloOpcode::kMultiply, two_broadcast, prod));
+
+  auto comp_code = HloOpcode::kAdd;
+  if (is_sub) {
+    comp_code = HloOpcode::kSubtract;
+  }
+
+  HloInstruction* lhs_rhs_sum =
+      comp->AddInstruction(HloInstruction::CreateBinary(
+          prod_shape, HloOpcode::kAdd, lhs_broadcast, rhs_broadcast));
+
+  HloInstruction* replacement =
+      comp->AddInstruction(HloInstruction::CreateBinary(prod_shape, comp_code,
+                                                        lhs_rhs_sum, two_prod));
+
+  // std::stringstream ss;
+  // ss << "\nLHS name: " << lhs->name();
+  // ss << "\nLHS shape: " << lhs->shape();
+  // ss << "\nRHS name: " << rhs->name();
+  // ss << "\nRHS shape: " << rhs->shape();
+  // ss << "\nReduce shape: " << reduce->shape();
+  // ss << "\nProduct shape: " << prod->shape();
+  // ss << "\nSubstract: " << (is_sub ? "yes" : "no");
+  // ss << "\nReplacement shape: " << replacement->shape();
+  // ss << "\nLHS original shape: " << lhs_shape;
+  // ss << "\nRHS original shape: " << rhs_shape;
+  // ss << "\nLHS reduced shape: " << lhs_reduced->shape();
+  // ss << "\nRHS reduced shape: " << rhs_reduced->shape();
+  // ss << "\nLHS broadcast shape: " << lhs_broadcast->shape();
+  // ss << "\nRHS broadcast shape: " << rhs_broadcast->shape();
+  // ss << "\nNew LHS reduce dims: ";
+  // for (auto dim : lhs_reduce_dims) ss << dim << " ";
+  // ss << "\nNew RHS reduce dims: ";
+  // for (auto dim : rhs_reduce_dims) ss << dim << " ";
+  // ss << "\nNew LHS broadcast dims: ";
+  // for (auto dim : lhs_broadcast_dims) ss << dim << " ";
+  // ss << "\nNew RHS broadcast dims: ";
+  // for (auto dim : rhs_broadcast_dims) ss << dim << " ";
+  // LOG(INFO) << ss.str();
 
   return ReplaceInstruction(reduce, replacement);
 }
