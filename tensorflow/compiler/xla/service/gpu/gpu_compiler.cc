@@ -61,7 +61,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 #include "tensorflow/compiler/xla/service/async_collective_creator.h"
 #include "tensorflow/compiler/xla/service/batchnorm_expander.h"
-#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
 #include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
 #include "tensorflow/compiler/xla/service/bitcast_dtypes_expander.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
@@ -469,9 +468,7 @@ Status GpuCompiler::OptimizeHloModule(
     pipeline.AddPass<DotMerger>(/*max_size_to_merge=*/int64_t{16} << 20);
     pipeline.AddPass<SortSimplifier>();
 
-    // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<HloPassFix<RceOptimizer>>();
-    pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
     pipeline.AddPass<HloPassFix<EuclideanDistanceRewriter>>();
     pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();

@@ -99,7 +99,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 #include "tensorflow/compiler/xla/service/batch_dot_simplification.h"
 #include "tensorflow/compiler/xla/service/batchnorm_expander.h"
-#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
 #include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
 #include "tensorflow/compiler/xla/service/bitcast_dtypes_expander.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
@@ -503,9 +502,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
   pipeline.AddPass<ConvCanonicalization>(target_machine_features);
 
-  // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<HloPassFix<RceOptimizer>>();
-  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
   pipeline.AddPass<HloPassFix<EuclideanDistanceRewriter>>();
   pipeline.AddPass<HloMCO>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
