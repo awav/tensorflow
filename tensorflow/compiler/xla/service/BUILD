@@ -2344,9 +2344,9 @@ tf_cc_test(
 )
 
 cc_library(
-    name = "tensor_splitter_v2",
-    srcs = ["tensor_splitter_v2.cc"],
-    hdrs = ["tensor_splitter_v2.h"],
+    name = "tensor_splitter",
+    srcs = ["tensor_splitter.cc"],
+    hdrs = ["tensor_splitter.h"],
     deps = [
         ":hlo_pass",
         ":hlo_creation_utils",
@@ -2357,10 +2357,10 @@ cc_library(
 )
 
 tf_cc_test(
-    name = "tensor_splitter_v2_test",
-    srcs = ["tensor_splitter_v2_test.cc"],
+    name = "tensor_splitter_test",
+    srcs = ["tensor_splitter_test.cc"],
     deps = [
-        ":tensor_splitter_v2",
+        ":tensor_splitter",
         ":hlo",
         ":hlo_creation_utils",
         ":pattern_matcher",

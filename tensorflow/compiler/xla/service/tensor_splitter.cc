@@ -8,7 +8,7 @@
 // while-loops that can be merged, aiming at speeding up memory-optimised
 // algorithms while maintaining the memory benefits of eXLA-v1.
 
-#include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
 
 #include <stdlib.h>
 
@@ -611,9 +611,9 @@ class SplittablePathRecorder : public SplitDeterminer {
 // while-loop information to perform splitting and add split nodes to allocated
 // while-loops.
 // perform real splitting and create while_loops
-class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
+class TensorSplitterRewriteVisitor : public SplitDeterminer {
  public:
-  // Constructor of TensorSplitterRewriteVisitorV2
+  // Constructor of TensorSplitterRewriteVisitor
   //  Input:
   //    max_size_threshold: a thereshold decides whether an instruction is big
   //      enought to split
@@ -628,8 +628,8 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
   //    input_while_loop_num_to_instructions: a hashtable from a while_loop_num
   //    to all instructions in the while loop
   //  Output:
-  //    a TensorSplitterRewriteVisitorV2 instance
-  explicit TensorSplitterRewriteVisitorV2(
+  //    a TensorSplitterRewriteVisitor instance
+  explicit TensorSplitterRewriteVisitor(
       int64_t max_size_threshold, int64_t target_split_size,
       HloModule* input_parent_module,
       absl::flat_hash_map<SplitNodeKey, std::vector<std::vector<SplitNodeVal>>>&
@@ -745,7 +745,7 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     // the rest part size of the sub-output
     int64_t split_rest;
     // split dimension of the sub-output
-    int64_t split_dim;            // * invalid and useless for dot case2
+    int64_t split_dim;  // * invalid and useless for dot case2
     // indicate whether part results should be combied by sum
     bool combine_parts_with_sum;  // * only valid if starting_node_inst is dot
                                   // * and split_rest >0
@@ -847,7 +847,8 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
     // a hashtable used to recorde instructions which have already been split
     absl::flat_hash_map<VisitedInstructionKey, HloInstruction*>&
         visited_instructions_;
-    // a hastable from a while_loop_num to all instructions involved in the while loop
+    // a hastable from a while_loop_num to all instructions involved in the
+    // while loop
     absl::flat_hash_map<int64_t, absl::flat_hash_set<HloInstruction*>>&
         while_loop_num_to_instructions_;
     // a flag indicating whether to merge the rest part into a dynamic loop
@@ -1201,13 +1202,15 @@ class TensorSplitterRewriteVisitorV2 : public SplitDeterminer {
       start_node_to_splittable_paths;
   // A hashtable from SplitNodeKey to its while loop number
   absl::flat_hash_map<SplitNodeKey, int64_t> start_node_to_while_loop_num;
-  // A hashtable from while loop number to all SplitNodeKeys contained in the while loop
+  // A hashtable from while loop number to all SplitNodeKeys contained in the
+  // while loop
   absl::flat_hash_map<int64_t, std::vector<SplitNodeKey>>
       while_loop_num_to_start_node;
 
   // record how many staring_nodes have been procesed for a while-loop
   absl::flat_hash_map<int64_t, int64_t> while_loop_num_to_processed_count;
-  // A hashtable from while loop number to the while loop information of the loop
+  // A hashtable from while loop number to the while loop information of the
+  // loop
   absl::flat_hash_map<int64_t, WhileLoopInfo> while_loop_num_to_info;
   // while_loop_num -> all instructions(including starting_nodes) included in
   // the while_loop
@@ -3091,9 +3094,9 @@ Status SplittablePathRecorder::AllocateWhileLoops() {
 }
 
 StatusOr<HloInstruction*>
-TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
-                                                           int64_t split_dim,
-                                                           int64_t split_size) {
+TensorSplitterRewriteVisitor::Splitter::SplitInstruction(HloInstruction* inst,
+                                                         int64_t split_dim,
+                                                         int64_t split_size) {
   LOG(INFO) << "\n @@@ Enter SplitInstruction for '" << inst->name() << "'";
   auto visited_inst_key =
       MakeVisitedInstructionKey(inst, split_dim, split_size);
@@ -3365,10 +3368,8 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitInstruction(HloInstruction* inst,
   }
 }
 
-StatusOr<HloInstruction*>
-TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
-                                                       int64_t split_dim,
-                                                       int64_t split_size) {
+StatusOr<HloInstruction*> TensorSplitterRewriteVisitor::Splitter::SplitLeafDot(
+    HloInstruction* dot, int64_t split_dim, int64_t split_size) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
 
@@ -3528,7 +3529,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafDot(HloInstruction* dot,
 }
 
 StatusOr<HloInstruction*>
-TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
+TensorSplitterRewriteVisitor::Splitter::SplitLeafBroadcast(
     HloInstruction* broadcast, int64_t split_dim, int64_t split_size) {
   HloInstruction* operand;
   CHECK(Match(broadcast, m::Broadcast(m::Op(&operand))));
@@ -3695,7 +3696,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafBroadcast(
 }
 
 StatusOr<HloInstruction*>
-TensorSplitterRewriteVisitorV2::Splitter::SplitLeafParameter(
+TensorSplitterRewriteVisitor::Splitter::SplitLeafParameter(
     HloInstruction* parameter, int64_t split_dim, int64_t split_size) {
   CHECK(Match(parameter, m::Parameter()));
   const Shape& parameter_shape = parameter->shape();
@@ -3814,10 +3815,8 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafParameter(
   return split_slice;
 }
 
-StatusOr<HloInstruction*>
-TensorSplitterRewriteVisitorV2::Splitter::SplitLeafIota(HloInstruction* iota,
-                                                        int64_t split_dim,
-                                                        int64_t split_size) {
+StatusOr<HloInstruction*> TensorSplitterRewriteVisitor::Splitter::SplitLeafIota(
+    HloInstruction* iota, int64_t split_dim, int64_t split_size) {
   CHECK(Match(iota, m::Iota()));
 
   // For an iota, we simply produce smaller iota and add the
@@ -3896,7 +3895,7 @@ TensorSplitterRewriteVisitorV2::Splitter::SplitLeafIota(HloInstruction* iota,
   return new_iota_inst;
 }
 
-int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildRestOutputTuple(
+int64_t TensorSplitterRewriteVisitor::Splitter::BuildRestOutputTuple(
     int64_t split_dim, int64_t split_size, HloInstruction* original,
     HloInstruction* part, bool combine_with_sum, bool combine_with_reduce) {
   HloInstruction* output;
@@ -3975,7 +3974,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildRestOutputTuple(
   return output_elements.size() - 1;
 }
 
-int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
+int64_t TensorSplitterRewriteVisitor::Splitter::BuildMergedLoopOutput(
     int64_t split_dim, int64_t split_size, HloInstruction* original,
     HloInstruction* part, bool combine_with_sum, bool combine_with_reduce) {
   HloInstruction* output;
@@ -4098,7 +4097,7 @@ int64_t TensorSplitterRewriteVisitorV2::Splitter::BuildMergedLoopOutput(
   return output_elements.size() - 1;
 }
 
-HloComputation* TensorSplitterRewriteVisitorV2::CreateWhileSplitCondition(
+HloComputation* TensorSplitterRewriteVisitor::CreateWhileSplitCondition(
     const std::string& name, const Shape& parameters_shape, int64_t stop_at) {
   HloComputation::Builder builder(name);
   HloInstruction* parameter = builder.AddInstruction(
@@ -4115,7 +4114,7 @@ HloComputation* TensorSplitterRewriteVisitorV2::CreateWhileSplitCondition(
 }
 
 std::vector<HloInstruction*>
-TensorSplitterRewriteVisitorV2::CreateWhileSplitWithResults(
+TensorSplitterRewriteVisitor::CreateWhileSplitWithResults(
     HloComputation* parent_comp, HloComputation* condition,
     HloComputation* body, std::vector<HloInstruction*> parameters,
     std::vector<std::tuple<int64_t, Shape>> ids_and_shapes) {
@@ -4138,14 +4137,14 @@ TensorSplitterRewriteVisitorV2::CreateWhileSplitWithResults(
   return results;
 }
 
-bool TensorSplitterRewriteVisitorV2::CanFinishMergedWhileLoop(
+bool TensorSplitterRewriteVisitor::CanFinishMergedWhileLoop(
     int64_t while_loop_num) {
   return while_loop_num_to_processed_count[while_loop_num] ==
          int64_t(while_loop_num_to_start_node[while_loop_num].size());
 }
 
-Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
-    WhileLoopInfo& loop_info, HloInstruction* loop) {
+Status TensorSplitterRewriteVisitor::BuildFinalOutput(WhileLoopInfo& loop_info,
+                                                      HloInstruction* loop) {
   std::string prefix = "[BuildFinalOutput] While_Loop_Num_" +
                        std::to_string(loop_info.while_loop_num);
   // use two for-loop
@@ -4616,7 +4615,7 @@ Status TensorSplitterRewriteVisitorV2::BuildFinalOutput(
   return Status::OK();
 }
 
-Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
+Status TensorSplitterRewriteVisitor::FinalizeMergedWhileLoop(
     int64_t while_loop_num) {
   CHECK(while_loop_num_to_processed_count[while_loop_num] ==
         int64_t(while_loop_num_to_start_node[while_loop_num].size()));
@@ -4682,7 +4681,7 @@ Status TensorSplitterRewriteVisitorV2::FinalizeMergedWhileLoop(
   return BuildFinalOutput(loop_info, loop);
 }
 
-Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
+Status TensorSplitterRewriteVisitor::AddDotToMergedWhileLoop(
     HloInstruction* dot, HloInstruction* lhs, HloInstruction* rhs) {
   std::stringstream ss;
   std::string prefix = "[AddDotToMergedWhileLoop] ";
@@ -5344,7 +5343,7 @@ Status TensorSplitterRewriteVisitorV2::AddDotToMergedWhileLoop(
   LOG(INFO) << ss.str();
   return Status::OK();
 }
-Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
+Status TensorSplitterRewriteVisitor::AddReduceToMergedWhileLoop(
     HloInstruction* reduce) {
   std::stringstream ss;
   std::string prefix = "[AddReduceToMergedWhileLoop] ";
@@ -5603,8 +5602,8 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   std::vector<std::tuple<int64_t, Shape>> empty_id_shapes;
   std::vector<HloInstruction*> empty_leafs;
   while_loop_num_to_info[while_loop_num].AddSubOutput(SubOutputInfo(
-      output_index, old_output, split_dim, empty_id_shapes, empty_leafs, split_rest,
-      -1, false, split_along_reduce_dim));
+      output_index, old_output, split_dim, empty_id_shapes, empty_leafs,
+      split_rest, -1, false, split_along_reduce_dim));
   while_loop_num_to_processed_count[while_loop_num] += 1;
   ss << "\n <---- Exit HandleReduce for '" << old_output->name() << "' SUCCESS";
   LOG(INFO) << ss.str();
@@ -5615,7 +5614,7 @@ Status TensorSplitterRewriteVisitorV2::AddReduceToMergedWhileLoop(
   return Status::OK();
 }
 
-Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
+Status TensorSplitterRewriteVisitor::AddSortToMergedWhileLoop(
     HloInstruction* sort) {
   std::string prefix = "AddSortToMergedWhileLoop";
   HloInstruction* array = sort->mutable_operand(0);
@@ -5983,7 +5982,7 @@ Status TensorSplitterRewriteVisitorV2::AddSortToMergedWhileLoop(
   return Status::OK();
 }
 
-Status TensorSplitterRewriteVisitorV2::HandleDot(HloInstruction* dot) {
+Status TensorSplitterRewriteVisitor::HandleDot(HloInstruction* dot) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(dot, m::Dot(m::Op(&lhs), m::Op(&rhs))));
   auto& dnums = dot->dot_dimension_numbers();
@@ -5998,7 +5997,7 @@ Status TensorSplitterRewriteVisitorV2::HandleDot(HloInstruction* dot) {
     LOG(INFO) << ss.str();
     return Status::OK();
   }
-  LOG(INFO) << "\n ----< [TensorSplitterRewriteVisitorV2]  HandleDot for '"
+  LOG(INFO) << "\n ----< [TensorSplitterRewriteVisitor]  HandleDot for '"
             << dot->name() << " dot.shape=" << dot->shape().ToString()
             << "' dot.byte_size=" << ShapeUtil::ByteSizeOfElements(dot->shape())
             << " max_size_threshold= " << max_size_threshold;
@@ -6029,7 +6028,7 @@ Status TensorSplitterRewriteVisitorV2::HandleDot(HloInstruction* dot) {
   }
 }
 
-Status TensorSplitterRewriteVisitorV2::HandleReduce(HloInstruction* reduce) {
+Status TensorSplitterRewriteVisitor::HandleReduce(HloInstruction* reduce) {
   if (!MatchSupportedReduce(reduce)) {
     return Status::OK();
   }
@@ -6099,7 +6098,7 @@ Status TensorSplitterRewriteVisitorV2::HandleReduce(HloInstruction* reduce) {
   }
 }
 
-Status TensorSplitterRewriteVisitorV2::HandleSort(HloInstruction* sort) {
+Status TensorSplitterRewriteVisitor::HandleSort(HloInstruction* sort) {
   CHECK(Match(sort, m::Sort()));
   std::stringstream msg;
   auto path_key = MakeSplitNodeKey(sort);
@@ -6129,7 +6128,7 @@ Status TensorSplitterRewriteVisitorV2::HandleSort(HloInstruction* sort) {
   }
 }
 
-bool TensorSplitterV2::endsWith(const std::string& str, std::string pattern) {
+bool TensorSplitter::endsWith(const std::string& str, std::string pattern) {
   if (pattern.size() > str.size()) return false;
   for (int i = 1; i <= pattern.size(); i++) {
     if (pattern[pattern.size() - i] != str[str.size() - i]) return false;
@@ -6137,11 +6136,11 @@ bool TensorSplitterV2::endsWith(const std::string& str, std::string pattern) {
   return true;
 }
 
-std::tuple<int64_t, int64_t> TensorSplitterV2::SplitSettings() {
+std::tuple<int64_t, int64_t> TensorSplitter::SplitSettings() {
   auto tensor_size_threshold =
       GetDebugOptionsFromFlags().xla_tensor_size_threshold();
   auto tensor_split_size = GetDebugOptionsFromFlags().xla_tensor_split_size();
-  LOG(INFO) << "[TensorSplitterV2::SplitSettings] tensor_size_threshold="
+  LOG(INFO) << "[TensorSplitter::SplitSettings] tensor_size_threshold="
             << tensor_size_threshold.c_str()
             << " tensor_split_size=" << tensor_split_size;
   auto size_threshold = TensorBytes(tensor_size_threshold);
@@ -6152,12 +6151,12 @@ std::tuple<int64_t, int64_t> TensorSplitterV2::SplitSettings() {
   return std::make_tuple(size_threshold, split_size);
 }
 
-int64_t TensorSplitterV2::TensorBytes(const std::string& option) {
+int64_t TensorSplitter::TensorBytes(const std::string& option) {
   int64_t raw = (int64_t)atoi(option.c_str());
-  LOG(INFO) << "[TensorSplitterV2::TensorBytes] option= '" << option.c_str()
+  LOG(INFO) << "[TensorSplitter::TensorBytes] option= '" << option.c_str()
             << "'";
   if (raw < 0) {
-    LOG(INFO) << "[TensorSplitterV2::TensorBytes] raw=" << raw
+    LOG(INFO) << "[TensorSplitter::TensorBytes] raw=" << raw
               << " return default_value=" << 134217728;
     return 134217728;  // 1 GiB
   }
@@ -6178,22 +6177,22 @@ int64_t TensorSplitterV2::TensorBytes(const std::string& option) {
     return raw;  // interpret as bytes
 }
 
-StatusOr<bool> TensorSplitterV2::Run(HloModule* module) {
+StatusOr<bool> TensorSplitter::Run(HloModule* module) {
   int64_t size_threshold;
   int64_t split_size;
   std::tie(size_threshold, split_size) = SplitSettings();
   SplittablePathRecorder recorder(size_threshold, split_size, module);
   recorder.RunOnModule(module);
   recorder.AllocateWhileLoops();
-  TensorSplitterRewriteVisitorV2 rewriter(
+  TensorSplitterRewriteVisitor rewriter(
       size_threshold, split_size, module,
       recorder.GetStartNodeToSplittablePaths(),
       recorder.GetStartNodeToWhileLoopNum(),
       recorder.GetWhileLoopNumToStartNode(),
       recorder.GetWhileLoopNumToInstructions());
-  LOG(INFO) << "[TensorSplitterV2::Run] Running tensor splitter for '"
+  LOG(INFO) << "[TensorSplitter::Run] Running tensor splitter for '"
             << module->name() << "'";
-  LOG(INFO) << "[TensorSplitterV2::Run] split_size_threshold=" << size_threshold
+  LOG(INFO) << "[TensorSplitter::Run] split_size_threshold=" << size_threshold
             << " target_split_size=" << split_size;
   return rewriter.RunOnModule(module);
 }

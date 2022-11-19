@@ -1,15 +1,15 @@
 // License TODO ....
 
-#include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
 
 #include "tensorflow/compiler/xla/debug_options_flags.h"
+#include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
+#include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/pattern_matcher.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
-#include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
-#include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/path.h"
 
@@ -17,7 +17,7 @@ namespace xla {
 namespace {
 
 std::string splitter_dir =
-    "/vol/bitbucket/ya321/codes/MscProject/test_output/tensor_splitter_v2";
+    "/vol/bitbucket/ya321/codes/MscProject/test_output/tensor_splitter";
 
 void DumpToFileInDirImpl(std::string dir, std::string filename,
                          std::string contents) {
@@ -48,10 +48,10 @@ void DumpToFileInDirImpl(std::string dir, std::string filename,
 
 namespace m = match;
 
-class TensorSplitterV2Test : public HloTestBase {
+class TensorSplitterTest : public HloTestBase {
  protected:
   const int64_t max_size() {
-    return std::get<0>(TensorSplitterV2::SplitSettings());
+    return std::get<0>(TensorSplitter::SplitSettings());
   }
 
   const int64_t large_dim() { return max_size() / 32 * 8 / 3; }
@@ -83,7 +83,7 @@ class TensorSplitterV2Test : public HloTestBase {
 };
 
 // Test multi argument reduce (e.g. argmax)
-TEST_F(TensorSplitterV2Test, BasicCaseLhsAfter) {
+TEST_F(TensorSplitterTest, BasicCaseLhsAfter) {
   const string module_str = R"(
 HloModule BasicCaseLhsAfter
 
@@ -121,14 +121,13 @@ ENTRY %BasicCaseLhs (a: f32[83333333,2], b: f32[83333333,2], v: f32[83333333]) -
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %s\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %s\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
-
 }
 
 // Test the most basic case: exp(AB^T)v
-TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
+TEST_F(TensorSplitterTest, BasicCaseLhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -173,7 +172,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -182,7 +181,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -190,13 +189,13 @@ TEST_F(TensorSplitterV2Test, BasicCaseLhs) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test the most basic rhs case: exp(AB^T)v
-TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
+TEST_F(TensorSplitterTest, BasicCaseRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -241,7 +240,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -250,7 +249,7 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
       m::Dot(m::Op().Is(v), m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -258,13 +257,13 @@ TEST_F(TensorSplitterV2Test, BasicCaseRhs) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Self dot: outer-product -> inner-product
-TEST_F(TensorSplitterV2Test, BasicSelfDot) {
+TEST_F(TensorSplitterTest, BasicSelfDot) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -306,7 +305,7 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -315,7 +314,7 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
                            m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -323,14 +322,14 @@ TEST_F(TensorSplitterV2Test, BasicSelfDot) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test the case where the to split dimension lies on the
 // rhs of the source dot
-TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
+TEST_F(TensorSplitterTest, BasicSplitDotOnRhs) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -375,7 +374,7 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -384,7 +383,7 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
       m::Dot(m::Exp(m::Dot(m::Op().Is(a), m::Op().Is(b))), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -392,13 +391,13 @@ TEST_F(TensorSplitterV2Test, BasicSplitDotOnRhs) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test broadcast instructions as source
-TEST_F(TensorSplitterV2Test, Broadcast) {
+TEST_F(TensorSplitterTest, Broadcast) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -436,7 +435,7 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -444,7 +443,7 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -452,14 +451,14 @@ TEST_F(TensorSplitterV2Test, Broadcast) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test broadcast instructions as source when split dim
 // is a real dimension
-TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
+TEST_F(TensorSplitterTest, BroadcastSplitOnOperandDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -497,7 +496,7 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -505,7 +504,7 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
                     m::Dot(m::Broadcast(m::Op().Is(p)), m::Op().Is(v))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -513,13 +512,13 @@ TEST_F(TensorSplitterV2Test, BroadcastSplitOnOperandDim) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test iota with iota dimension along split
-TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
+TEST_F(TensorSplitterTest, IotaSplitAlongIotaDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -551,7 +550,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -559,7 +558,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -567,13 +566,13 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongIotaDim) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test iota with non-iota dimension along split
-TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
+TEST_F(TensorSplitterTest, IotaSplitAlongNonIotaDim) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
@@ -605,7 +604,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -613,7 +612,7 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
                     m::Dot(m::Iota().Is(iota), m::Op().Is(param))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -621,13 +620,13 @@ TEST_F(TensorSplitterV2Test, IotaSplitAlongNonIotaDim) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test single argument reduce (e.g. max)
-TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
+TEST_F(TensorSplitterTest, SingleOperandReduce) {
   auto m = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
   HloComputation::Builder max_builder(TestName() + ".max");
@@ -666,7 +665,7 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -674,7 +673,7 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
                     m::Reduce(m::Op().Is(a), m::Op().Is(init))));
   EXPECT_TRUE(graph_needs_split(computation->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, m.get()));
   EXPECT_TRUE(result);
 
@@ -682,13 +681,13 @@ TEST_F(TensorSplitterV2Test, SingleOperandReduce) {
 
   printf("After opotimization:\n %s\n", m->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test multi argument reduce (e.g. argmax)
-TEST_F(TensorSplitterV2Test, MultiOperandReduce) {
+TEST_F(TensorSplitterTest, MultiOperandReduce) {
   const string module_str = R"(
 HloModule a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.35
 
@@ -750,7 +749,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -758,7 +757,7 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 
   EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
@@ -766,13 +765,13 @@ ENTRY %a_inference_arg_max_test_29__XlaMustCompile_true_config_proto___n_007_n_0
 
   printf("After opotimization:\n %f\n", module->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }
 
 // Test nested reduce
-TEST_F(TensorSplitterV2Test, NestedReduce) {
+TEST_F(TensorSplitterTest, NestedReduce) {
   const string module_str = R"(
 HloModule a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto___n_007_n_0...02_001_000__executor_type____.34
 
@@ -833,7 +832,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
     return absl::StrFormat("Error rendering graph: %s",
                            rendered_graph.status().ToString());
   };
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 
@@ -841,7 +840,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 
   EXPECT_TRUE(graph_needs_split(entry->root_instruction()));
 
-  TensorSplitterV2 optim;
+  TensorSplitter optim;
   TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&optim, module.get()));
   EXPECT_TRUE(result);
 
@@ -849,7 +848,7 @@ ENTRY %a_inference_test_simple_dist_matrix_40__XlaMustCompile_true_config_proto_
 
   printf("After opotimization:\n %f\n", module->ToString().c_str());
   filename = TestName() + "_after_opotimization";
-  printf("After opotimization:\n %f\n", m->ToString().c_str())<<std::endl;
+  printf("After opotimization:\n %f\n", m->ToString().c_str()) << std::endl;
   DumpToFileInDirImpl(splitter_dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
 }

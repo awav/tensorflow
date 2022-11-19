@@ -26,9 +26,9 @@ namespace xla {
 // they can be merged in to a single while-loop, they would be merged and in
 // this case only one while-loop will be created and the common part will be
 // calculated once but reused twice
-class TensorSplitterV2 : public HloModulePass {
+class TensorSplitter : public HloModulePass {
  public:
-  absl::string_view name() const override { return "tensor-splitter-v2"; }
+  absl::string_view name() const override { return "tensor-splitter"; }
 
   StatusOr<bool> Run(HloModule* module) override;
 
