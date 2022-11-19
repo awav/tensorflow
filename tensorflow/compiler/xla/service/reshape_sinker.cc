@@ -276,6 +276,10 @@ Status ReshapeSinkerVisitor::HandleDot(HloInstruction* dot) {
       HloInstruction* new_dot = dot->parent()->AddInstruction(
           HloInstruction::CreateDot(new_dot_shape, new_lhs, new_rhs, new_dnums,
                                     dot->precision_config()));
+      if (ShapeUtil::ElementsIn(orig_dot_shape) !=
+          ShapeUtil::ElementsIn(new_dot->shape())) {
+        return Status::OK();
+      }
       HloInstruction* new_reshape = dot->parent()->AddInstruction(
           HloInstruction::CreateReshape(orig_dot_shape, new_dot));
 
