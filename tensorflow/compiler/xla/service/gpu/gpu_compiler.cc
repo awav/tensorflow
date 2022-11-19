@@ -134,7 +134,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/hlo_mco.h"
-#include "tensorflow/compiler/xla/service/tensor_splitter.h"
 #include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
 #include "tensorflow/compiler/xla/service/reshape_sinker.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
