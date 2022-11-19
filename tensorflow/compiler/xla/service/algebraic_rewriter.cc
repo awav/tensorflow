@@ -18,12 +18,15 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
  public:
   explicit AlgebraicRewriterVisitor() {}
 
+  // MatchDistanceMatrix checks that
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
                            HloInstruction** y, bool* is_sub,
                            std::vector<int64_t>* lhs_reduce_dims,
                            std::vector<int64_t>* rhs_reduce_dims,
                            std::vector<int64_t>* lhs_broadcast_dims,
-                           std::vector<int64_t>* rhs_broadcast_dims);
+                           std::vector<int64_t>* rhs_broadcast_dims,
+                           std::vector<int64_t>* lhs_batch_dims,
+                           std::vector<int64_t>* rhs_batch_dims);
 
   Status HandleReduce(HloInstruction* reduce) override;
 };
@@ -35,10 +38,14 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     bool* is_sub, std::vector<int64_t>* lhs_reduce_dims,
     std::vector<int64_t>* rhs_reduce_dims,
     std::vector<int64_t>* lhs_broadcast_dims,
-    std::vector<int64_t>* rhs_broadcast_dims) {
+    std::vector<int64_t>* rhs_broadcast_dims,
+    std::vector<int64_t>* lhs_batch_dims,
+    std::vector<int64_t>* rhs_batch_dims) {
   HloInstruction* core_expr = nullptr;
   HloInstruction* reduce_operand = nullptr;
   HloInstruction* reduce_init = nullptr;
+  std::stringstream msg;
+
   if (!Match(reduce,
              m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
     return false;
@@ -141,14 +148,107 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   *rhs_broadcast_dims = update_broadcast_dimensions_after_reduce(
       rhs_broadcast_dims_orig, reduce_dims);
 
+  std::vector<int64_t> lhs_unique_broadcast_dims;
+  std::vector<int64_t> rhs_unique_broadcast_dims;
+
+  // Add LHS dot dimensions
   for (auto dim = 0; dim < lhs_broadcast_dims->size(); ++dim) {
-    if (lhs_broadcast_dims->at(dim) > rhs_broadcast_dims->at(dim)) {
-      std::swap(*lhs_broadcast_dims, *rhs_broadcast_dims);
-      std::swap(*lhs_reduce_dims, *rhs_reduce_dims);
-      std::swap(*lhs, *rhs);
-      break;
+    if (!absl::c_linear_search(*lhs_reduce_dims, dim)) {
+      auto lhs_dim = lhs_broadcast_dims->at(dim);
+      if (absl::c_linear_search(*rhs_broadcast_dims, lhs_dim)) {
+        lhs_batch_dims->push_back(dim);
+      } else {
+        lhs_unique_broadcast_dims.push_back(lhs_dim);
+      }
     }
   }
+
+  // Add RHS dot dimensions
+  for (auto dim = 0; dim < rhs_broadcast_dims->size(); ++dim) {
+    if (!absl::c_linear_search(*rhs_reduce_dims, dim)) {
+      auto rhs_dim = rhs_broadcast_dims->at(dim);
+      if (absl::c_linear_search(*lhs_broadcast_dims, rhs_dim)) {
+        rhs_batch_dims->push_back(dim);
+      } else {
+        rhs_unique_broadcast_dims.push_back(rhs_dim);
+      }
+    }
+  }
+
+  auto lhs_batch_size = lhs_batch_dims->size();
+  auto rhs_batch_size = rhs_batch_dims->size();
+
+  if (lhs_batch_size != rhs_batch_size) {
+    return false;
+  }
+
+  if (lhs_batch_size > 0) {
+    auto lhs_batch_max = absl::c_max_element(*lhs_batch_dims);
+    auto rhs_batch_max = absl::c_max_element(*rhs_batch_dims);
+
+    msg << "\n>>> Batched dimensions: ";
+    msg << "\n>>> lhs_batch_max = " << *lhs_batch_max;
+    msg << "\n>>> lhs_batch_dims->size() = " << lhs_batch_dims->size();
+    if (*lhs_batch_max != (lhs_batch_dims->size() - 1)) {
+      return false;
+    }
+
+    msg << "\n>>> rhs_batch_max = " << *rhs_batch_max;
+    msg << "\n>>> rhs_batch_dims->size() = " << rhs_batch_dims->size();
+    if (*rhs_batch_max != (rhs_batch_dims->size() - 1)) {
+      return false;
+    }
+  }
+
+  auto lhs_broadcast_max = absl::c_max_element(lhs_unique_broadcast_dims);
+  auto lhs_broadcast_min = absl::c_min_element(lhs_unique_broadcast_dims);
+
+  auto rhs_broadcast_max = absl::c_max_element(rhs_unique_broadcast_dims);
+  auto rhs_broadcast_min = absl::c_min_element(rhs_unique_broadcast_dims);
+
+  msg << "\n>>> lhs_broadcast_max = " << *lhs_broadcast_max;
+  msg << "\n>>> lhs_broadcast_min = " << *lhs_broadcast_min;
+  msg << "\n>>> rhs_broadcast_max = " << *rhs_broadcast_max;
+  msg << "\n>>> rhs_broadcast_min = " << *rhs_broadcast_min;
+
+  // Check the correct order for dot products
+  if (*lhs_broadcast_min > *rhs_broadcast_max) {
+    std::swap(lhs_broadcast_max, rhs_broadcast_max);
+    std::swap(lhs_broadcast_min, rhs_broadcast_min);
+    std::swap(lhs_unique_broadcast_dims, rhs_unique_broadcast_dims);
+    std::swap(*lhs_broadcast_dims, *rhs_broadcast_dims);
+    std::swap(*lhs_reduce_dims, *rhs_reduce_dims);
+    std::swap(*lhs, *rhs);
+
+    msg << "\n After swap: ";
+    msg << "\n>>> lhs_broadcast_max = " << *lhs_broadcast_max;
+    msg << "\n>>> lhs_broadcast_min = " << *lhs_broadcast_min;
+    msg << "\n>>> rhs_broadcast_max = " << *rhs_broadcast_max;
+    msg << "\n>>> rhs_broadcast_min = " << *rhs_broadcast_min;
+  }
+
+  msg << "\n>>> LHS batch dims: ";
+  for (auto dim : *lhs_batch_dims) msg << dim << " ";
+  msg << "\n>>> RHS batch dims: ";
+  for (auto dim : *rhs_batch_dims) msg << dim << " ";
+  msg << "\n>>> LHS broadcast dims: ";
+  for (auto dim : *lhs_broadcast_dims) msg << dim << " ";
+  msg << "\n>>> RHS broadcast dims: ";
+  for (auto dim : *rhs_broadcast_dims) msg << dim << " ";
+  msg << "\n>>> LHS unique dims: ";
+  for (auto dim : lhs_unique_broadcast_dims) msg << dim << " ";
+  msg << "\n>>> RHS unique dims: ";
+  for (auto dim : rhs_unique_broadcast_dims) msg << dim << " ";
+
+  // Check that broadcast dimensions are not interleaving.
+  if (*lhs_broadcast_max > *rhs_broadcast_min) {
+    msg << "\n>>> Interleaving broadcast dimensions";
+    LOG(INFO) << msg.str();
+    return false;
+  }
+
+  msg << "\n>>> Successfull replacement!!!";
+  LOG(INFO) << msg.str();
 
   return true;
 }
@@ -160,9 +260,13 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   std::vector<int64_t> rhs_reduce_dims;
   std::vector<int64_t> lhs_broadcast_dims;
   std::vector<int64_t> rhs_broadcast_dims;
+  std::vector<int64_t> lhs_batch_dims;
+  std::vector<int64_t> rhs_batch_dims;
+
   if (!MatchDistanceMatrix(reduce, &lhs, &rhs, &is_sub, &lhs_reduce_dims,
                            &rhs_reduce_dims, &lhs_broadcast_dims,
-                           &rhs_broadcast_dims)) {
+                           &rhs_broadcast_dims, &lhs_batch_dims,
+                           &rhs_batch_dims)) {
     return Status::OK();
   }
 
@@ -210,27 +314,19 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   DotDimensionNumbers dnums;
 
   // Add LHS dot dimensions
-  for (auto dim = 0; dim < lhs_shape.dimensions_size(); ++dim) {
-    if (absl::c_linear_search(lhs_reduce_dims, dim)) {
-      dnums.add_lhs_contracting_dimensions(dim);
-    } else {
-      auto broadcast_to_dim = lhs_broadcast_dims[dim];
-      if (absl::c_linear_search(rhs_broadcast_dims, broadcast_to_dim)) {
-        dnums.add_lhs_batch_dimensions(dim);
-      }
-    }
+  for (auto dim : lhs_reduce_dims) {
+    dnums.add_lhs_contracting_dimensions(dim);
+  }
+  for (auto dim : lhs_batch_dims) {
+    dnums.add_lhs_batch_dimensions(dim);
   }
 
   // Add RHS dot dimensions
-  for (auto dim = 0; dim < rhs_shape.dimensions_size(); ++dim) {
-    if (absl::c_linear_search(rhs_reduce_dims, dim)) {
-      dnums.add_rhs_contracting_dimensions(dim);
-    } else {
-      auto broadcast_to_dim = rhs_broadcast_dims[dim];
-      if (absl::c_linear_search(lhs_broadcast_dims, broadcast_to_dim)) {
-        dnums.add_rhs_batch_dimensions(dim);
-      }
-    }
+  for (auto dim : rhs_reduce_dims) {
+    dnums.add_rhs_contracting_dimensions(dim);
+  }
+  for (auto dim : rhs_batch_dims) {
+    dnums.add_rhs_batch_dimensions(dim);
   }
 
   PrecisionConfig precision_config;
@@ -239,14 +335,6 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   Shape prod_shape = reduce->shape();
   HloInstruction* prod = comp->AddInstruction(
       HloInstruction::CreateDot(prod_shape, lhs, rhs, dnums, precision_config));
-
-  HloInstruction* lhs_broadcast =
-      comp->AddInstruction(HloInstruction::CreateBroadcast(
-          prod_shape, lhs_reduced, lhs_broadcast_dims));
-
-  HloInstruction* rhs_broadcast =
-      comp->AddInstruction(HloInstruction::CreateBroadcast(
-          prod_shape, rhs_reduced, rhs_broadcast_dims));
 
   auto two_literal = LiteralUtil::CreateR0(2)
                          .ConvertToShape(ShapeUtil::MakeShape(type, {}))
@@ -258,6 +346,16 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
 
   HloInstruction* two_prod = comp->AddInstruction(HloInstruction::CreateBinary(
       prod_shape, HloOpcode::kMultiply, two_broadcast, prod));
+
+  // Final steps to broadcast LHS and RHS inputs to the outer product shape
+
+  HloInstruction* lhs_broadcast =
+      comp->AddInstruction(HloInstruction::CreateBroadcast(
+          prod_shape, lhs_reduced, lhs_broadcast_dims));
+
+  HloInstruction* rhs_broadcast =
+      comp->AddInstruction(HloInstruction::CreateBroadcast(
+          prod_shape, rhs_reduced, rhs_broadcast_dims));
 
   auto comp_code = HloOpcode::kAdd;
   if (is_sub) {
@@ -271,31 +369,6 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   HloInstruction* replacement =
       comp->AddInstruction(HloInstruction::CreateBinary(prod_shape, comp_code,
                                                         lhs_rhs_sum, two_prod));
-
-  // std::stringstream ss;
-  // ss << "\nLHS name: " << lhs->name();
-  // ss << "\nLHS shape: " << lhs->shape();
-  // ss << "\nRHS name: " << rhs->name();
-  // ss << "\nRHS shape: " << rhs->shape();
-  // ss << "\nReduce shape: " << reduce->shape();
-  // ss << "\nProduct shape: " << prod->shape();
-  // ss << "\nSubstract: " << (is_sub ? "yes" : "no");
-  // ss << "\nReplacement shape: " << replacement->shape();
-  // ss << "\nLHS original shape: " << lhs_shape;
-  // ss << "\nRHS original shape: " << rhs_shape;
-  // ss << "\nLHS reduced shape: " << lhs_reduced->shape();
-  // ss << "\nRHS reduced shape: " << rhs_reduced->shape();
-  // ss << "\nLHS broadcast shape: " << lhs_broadcast->shape();
-  // ss << "\nRHS broadcast shape: " << rhs_broadcast->shape();
-  // ss << "\nNew LHS reduce dims: ";
-  // for (auto dim : lhs_reduce_dims) ss << dim << " ";
-  // ss << "\nNew RHS reduce dims: ";
-  // for (auto dim : rhs_reduce_dims) ss << dim << " ";
-  // ss << "\nNew LHS broadcast dims: ";
-  // for (auto dim : lhs_broadcast_dims) ss << dim << " ";
-  // ss << "\nNew RHS broadcast dims: ";
-  // for (auto dim : rhs_broadcast_dims) ss << dim << " ";
-  // LOG(INFO) << ss.str();
 
   return ReplaceInstruction(reduce, replacement);
 }
