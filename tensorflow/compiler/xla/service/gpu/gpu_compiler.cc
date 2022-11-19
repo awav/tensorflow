@@ -49,7 +49,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/xla/hlo_utils.h"
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
-#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
+#include "tensorflow/compiler/xla/service/euclidean_distance_rewriter.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/all_gather_broadcast_reorder.h"
 #include "tensorflow/compiler/xla/service/all_gather_combiner.h"
@@ -472,7 +472,7 @@ Status GpuCompiler::OptimizeHloModule(
     // TODO(dyedgreen): Figure out what the best place for this pass is ...
     pipeline.AddPass<HloPassFix<RceOptimizer>>();
     pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-    pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+    pipeline.AddPass<HloPassFix<EuclideanDistanceRewriter>>();
     pipeline.AddPass<HloMCO>();
     pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
     pipeline.AddPass<HloPassFix<ReshapeSinker>>();

@@ -1,5 +1,5 @@
 // License TODO ....
-#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
+#include "tensorflow/compiler/xla/service/euclidean_distance_rewriter.h"
 
 #include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
@@ -14,9 +14,9 @@ namespace {
 
 namespace m = match;
 
-class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
+class EuclideanDistanceRewriterVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit AlgebraicRewriterVisitor() {}
+  explicit EuclideanDistanceRewriterVisitor() {}
 
   // MatchDistanceMatrix checks that
   bool MatchDistanceMatrix(HloInstruction* reduce, HloInstruction** x,
@@ -33,7 +33,7 @@ class AlgebraicRewriterVisitor : public DfsHloRewriteVisitor {
 
 }  // namespace
 
-bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
+bool EuclideanDistanceRewriterVisitor::MatchDistanceMatrix(
     HloInstruction* reduce, HloInstruction** lhs, HloInstruction** rhs,
     bool* is_sub, std::vector<int64_t>* lhs_reduce_dims,
     std::vector<int64_t>* rhs_reduce_dims,
@@ -218,7 +218,7 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   return true;
 }
 
-Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
+Status EuclideanDistanceRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   HloInstruction *lhs, *rhs;
   bool is_sub;
   std::vector<int64_t> lhs_reduce_dims;
@@ -338,9 +338,9 @@ Status AlgebraicRewriterVisitor::HandleReduce(HloInstruction* reduce) {
   return ReplaceInstruction(reduce, replacement);
 }
 
-StatusOr<bool> AlgebraicRewriter::Run(HloModule* module) {
+StatusOr<bool> EuclideanDistanceRewriter::Run(HloModule* module) {
   LOG(INFO) << "Running algebraic rewriter for '" << module->name() << "'";
-  AlgebraicRewriterVisitor visitor;
+  EuclideanDistanceRewriterVisitor visitor;
   return visitor.RunOnModule(module);
 }
 

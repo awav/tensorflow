@@ -272,7 +272,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:tensor_splitter_v2",
         "//tensorflow/compiler/xla/service:broadcast_simplifier",
         "//tensorflow/compiler/xla/service:rce_optimizer",
-        "//tensorflow/compiler/xla/service:algebraic_rewriter",
+        "//tensorflow/compiler/xla/service:euclidean_distance_rewriter",
         "//tensorflow/compiler/xla/service:reshape_sinker",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_constant_folding",

@@ -2304,9 +2304,9 @@ cc_library(
 )
 
 cc_library(
-    name = "algebraic_rewriter",
-    srcs = ["algebraic_rewriter.cc"],
-    hdrs = ["algebraic_rewriter.h"],
+    name = "euclidean_distance_rewriter",
+    srcs = ["euclidean_distance_rewriter.cc"],
+    hdrs = ["euclidean_distance_rewriter.h"],
     deps = [
         ":hlo_pass",
         ":hlo_creation_utils",

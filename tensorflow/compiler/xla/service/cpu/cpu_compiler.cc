@@ -93,7 +93,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/map_util.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
-#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
+#include "tensorflow/compiler/xla/service/euclidean_distance_rewriter.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/all_gather_decomposer.h"
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
@@ -506,7 +506,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // TODO(dyedgreen): Figure out what the best place for this pass is ...
   pipeline.AddPass<HloPassFix<RceOptimizer>>();
   pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
-  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloPassFix<EuclideanDistanceRewriter>>();
   pipeline.AddPass<HloMCO>();
   pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
   pipeline.AddPass<HloPassFix<ReshapeSinker>>();
