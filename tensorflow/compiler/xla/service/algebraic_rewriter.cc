@@ -44,7 +44,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   HloInstruction* core_expr = nullptr;
   HloInstruction* reduce_operand = nullptr;
   HloInstruction* reduce_init = nullptr;
-  std::stringstream msg;
 
   if (!Match(reduce,
              m::Reduce(m::Op(&reduce_operand), m::Constant(&reduce_init)))) {
@@ -186,15 +185,10 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     auto lhs_batch_max = absl::c_max_element(*lhs_batch_dims);
     auto rhs_batch_max = absl::c_max_element(*rhs_batch_dims);
 
-    msg << "\n>>> Batched dimensions: ";
-    msg << "\n>>> lhs_batch_max = " << *lhs_batch_max;
-    msg << "\n>>> lhs_batch_dims->size() = " << lhs_batch_dims->size();
     if (*lhs_batch_max != (lhs_batch_dims->size() - 1)) {
       return false;
     }
 
-    msg << "\n>>> rhs_batch_max = " << *rhs_batch_max;
-    msg << "\n>>> rhs_batch_dims->size() = " << rhs_batch_dims->size();
     if (*rhs_batch_max != (rhs_batch_dims->size() - 1)) {
       return false;
     }
@@ -206,11 +200,6 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
   auto rhs_broadcast_max = absl::c_max_element(rhs_unique_broadcast_dims);
   auto rhs_broadcast_min = absl::c_min_element(rhs_unique_broadcast_dims);
 
-  msg << "\n>>> lhs_broadcast_max = " << *lhs_broadcast_max;
-  msg << "\n>>> lhs_broadcast_min = " << *lhs_broadcast_min;
-  msg << "\n>>> rhs_broadcast_max = " << *rhs_broadcast_max;
-  msg << "\n>>> rhs_broadcast_min = " << *rhs_broadcast_min;
-
   // Check the correct order for dot products
   if (*lhs_broadcast_min > *rhs_broadcast_max) {
     std::swap(lhs_broadcast_max, rhs_broadcast_max);
@@ -219,36 +208,12 @@ bool AlgebraicRewriterVisitor::MatchDistanceMatrix(
     std::swap(*lhs_broadcast_dims, *rhs_broadcast_dims);
     std::swap(*lhs_reduce_dims, *rhs_reduce_dims);
     std::swap(*lhs, *rhs);
-
-    msg << "\n After swap: ";
-    msg << "\n>>> lhs_broadcast_max = " << *lhs_broadcast_max;
-    msg << "\n>>> lhs_broadcast_min = " << *lhs_broadcast_min;
-    msg << "\n>>> rhs_broadcast_max = " << *rhs_broadcast_max;
-    msg << "\n>>> rhs_broadcast_min = " << *rhs_broadcast_min;
   }
-
-  msg << "\n>>> LHS batch dims: ";
-  for (auto dim : *lhs_batch_dims) msg << dim << " ";
-  msg << "\n>>> RHS batch dims: ";
-  for (auto dim : *rhs_batch_dims) msg << dim << " ";
-  msg << "\n>>> LHS broadcast dims: ";
-  for (auto dim : *lhs_broadcast_dims) msg << dim << " ";
-  msg << "\n>>> RHS broadcast dims: ";
-  for (auto dim : *rhs_broadcast_dims) msg << dim << " ";
-  msg << "\n>>> LHS unique dims: ";
-  for (auto dim : lhs_unique_broadcast_dims) msg << dim << " ";
-  msg << "\n>>> RHS unique dims: ";
-  for (auto dim : rhs_unique_broadcast_dims) msg << dim << " ";
 
   // Check that broadcast dimensions are not interleaving.
   if (*lhs_broadcast_max > *rhs_broadcast_min) {
-    msg << "\n>>> Interleaving broadcast dimensions";
-    LOG(INFO) << msg.str();
     return false;
   }
-
-  msg << "\n>>> Successfull replacement!!!";
-  LOG(INFO) << msg.str();
 
   return true;
 }
