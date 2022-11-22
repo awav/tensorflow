@@ -20,20 +20,22 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
-#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
-#include "tensorflow/compiler/xla/service/hlo_computation.h"
-#include "tensorflow/compiler/xla/service/hlo_instruction.h"
-#include "tensorflow/compiler/xla/service/hlo_instructions.h"
-#include "tensorflow/compiler/xla/service/hlo_opcode.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_casting_utils.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instructions.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_opcode.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 
 namespace xla {
 
-StatusOr<bool> DynamicIndexSplitter::Run(HloModule* module) {
+StatusOr<bool> DynamicIndexSplitter::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
 
   std::vector<HloComputation*> computations =
-      module->MakeNonfusionComputations();
+      module->MakeNonfusionComputations(execution_threads);
   for (HloComputation* computation : computations) {
     for (HloInstruction* dynamic_op : computation->MakeInstructionPostOrder()) {
       switch (dynamic_op->opcode()) {
@@ -72,6 +74,7 @@ StatusOr<bool> DynamicIndexSplitter::Run(HloModule* module) {
       TF_RET_CHECK(index_operand->shape().rank() == 1);
       auto index_element_type = index_operand->shape().element_type();
       std::vector<HloInstruction*> index_array;
+      index_array.reserve(num_indices);
       for (int64_t dim = 0; dim < num_indices; ++dim) {
         auto slice = parent->AddInstruction(HloInstruction::CreateSlice(
             ShapeUtil::MakeShape(index_element_type, {1}), index_operand, {dim},

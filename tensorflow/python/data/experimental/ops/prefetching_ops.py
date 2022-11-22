@@ -15,7 +15,9 @@
 """Python wrapper for prefetching_ops."""
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.ops import iterator_ops
+from tensorflow.python.data.ops import structured_function
 from tensorflow.python.data.util import structure
+from tensorflow.python.eager import def_function
 from tensorflow.python.eager import function
 from tensorflow.python.framework import device as framework_device
 from tensorflow.python.framework import dtypes
@@ -105,7 +107,7 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
     wrap_ds_variant = gen_dataset_ops.wrap_dataset_variant(
         self._input_dataset._variant_tensor)  # pylint: disable=protected-access
 
-    @function.defun()
+    @def_function.function()
     def _init_func():
       """Creates an iterator for the input dataset.
 
@@ -119,9 +121,9 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
           [gen_dataset_ops.make_iterator(ds_variant, resource)]):
         return gen_dataset_ops.iterator_to_string_handle(resource)
 
-    init_func_concrete = _init_func._get_concrete_function_internal()  # pylint: disable=protected-access
+    init_func_concrete = _init_func.get_concrete_function()  # pylint: disable=protected-access
 
-    @function.defun()
+    @def_function.function()
     def _remote_init_func():
       return functional_ops.remote_call(
           target=self._source_device,
@@ -129,10 +131,11 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
           Tout=[dtypes.string],
           f=init_func_concrete)
 
-    self._init_func = _remote_init_func._get_concrete_function_internal()  # pylint: disable=protected-access
+    self._init_func = _remote_init_func.get_concrete_function()  # pylint: disable=protected-access
     self._init_captured_args = self._init_func.captured_inputs
 
-    @function.defun(input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
+    @def_function.function(
+        input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
     def _next_func(string_handle):
       """Calls get_next for created iterator.
 
@@ -149,7 +152,7 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
             dataset_ops.get_legacy_output_classes(self))
       return structure.to_tensor_list(self.element_spec, iterator.get_next())
 
-    next_func_concrete = _next_func._get_concrete_function_internal()  # pylint: disable=protected-access
+    next_func_concrete = _next_func.get_concrete_function()  # pylint: disable=protected-access
 
     @function.defun_with_attributes(
         input_signature=[tensor_spec.TensorSpec([], dtypes.string)],
@@ -164,7 +167,8 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
     self._next_func = _remote_next_func._get_concrete_function_internal()  # pylint: disable=protected-access
     self._next_captured_args = self._next_func.captured_inputs
 
-    @function.defun(input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
+    @def_function.function(
+        input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
     def _finalize_func(string_handle):
       """Destroys the iterator resource created.
 
@@ -181,9 +185,10 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
               iterator_resource, ignore_lookup_error=True)]):
         return array_ops.constant(0, dtypes.int64)
 
-    finalize_func_concrete = _finalize_func._get_concrete_function_internal()  # pylint: disable=protected-access
+    finalize_func_concrete = _finalize_func.get_concrete_function()  # pylint: disable=protected-access
 
-    @function.defun(input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
+    @def_function.function(
+        input_signature=[tensor_spec.TensorSpec([], dtypes.string)])
     def _remote_finalize_func(string_handle):
       return functional_ops.remote_call(
           target=self._source_device,
@@ -191,7 +196,7 @@ class _CopyToDeviceDataset(dataset_ops.UnaryUnchangedStructureDataset):
           Tout=[dtypes.int64],
           f=finalize_func_concrete)
 
-    self._finalize_func = _remote_finalize_func._get_concrete_function_internal(  # pylint: disable=protected-access
+    self._finalize_func = _remote_finalize_func.get_concrete_function(  # pylint: disable=protected-access
     )
     self._finalize_captured_args = self._finalize_func.captured_inputs
 
@@ -235,7 +240,7 @@ class _MapOnGpuDataset(dataset_ops.UnaryDataset):
     self._input_dataset = input_dataset
     self._use_inter_op_parallelism = use_inter_op_parallelism
 
-    self._map_func = dataset_ops.StructuredFunctionWrapper(
+    self._map_func = structured_function.StructuredFunctionWrapper(
         map_func,
         self._transformation_name(),
         dataset=input_dataset,

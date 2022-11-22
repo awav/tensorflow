@@ -1,8 +1,9 @@
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "op_resolver_internal_visibility_allowlist")
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:private"],
     licenses = ["notice"],
 )
@@ -88,6 +89,7 @@ cc_library(
     copts = tflite_copts(),
     visibility = op_resolver_internal_visibility_allowlist() + [
         "//tensorflow/lite:__pkg__",
+        "//tensorflow/lite/java/src/main/native:__pkg__",
     ],
     deps = [":op_resolver"],
 )

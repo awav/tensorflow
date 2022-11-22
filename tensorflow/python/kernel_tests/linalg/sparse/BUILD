@@ -1,8 +1,9 @@
 # Tests of TensorFlow sparse linear algebra kernels using the Python API.
 
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -44,11 +45,13 @@ cuda_py_test(
     main = "csr_sparse_matrix_ops_test.py",
     shard_count = 10,
     tags = [
+        "no_gpu",  # b/203655060 (cuda 11.5 specific)
         "notsan",  # b/149115441
     ],
     deps = [
         "//tensorflow/python/ops/linalg/sparse",
         "//tensorflow/python/ops/linalg/sparse:gen_sparse_csr_matrix_ops",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 

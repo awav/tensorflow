@@ -17,9 +17,9 @@ limitations under the License.
 
 #include <string>
 
+#include "tensorflow/compiler/xla/stream_executor/tpu/tpu_api.h"
+#include "tensorflow/compiler/xla/stream_executor/tpu/tpu_ops_c_api.h"
 #include "tensorflow/core/framework/resource_mgr.h"
-#include "tensorflow/core/tpu/tpu_api.h"
-#include "tensorflow/core/tpu/tpu_ops_c_api.h"
 
 namespace tensorflow {
 
@@ -37,18 +37,28 @@ class TpuEmbeddingEngineStateInterface : public ResourceBase {
 
   ~TpuEmbeddingEngineStateInterface() override {
     if (engine_state_ != nullptr) {
-      OpsApiFn()->TpuEmbeddingEngineState_FreeFn(engine_state_);
+      stream_executor::tpu::OpsApiFn()->TpuEmbeddingEngineState_FreeFn(
+          engine_state_);
     }
   }
 
   tensorflow::TpuEmbeddingEngineState* GetState() const {
+    if (engine_state_ == nullptr) {
+      return nullptr;
+    }
     return static_cast<tensorflow::TpuEmbeddingEngineState*>(
-        OpsApiFn()->TpuEmbeddingEngineState_GetStateFn(engine_state_));
+        stream_executor::tpu::OpsApiFn()->TpuEmbeddingEngineState_GetStateFn(
+            engine_state_));
   }
 
   static TpuEmbeddingEngineStateInterface* Create() {
-    return new TpuEmbeddingEngineStateInterface(
-        OpsApiFn()->TpuEmbeddingEngineState_CreateFn());
+    XLA_TpuEmbeddingEngineState* state = nullptr;
+    if (stream_executor::tpu::OpsApiFn()->TpuEmbeddingEngineState_CreateFn !=
+        nullptr) {
+      state =
+          stream_executor::tpu::OpsApiFn()->TpuEmbeddingEngineState_CreateFn();
+    }
+    return new TpuEmbeddingEngineStateInterface(state);
   }
 
   string DebugString() const override {

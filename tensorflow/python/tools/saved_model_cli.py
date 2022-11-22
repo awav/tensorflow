@@ -27,10 +27,10 @@ import sys
 
 from absl import app  # pylint: disable=unused-import
 import numpy as np
-import six
 
 from tensorflow.core.example import example_pb2
 from tensorflow.core.framework import types_pb2
+from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.debug.wrappers import local_cli_wrapper
 from tensorflow.python.eager import def_function
@@ -71,6 +71,40 @@ def _show_tag_sets(saved_model_dir):
   print('The given SavedModel contains the following tag-sets:')
   for tag_set in sorted(tag_sets):
     print('%r' % ', '.join(sorted(tag_set)))
+
+
+def _get_ops_in_metagraph(meta_graph_def):
+  """Returns a set of the ops in the MetaGraph.
+
+  Returns the set of all the ops used in the MetaGraphDef indicated by the
+  tag_set stored in SavedModel directory.
+
+  Args:
+    meta_graph_def: MetaGraphDef to list the ops of.
+
+  Returns:
+    A set of ops.
+  """
+  return set(meta_graph_lib.ops_used_by_graph_def(meta_graph_def.graph_def))
+
+
+def _show_ops_in_metagraph(saved_model_dir, tag_set):
+  """Prints the ops in the MetaGraph.
+
+  Prints all the ops used in the MetaGraphDef indicated by the tag_set stored in
+  SavedModel directory.
+
+  Args:
+    saved_model_dir: Directory containing the SavedModel to inspect.
+    tag_set: Group of tag(s) of the MetaGraphDef in string format, separated by
+      ','. For tag-set contains multiple tags, all tags must be passed in.
+  """
+  meta_graph_def = saved_model_utils.get_meta_graph_def(saved_model_dir,
+                                                        tag_set)
+  all_ops_set = _get_ops_in_metagraph(meta_graph_def)
+  print(
+      'The MetaGraph with tag set %s contains the following ops:' %
+      meta_graph_def.meta_info_def.tags, all_ops_set)
 
 
 def _show_signature_def_map_keys(saved_model_dir, tag_set):
@@ -190,19 +224,21 @@ def _show_defined_functions(saved_model_dir):
   with ops_lib.Graph().as_default():
     trackable_object = load.load(saved_model_dir)
 
-  print('\nDefined Functions:', end='')
-  functions = (
+  print('\nConcrete Functions:', end='')
+  children = list(
       save._AugmentedGraphView(trackable_object)  # pylint: disable=protected-access
-      .list_functions(trackable_object))
-  functions = sorted(functions.items(), key=lambda x: x[0])
-  for name, function in functions:
-    print('\n  Function Name: \'%s\'' % name)
+      .list_children(trackable_object))
+  children = sorted(children, key=lambda x: x.name)
+  for name, child in children:
     concrete_functions = []
-    if isinstance(function, defun.ConcreteFunction):
-      concrete_functions.append(function)
-    if isinstance(function, def_function.Function):
+    if isinstance(child, defun.ConcreteFunction):
+      concrete_functions.append(child)
+    elif isinstance(child, def_function.Function):
       concrete_functions.extend(
-          function._list_all_concrete_functions_for_serialization())  # pylint: disable=protected-access
+          child._list_all_concrete_functions_for_serialization())  # pylint: disable=protected-access
+    else:
+      continue
+    print('\n  Function Name: \'%s\'' % name)
     concrete_functions = sorted(concrete_functions, key=lambda x: x.name)
     for index, concrete_function in enumerate(concrete_functions, 1):
       args, kwargs = None, None
@@ -241,7 +277,7 @@ def _print_args(arguments, argument_type='Argument', indent=0):
   for index, element in enumerate(arguments, 1):
     if indent == 4:
       in_print('%s #%d' % (argument_type, index))
-    if isinstance(element, six.string_types):
+    if isinstance(element, str):
       in_print('  %s' % element)
     elif isinstance(element, tensor_spec.TensorSpec):
       print((indent + 1) * '  ' + '%s: %s' % (element.name, repr(element)))
@@ -289,9 +325,9 @@ def _print_tensor_info(tensor_info, indent=0):
 
 
 def _show_all(saved_model_dir):
-  """Prints tag-set, SignatureDef and Inputs/Outputs information in SavedModel.
+  """Prints tag-set, ops, SignatureDef, and Inputs/Outputs of SavedModel.
 
-  Prints all tag-set, SignatureDef and Inputs/Outputs information stored in
+  Prints all tag-set, ops, SignatureDef and Inputs/Outputs information stored in
   SavedModel directory.
 
   Args:
@@ -308,6 +344,7 @@ def _show_all(saved_model_dir):
       print('\nsignature_def[\'' + signature_def_key + '\']:')
       _show_inputs_outputs(saved_model_dir, tag_set, signature_def_key,
                            indent=1)
+    _show_ops_in_metagraph(saved_model_dir, tag_set)
   _show_defined_functions(saved_model_dir)
 
 
@@ -352,31 +389,45 @@ def get_signature_def_map(saved_model_dir, tag_set):
   return meta_graph.signature_def
 
 
-def scan_meta_graph_def(meta_graph_def):
+def _get_op_denylist_set(op_denylist):
+  # Note: Discard empty ops so that "" can mean the empty denylist set.
+  set_of_denylisted_ops = set([op for op in op_denylist.split(',') if op])
+  return set_of_denylisted_ops
+
+
+def scan_meta_graph_def(meta_graph_def, op_denylist):
   """Scans meta_graph_def and reports if there are ops on denylist.
 
-  Print ops if they are on black list, or print success if no denylisted ops
+  Print ops if they are on denylist, or print success if no denylisted ops
   found.
 
   Args:
     meta_graph_def: MetaGraphDef protocol buffer.
+    op_denylist: set of ops to scan for.
   """
-  all_ops_set = set(
+  ops_in_metagraph = set(
       meta_graph_lib.ops_used_by_graph_def(meta_graph_def.graph_def))
-  denylisted_ops = _OP_DENYLIST & all_ops_set
+  denylisted_ops = op_denylist & ops_in_metagraph
   if denylisted_ops:
     # TODO(yifeif): print more warnings
     print(
         'MetaGraph with tag set %s contains the following denylisted ops:' %
         meta_graph_def.meta_info_def.tags, denylisted_ops)
   else:
-    print('MetaGraph with tag set %s does not contain denylisted ops.' %
-          meta_graph_def.meta_info_def.tags)
+    print(
+        'MetaGraph with tag set %s does not contain the default denylisted ops:'
+        % meta_graph_def.meta_info_def.tags, op_denylist)
 
 
-def run_saved_model_with_feed_dict(saved_model_dir, tag_set, signature_def_key,
-                                   input_tensor_key_feed_dict, outdir,
-                                   overwrite_flag, worker=None, init_tpu=False,
+def run_saved_model_with_feed_dict(saved_model_dir,
+                                   tag_set,
+                                   signature_def_key,
+                                   input_tensor_key_feed_dict,
+                                   outdir,
+                                   overwrite_flag,
+                                   worker=None,
+                                   init_tpu=False,
+                                   use_tfrt=False,
                                    tf_debug=False):
   """Runs SavedModel and fetch all outputs.
 
@@ -399,6 +450,7 @@ def run_saved_model_with_feed_dict(saved_model_dir, tag_set, signature_def_key,
         specification is a bns or gRPC path.
     init_tpu: If true, the TPU system will be initialized after the session
         is created.
+    use_tfrt: If true, TFRT session will be used.
     tf_debug: A boolean flag to use TensorFlow Debugger (TFDBG) to observe the
         intermediate Tensor values and runtime GraphDefs while running the
         SavedModel.
@@ -439,7 +491,12 @@ def run_saved_model_with_feed_dict(saved_model_dir, tag_set, signature_def_key,
       for tensor_key in output_tensor_keys_sorted
   ]
 
-  with session.Session(worker, graph=ops_lib.Graph()) as sess:
+  config = None
+  if use_tfrt:
+    logging.info('Using TFRT session.')
+    config = config_pb2.ConfigProto(
+        experimental=config_pb2.ConfigProto.Experimental(use_tfrt=True))
+  with session.Session(worker, graph=ops_lib.Graph(), config=config) as sess:
     if init_tpu:
       print('Initializing TPU System ...')
       # This is needed for freshly started worker, or if the job
@@ -608,7 +665,7 @@ def _create_example_string(example_dict):
     elif isinstance(feature_list[0], bytes):
       example.features.feature[feature_name].bytes_list.value.extend(
           feature_list)
-    elif isinstance(feature_list[0], six.integer_types):
+    elif isinstance(feature_list[0], int):
       example.features.feature[feature_name].int64_list.value.extend(
           feature_list)
     else:
@@ -669,7 +726,7 @@ def load_inputs_from_input_arg_string(inputs_str, input_exprs_str,
   tensor_key_feed_dict = {}
 
   inputs = preprocess_inputs_arg_string(inputs_str)
-  input_exprs = preprocess_input_exprs_arg_string(input_exprs_str, safe=False)
+  input_exprs = preprocess_input_exprs_arg_string(input_exprs_str)
   input_examples = preprocess_input_examples_arg_string(input_examples_str)
 
   for input_tensor_key, (filename, variable_name) in inputs.items():
@@ -731,12 +788,19 @@ def show(args):
   if args.all:
     _show_all(args.dir)
   else:
-    # If no tag is specified, display all tag_set, if no signature_def key is
-    # specified, display all SignatureDef keys, else show input output tensor
-    # information corresponding to the given SignatureDef key
+    # If no tag is specified, display all tag_sets.
+    # If a tag set is specified:
+    # # If list_ops is set, display all ops in the specified MetaGraphDef.
+    # # If no signature_def key is specified, display all SignatureDef keys.
+    # # If a signature_def is specified, show its corresponding input output
+    # # tensor information.
     if args.tag_set is None:
+      if args.list_ops:
+        print('--list_ops must be paired with a tag-set or with --all.')
       _show_tag_sets(args.dir)
     else:
+      if args.list_ops:
+        _show_ops_in_metagraph(args.dir, args.tag_set)
       if args.signature_def is None:
         _show_signature_def_map_keys(args.dir, args.tag_set)
       else:
@@ -759,10 +823,17 @@ def run(args):
         'required')
   tensor_key_feed_dict = load_inputs_from_input_arg_string(
       args.inputs, args.input_exprs, args.input_examples)
-  run_saved_model_with_feed_dict(args.dir, args.tag_set, args.signature_def,
-                                 tensor_key_feed_dict, args.outdir,
-                                 args.overwrite, worker=args.worker,
-                                 init_tpu=args.init_tpu, tf_debug=args.tf_debug)
+  run_saved_model_with_feed_dict(
+      args.dir,
+      args.tag_set,
+      args.signature_def,
+      tensor_key_feed_dict,
+      args.outdir,
+      args.overwrite,
+      worker=args.worker,
+      init_tpu=args.init_tpu,
+      use_tfrt=args.use_tfrt,
+      tf_debug=args.tf_debug)
 
 
 def scan(args):
@@ -771,13 +842,23 @@ def scan(args):
   Args:
     args: A namespace parsed from command line.
   """
-  if args.tag_set:
+  if args.tag_set and args.op_denylist:
     scan_meta_graph_def(
-        saved_model_utils.get_meta_graph_def(args.dir, args.tag_set))
+        saved_model_utils.get_meta_graph_def(args.dir, args.tag_set),
+        _get_op_denylist_set(args.op_denylist))
+  elif args.tag_set:
+    scan_meta_graph_def(
+        saved_model_utils.get_meta_graph_def(args.dir, args.tag_set),
+        _OP_DENYLIST)
   else:
     saved_model = saved_model_utils.read_saved_model(args.dir)
-    for meta_graph_def in saved_model.meta_graphs:
-      scan_meta_graph_def(meta_graph_def)
+    if args.op_denylist:
+      for meta_graph_def in saved_model.meta_graphs:
+        scan_meta_graph_def(meta_graph_def,
+                            _get_op_denylist_set(args.op_denylist))
+    else:
+      for meta_graph_def in saved_model.meta_graphs:
+        scan_meta_graph_def(meta_graph_def, _OP_DENYLIST)
 
 
 def convert_with_tensorrt(args):
@@ -795,11 +876,11 @@ def convert_with_tensorrt(args):
         max_workspace_size_bytes=args.max_workspace_size_bytes,
         precision_mode=args.precision_mode,
         minimum_segment_size=args.minimum_segment_size)
-    converter = trt.TrtGraphConverterV2(
-        input_saved_model_dir=args.dir,
-        input_saved_model_tags=args.tag_set.split(','),
-        conversion_params=params)
     try:
+      converter = trt.TrtGraphConverterV2(
+          input_saved_model_dir=args.dir,
+          input_saved_model_tags=args.tag_set.split(','),
+          **params._asdict())
       converter.convert()
     except Exception as e:
       raise RuntimeError(
@@ -817,6 +898,31 @@ def convert_with_tensorrt(args):
         input_saved_model_dir=args.dir,
         input_saved_model_tags=args.tag_set.split(','),
         output_saved_model_dir=args.output_dir)
+
+
+def freeze_model(args):
+  """Function triggered by freeze_model command.
+
+  Args:
+    args: A namespace parsed from command line.
+  """
+  checkpoint_path = (
+      args.checkpoint_path
+      or os.path.join(args.dir, 'variables/variables'))
+  if not args.variables_to_feed:
+    variables_to_feed = []
+  elif args.variables_to_feed.lower() == 'all':
+    variables_to_feed = None  # We will identify them after.
+  else:
+    variables_to_feed = args.variables_to_feed.split(',')
+
+  saved_model_aot_compile.freeze_model(
+      checkpoint_path=checkpoint_path,
+      meta_graph_def=saved_model_utils.get_meta_graph_def(
+          args.dir, args.tag_set),
+      signature_def_key=args.signature_def_key,
+      variables_to_feed=variables_to_feed,
+      output_prefix=args.output_prefix)
 
 
 def aot_compile_cpu(args):
@@ -865,6 +971,9 @@ def add_show_subparser(subparsers):
       ' MetaGraph.\n'
       '$saved_model_cli show --dir /tmp/saved_model --tag_set serve'
       ' --signature_def serving_default\n\n'
+      'To show all ops in a MetaGraph.\n'
+      '$saved_model_cli show --dir /tmp/saved_model --tag_set serve'
+      ' --list_ops\n\n'
       'To show all available information in the SavedModel:\n'
       '$saved_model_cli show --dir /tmp/saved_model --all')
   parser_show = subparsers.add_parser(
@@ -891,6 +1000,12 @@ def add_show_subparser(subparsers):
       default=None,
       metavar='SIGNATURE_DEF_KEY',
       help='key of SignatureDef to display input(s) and output(s) for')
+  parser_show.add_argument(
+      '--list_ops',
+      action='store_true',
+      help=(
+          'if set, will output ops used by a MetaGraphDef specified by tag_set'
+      ))
   parser_show.set_defaults(func=show)
 
 
@@ -971,14 +1086,22 @@ def add_run_subparser(subparsers):
       default=None,
       help='if specified, tpu.initialize_system will be called on the Session. '
            'This option should be only used if the worker is a TPU job.')
+  parser_run.add_argument(
+      '--use_tfrt',
+      action='store_true',
+      default=None,
+      help='if specified, TFRT session will be used, instead of TF1 session.')
   parser_run.set_defaults(func=run)
 
 
 def add_scan_subparser(subparsers):
   """Add parser for `scan`."""
   scan_msg = ('Usage example:\n'
-              'To scan for denylisted ops in SavedModel:\n'
+              'To scan for default denylisted ops in SavedModel:\n'
               '$saved_model_cli scan --dir /tmp/saved_model\n'
+              'To scan for a specific set of ops in SavedModel:\n'
+              '$saved_model_cli scan --dir /tmp/saved_model --op_denylist '
+              'OpName,OpName,OpName\n'
               'To scan a specific MetaGraph, pass in --tag_set\n')
   parser_scan = subparsers.add_parser(
       'scan',
@@ -993,6 +1116,12 @@ def add_scan_subparser(subparsers):
       '--tag_set',
       type=str,
       help='tag-set of graph in SavedModel to scan, separated by \',\'')
+  parser_scan.add_argument(
+      '--op_denylist',
+      type=str,
+      help=('list of ops to detect and report, separated by \',\'. If not set, '
+            'default is WriteFile,ReadFile,PrintV2. For empty list, pass in '
+            '\'\''))
   parser_scan.set_defaults(func=scan)
 
 
@@ -1057,6 +1186,70 @@ def add_convert_subparser(subparsers):
   parser_convert_with_tensorrt.set_defaults(func=convert_with_tensorrt)
 
 
+def _parse_common_freeze_and_aot(parser_compile):
+  """Parse arguments shared by freeze model and aot_compile."""
+  parser_compile.add_argument(
+      '--dir',
+      type=str,
+      required=True,
+      help='directory containing the SavedModel to convert')
+  parser_compile.add_argument(
+      '--output_prefix',
+      type=str,
+      required=True,
+      help=('output directory + filename prefix for the resulting header(s) '
+            'and object file(s)'))
+  parser_compile.add_argument(
+      '--tag_set',
+      type=str,
+      required=True,
+      help='tag-set of graph in SavedModel to convert, separated by \',\'')
+  parser_compile.add_argument(
+      '--signature_def_key',
+      type=str,
+      default=signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY,
+      help=('signature_def key to use.  '
+            'default: DEFAULT_SERVING_SIGNATURE_DEF_KEY'))
+  parser_compile.add_argument(
+      '--checkpoint_path',
+      type=str,
+      default=None,
+      help='Custom checkpoint to use (default: use the SavedModel variables)')
+  parser_compile.add_argument(
+      '--variables_to_feed',
+      type=str,
+      default='',
+      help=('The names of variables that will be fed into the network.  '
+            'Options are: empty (default; all variables are frozen, none may '
+            'be fed), \'all\' (all variables may be fed), or a '
+            'comma-delimited list of names of variables that may be fed.  In '
+            'the last case, the non-fed variables will be frozen in the graph.'
+            '**NOTE** Any variables passed to `variables_to_feed` *must be set '
+            'by the user*.  These variables will NOT be frozen and their '
+            'values will be uninitialized in the compiled object '
+            '(this applies to all input arguments from the signature as '
+            'well).'))
+
+
+def add_freeze_model_subparser(subparsers):
+  """Add parser for `freeze_model`."""
+  compile_msg = '\n'.join(
+      ['Usage example:',
+       'To freeze a SavedModel in preparation for tfcompile:',
+       '$saved_model_cli freeze_model \\',
+       '   --dir /tmp/saved_model \\',
+       '   --tag_set serve \\',
+       '   --output_prefix /tmp/saved_model_xla_aot',
+      ])
+
+  parser_compile = subparsers.add_parser(
+      'freeze_model',
+      description=compile_msg,
+      formatter_class=argparse.RawTextHelpFormatter)
+  _parse_common_freeze_and_aot(parser_compile)
+  parser_compile.set_defaults(func=freeze_model)
+
+
 def add_aot_compile_cpu_subparser(subparsers):
   """Add parser for `aot_compile_cpu`."""
   compile_msg = '\n'.join(
@@ -1087,28 +1280,7 @@ def add_aot_compile_cpu_subparser(subparsers):
       'aot_compile_cpu',
       description=compile_msg,
       formatter_class=argparse.RawTextHelpFormatter)
-  parser_compile.add_argument(
-      '--dir',
-      type=str,
-      required=True,
-      help='directory containing the SavedModel to convert')
-  parser_compile.add_argument(
-      '--output_prefix',
-      type=str,
-      required=True,
-      help=('output directory + filename prefix for the resulting header(s) '
-            'and object file(s)'))
-  parser_compile.add_argument(
-      '--tag_set',
-      type=str,
-      required=True,
-      help='tag-set of graph in SavedModel to convert, separated by \',\'')
-  parser_compile.add_argument(
-      '--signature_def_key',
-      type=str,
-      default=signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY,
-      help=('signature_def key to use.  '
-            'default: DEFAULT_SERVING_SIGNATURE_DEF_KEY'))
+  _parse_common_freeze_and_aot(parser_compile)
   parser_compile.add_argument(
       '--target_triple',
       type=str,
@@ -1126,11 +1298,6 @@ def add_aot_compile_cpu_subparser(subparsers):
             'a complete list of options, run (for x86 targets): '
             '`llc -march=x86 -mcpu=help`'))
   parser_compile.add_argument(
-      '--checkpoint_path',
-      type=str,
-      default=None,
-      help='Custom checkpoint to use (default: use the SavedModel variables)')
-  parser_compile.add_argument(
       '--cpp_class',
       type=str,
       required=True,
@@ -1141,20 +1308,6 @@ def add_aot_compile_cpu_subparser(subparsers):
             'may precede the class name, separated by double-colons.  '
             'The class will be generated in the given namespace(s), or if no '
             'namespaces are given, within the global namespace.'))
-  parser_compile.add_argument(
-      '--variables_to_feed',
-      type=str,
-      default='',
-      help=('The names of variables that will be fed into the network.  '
-            'Options are: empty (default; all variables are frozen, none may '
-            'be fed), \'all\' (all variables may be fed), or a '
-            'comma-delimited list of names of variables that may be fed.  In '
-            'the last case, the non-fed variables will be frozen in the graph.'
-            '**NOTE** Any variables passed to `variables_to_feed` *must be set '
-            'by the user*.  These variables will NOT be frozen and their '
-            'values will be uninitialized in the compiled object '
-            '(this applies to all input arguments from the signature as '
-            'well).'))
   parser_compile.add_argument(
       '--multithreading',
       type=str,
@@ -1195,6 +1348,8 @@ def create_parser():
   # aot_compile_cpu command
   add_aot_compile_cpu_subparser(subparsers)
 
+  # freeze_model command
+  add_freeze_model_subparser(subparsers)
   return parser
 
 

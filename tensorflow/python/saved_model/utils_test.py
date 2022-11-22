@@ -17,7 +17,7 @@
 from tensorflow.core.framework import types_pb2
 from tensorflow.core.protobuf import struct_pb2
 from tensorflow.python.eager import context
-from tensorflow.python.eager import function
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -48,7 +48,7 @@ class UtilsTest(test.TestCase):
   @test_util.run_v1_only(
       "b/120545219: `build_tensor_info` is only available in graph mode.")
   def testBuildTensorInfoDefunOp(self):
-    @function.defun
+    @def_function.function
     def my_init_fn(x, y):
       self.x_var = x
       self.y_var = y
@@ -101,10 +101,9 @@ class UtilsTest(test.TestCase):
     self.assertEqual(types_pb2.DT_INT64,
                      x_tensor_info.composite_tensor.components[1].dtype)
     # Check type_spec.
-    struct_coder = nested_structure_coder.StructureCoder()
     spec_proto = struct_pb2.StructuredValue(
         type_spec_value=x_tensor_info.composite_tensor.type_spec)
-    spec = struct_coder.decode_proto(spec_proto)
+    spec = nested_structure_coder.decode_proto(spec_proto)
     self.assertEqual(spec, x._type_spec)
 
   def testBuildTensorInfoEager(self):

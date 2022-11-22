@@ -16,16 +16,16 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_ELEMENTAL_IR_EMITTER_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_ELEMENTAL_IR_EMITTER_H_
 
-#include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
-#include "tensorflow/compiler/xla/service/hlo_instruction.h"
-#include "tensorflow/compiler/xla/service/hlo_instructions.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_builder_mixin.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/loop_emitter.h"
@@ -36,7 +36,7 @@ namespace xla {
 class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
  public:
   using HloToElementGeneratorMap =
-      std::unordered_map<const HloInstruction*, llvm_ir::ElementGenerator>;
+      absl::flat_hash_map<const HloInstruction*, llvm_ir::ElementGenerator>;
 
   ElementalIrEmitter(llvm::Module* module, llvm::IRBuilder<>* b)
       : b_(b), module_(module) {}
@@ -55,6 +55,12 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
   llvm::IRBuilder<>* builder() { return b_; }
 
   llvm::Module* module() { return module_; }
+
+  // Returns which ops invalidate the cache of emitted instructions by creating
+  // a new BasicBlock and setting the insertion point to the newly created
+  // BasicBlock. We can only reuse cached values if they were emitted in the
+  // same BasicBlock as the current BasicBlock.
+  static bool OpInvalidatesCache(const HloInstruction* hlo);
 
  protected:
   virtual llvm_ir::IrArray::Index GetSourceIndexOfBitcast(
@@ -271,7 +277,7 @@ class ElementalIrEmitter : public IrBuilderMixin<ElementalIrEmitter> {
 
   virtual StatusOr<std::vector<llvm::Value*>> EmitThreadLocalCall(
       const HloComputation& callee, absl::Span<llvm::Value* const> parameters,
-      absl::string_view name) = 0;
+      absl::string_view name, bool is_reducer) = 0;
 
   StatusOr<llvm::Value*> EmitElementalMap(
       const HloMapInstruction* map_instr,

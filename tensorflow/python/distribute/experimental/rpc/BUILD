@@ -1,11 +1,10 @@
 # Python bindings for RPC client and server ops.
 
-load("//tensorflow:tensorflow.bzl", "pytype_library")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+load("//tensorflow:pytype.default.bzl", "pytype_library")
+load("//tensorflow:tensorflow.default.bzl", "tf_py_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -34,6 +33,9 @@ tf_py_test(
     size = "medium",
     srcs = ["rpc_ops_test.py"],
     shard_count = 7,
+    tags = [
+        "no_mac",  # flaky, b/205156709
+    ],
     deps = [
         ":rpc_ops",
         "//tensorflow/python:math_ops",

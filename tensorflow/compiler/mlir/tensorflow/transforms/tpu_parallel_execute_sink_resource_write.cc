@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
@@ -31,23 +32,18 @@ namespace TFTPU {
 
 namespace {
 
+#define GEN_PASS_DEF_TPUPARALLELEXECUTESINKRESOURCEWRITEPASS
+#include "tensorflow/compiler/mlir/tensorflow/transforms/tf_passes.h.inc"
+
 // A pass that moves `tf.AssignVariableOp` into a `tf_device.parallel_execute`
 // region if the `tf.AssignVariableOp` is the only consumer of a
 // `tf_device.parallel_execute` result. This will allow
 // TPUMergeVariablesWithExecute to merge resource writes without special
 // handling for `tf_device.parallel_execute`.
 struct TPUParallelExecuteSinkResourceWrite
-    : public PassWrapper<TPUParallelExecuteSinkResourceWrite, FunctionPass> {
-  void runOnFunction() override;
-
-  StringRef getArgument() const final {
-    return "tf-tpu-parallel-execute-sink-resource-write";
-  }
-
-  StringRef getDescription() const final {
-    return "Moves tf.AssignVariableOp consumers of tf_device.parallel_execute "
-           "into tf_device.parallel_execute regions";
-  }
+    : public impl::TPUParallelExecuteSinkResourceWritePassBase<
+          TPUParallelExecuteSinkResourceWrite> {
+  void runOnOperation() override;
 };
 
 // Finds an AssignVariableOp that can be moved into the parallel_execute region.
@@ -62,9 +58,9 @@ TF::AssignVariableOp GetSingleUseResourceWrite(
   auto assign_var = dyn_cast<TF::AssignVariableOp>(use.getOwner());
   if (!assign_var) return nullptr;
 
-  if (use.get() != assign_var.value()) return nullptr;
+  if (use.get() != assign_var.getValue()) return nullptr;
 
-  auto* resource_handle_op = assign_var.resource().getDefiningOp();
+  auto* resource_handle_op = assign_var.getResource().getDefiningOp();
   if (resource_handle_op == parallel_execute) return nullptr;
 
   if (resource_handle_op &&
@@ -108,7 +104,8 @@ void SinkResourceWritesIntoParallelExecute(
       // resource variable to be the non forwarded value from within the
       // parallel_execute region.
       assign_var.getOperation()->moveBefore(terminator);
-      assign_var.valueMutable().assign(terminator->getOperand(result.index()));
+      assign_var.getValueMutable().assign(
+          terminator->getOperand(result.index()));
       results_to_remove.push_back(result.index());
     }
 
@@ -149,9 +146,9 @@ void SinkResourceWritesIntoParallelExecute(
   parallel_execute.erase();
 }
 
-void TPUParallelExecuteSinkResourceWrite::runOnFunction() {
+void TPUParallelExecuteSinkResourceWrite::runOnOperation() {
   llvm::SmallVector<tf_device::ParallelExecuteOp, 4> parallel_executes;
-  getFunction().walk([&](tf_device::ParallelExecuteOp parallel_execute) {
+  getOperation().walk([&](tf_device::ParallelExecuteOp parallel_execute) {
     parallel_executes.push_back(parallel_execute);
   });
 
@@ -161,12 +158,10 @@ void TPUParallelExecuteSinkResourceWrite::runOnFunction() {
 
 }  // anonymous namespace
 
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 CreateTPUParallelExecuteSinkResourceWritePass() {
   return std::make_unique<TPUParallelExecuteSinkResourceWrite>();
 }
-
-static PassRegistration<TPUParallelExecuteSinkResourceWrite> pass;
 
 }  // namespace TFTPU
 }  // namespace mlir

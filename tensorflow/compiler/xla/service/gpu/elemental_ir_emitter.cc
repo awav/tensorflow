@@ -17,11 +17,9 @@ limitations under the License.
 
 #include <stddef.h>
 
-#include <unordered_map>
 #include <vector>
 
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/types.h"
+#include "tensorflow/tsl/platform/logging.h"
 // IWYU pragma: no_include "llvm/IR/Attributes.gen.inc"
 // IWYU pragma: no_include "llvm/IR/Intrinsics.gen.inc"
 #include "absl/strings/str_cat.h"
@@ -33,11 +31,12 @@ limitations under the License.
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/ModRef.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_opcode.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
 #include "tensorflow/compiler/xla/service/gpu/target_util.h"
-#include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_loop.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
@@ -99,7 +98,7 @@ StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitDeviceMathCall(
         }
       }
       output_type = F32;
-      TF_FALLTHROUGH_INTENDED;
+      [[fallthrough]];
     case F32:
       break;
     case F64:
@@ -108,11 +107,11 @@ StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitDeviceMathCall(
       return Unimplemented("Bad type for device math call: %s",
                            PrimitiveType_Name(output_type));
   }
-  const string& munged_callee =
+  const std::string& munged_callee =
       ObtainDeviceFunctionName(funcid, output_type, b());
   llvm::Value* result = EmitMathCall(munged_callee, converted_operands,
                                      converted_input_types, output_type, name)
-                            .ValueOrDie();
+                            .value();
   if (cast_result_to_fp16) {
     result = FPCast(result, b()->getHalfTy());
   }
@@ -120,11 +119,11 @@ StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitDeviceMathCall(
 }
 
 StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitLlvmIntrinsicMathCall(
-    const string& callee_name, absl::Span<llvm::Value* const> operands,
+    const std::string& callee_name, absl::Span<llvm::Value* const> operands,
     absl::Span<const PrimitiveType> input_types, PrimitiveType output_type) {
   // llvm intrinsics differentiate between half/float/double functions via
   // the suffixes ".f16", ".f32" and ".f64".
-  string munged_callee = callee_name;
+  std::string munged_callee = callee_name;
   switch (output_type) {
     case F16:
       StrAppend(&munged_callee, ".f16");
@@ -143,7 +142,7 @@ StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitLlvmIntrinsicMathCall(
 }
 
 StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitMathCall(
-    const string& callee_name, absl::Span<llvm::Value* const> operands,
+    const std::string& callee_name, absl::Span<llvm::Value* const> operands,
     absl::Span<const PrimitiveType> input_types, PrimitiveType output_type,
     absl::string_view name) {
   // Binary math functions transform are of type [T] -> T.
@@ -155,9 +154,11 @@ StatusOr<llvm::Value*> GpuElementalIrEmitter::EmitMathCall(
     }
   }
 
-  return EmitDeviceFunctionCall(
-      callee_name, operands, input_types, output_type,
-      {llvm::Attribute::ReadNone, llvm::Attribute::NoUnwind}, b(), name);
+  return EmitDeviceFunctionCall(callee_name, operands, input_types, output_type,
+                                llvm::AttrBuilder(b()->getContext())
+                                    .addMemoryAttr(llvm::MemoryEffects::none())
+                                    .addAttribute(llvm::Attribute::NoUnwind),
+                                b(), name);
 }
 
 llvm_ir::IrArray::Index GpuElementalIrEmitter::GetSourceIndexOfBitcast(

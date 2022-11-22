@@ -17,6 +17,8 @@ limitations under the License.
 // assigned to save devices. Clusters are represented as regions.
 // Note that side-effecting ops are not correctly handled yet.
 
+#include <vector>
+
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -37,22 +39,12 @@ namespace TFDevice {
 
 namespace {
 
-struct ClusterFormationPass
-    : public PassWrapper<ClusterFormationPass, FunctionPass> {
-  void getDependentDialects(DialectRegistry& registry) const override {
-    registry.insert<tf_device::TensorFlowDeviceDialect>();
-  }
+#define GEN_PASS_DEF_CLUSTERFORMATIONPASS
+#include "tensorflow/compiler/mlir/tensorflow/transforms/tf_passes.h.inc"
 
-  void runOnFunction() override;
-  StringRef getArgument() const final {
-    // This is the argument used to refer to the pass in
-    // the textual format (on the commandline for example).
-    return "tf-device-cluster-formation";
-  }
-  StringRef getDescription() const final {
-    // This is a brief description of the pass.
-    return "Form clusters from instructions assigned to same device";
-  }
+struct ClusterFormationPass
+    : public impl::ClusterFormationPassBase<ClusterFormationPass> {
+  void runOnOperation() override;
 };
 
 // Cluster structure captures all the operations that are assigned to same
@@ -111,7 +103,7 @@ bool CanMergeIntoCluster(const Cluster& c, Operation* to_merge) {
 
 void ReplaceLiveOutExternalUses(llvm::ArrayRef<Value> live_outs,
                                 tf_device::LaunchOp launch_op) {
-  Region* launch_op_region = &launch_op.body();
+  Region* launch_op_region = &launch_op.getBody();
   for (const auto& p : llvm::zip(live_outs, launch_op.getResults())) {
     Value from = std::get<0>(p);
     // TODO(jingpu): move this to RegionUtils.h in MLIR core.
@@ -140,6 +132,56 @@ void GetLiveOuts(Region* region, llvm::SmallVectorImpl<Value>* live_outs) {
   }
 }
 
+// Reorder all users of the given op's results to after the op.
+//
+// Since launch ops are inserted after the last op in the region, the region is
+// guaranteed to dominate all live-in values. On the other hand, it is still
+// possible that live-out values don't dominate the region. For example:
+//
+// ```
+// %0 = "tf.OpA"()
+// %1 = "tf.OpB"(%0)
+// %2 = "tf.OpC"(%0)
+// ```
+//
+// Assuming `tf.OpA` and `tf.OpC` are clustered together, the region will be
+// inserted right after `tf.OpC`. The live-out `%0`, however, is used by
+// `tf.OpB`, which won't dominate the region. This function reorders all users
+// of the cluster op to be placed after the cluster op itself so that SSA
+// dominance is preserved after cluster op creation.
+void ReorderOpResultUses(mlir::Operation* cluster) {
+  mlir::Block* const cluster_block = cluster->getBlock();
+  llvm::SetVector<mlir::Operation*> ops_to_reorder;
+
+  llvm::SmallVector<mlir::Value> worklist;
+  llvm::append_range(worklist, cluster->getResults());
+
+  while (!worklist.empty()) {
+    mlir::Value value = worklist.back();
+    worklist.pop_back();
+
+    for (mlir::Operation* const user : value.getUsers()) {
+      mlir::Operation* const op = cluster_block->findAncestorOpInBlock(*user);
+      if (op == nullptr || !op->isBeforeInBlock(cluster)) {
+        continue;
+      }
+
+      if (ops_to_reorder.insert(op)) {
+        llvm::append_range(worklist, op->getResults());
+      }
+    }
+  }
+
+  std::vector<mlir::Operation*> sorted = ops_to_reorder.takeVector();
+  llvm::sort(sorted, [](mlir::Operation* lhs, mlir::Operation* rhs) {
+    return lhs->isBeforeInBlock(rhs);
+  });
+
+  for (mlir::Operation* const op : llvm::reverse(sorted)) {
+    op->moveAfter(cluster);
+  }
+}
+
 // Build a `tf_device.launch` op with a region that contains all the operations
 // in given cluster. Then all ops in cluster are replaced by `tf_device.launch`.
 void BuildLaunchForCluster(const Cluster& c, OpBuilder* builder) {
@@ -155,7 +197,7 @@ void BuildLaunchForCluster(const Cluster& c, OpBuilder* builder) {
   Block* block = &region.front();
   for (Operation* op : c.ops) {
     op->moveBefore(block, block->end());
-    op->removeAttr(builder->getIdentifier("device"));
+    op->removeAttr(builder->getStringAttr("device"));
   }
 
   // Get all escaped live-out values of region, they are used later to determine
@@ -181,11 +223,15 @@ void BuildLaunchForCluster(const Cluster& c, OpBuilder* builder) {
       live_out_types);
 
   // Attach the region to launch_op.
-  launch_op.body().takeBody(region);
+  launch_op.getBody().takeBody(region);
 
   // Replace any external uses of live-out values with return values of launch
   // op. So live-out values no longer escape the region.
   ReplaceLiveOutExternalUses(live_outs, launch_op);
+
+  // Ensure that users of the launch op's results appear after the launch op
+  // in order to preserve the dominance property.
+  ReorderOpResultUses(launch_op);
 }
 
 void BuildClusters(Block* block, OpBuilder builder) {
@@ -230,24 +276,24 @@ void BuildClusters(Block* block, OpBuilder builder) {
     BuildLaunchForCluster(device_cluster.second, &builder);
 }
 
-void ClusterFormationPass::runOnFunction() {
-  OpBuilder builder(getFunction().getContext());
+void ClusterFormationPass::runOnOperation() {
+  auto func = getOperation();
+  if (func.isExternal()) return;
+  OpBuilder builder(func.getContext());
 
   // Operates on individual blocks independently of if they are directly in the
   // function body or if they are nested in individual `tf_executor.island`.
-  for (Block& block : getFunction().getBody()) BuildClusters(&block, builder);
-  getFunction().walk([&](tf_executor::IslandOp island) {
+  for (Block& block : func.getBody()) BuildClusters(&block, builder);
+  func.walk([&](tf_executor::IslandOp island) {
     BuildClusters(&island.GetBody(), builder);
   });
 }
 
 }  // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> CreateClusterFormationPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> CreateClusterFormationPass() {
   return std::make_unique<ClusterFormationPass>();
 }
-
-static PassRegistration<ClusterFormationPass> pass;
 
 }  // namespace TFDevice
 }  // namespace mlir

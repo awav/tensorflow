@@ -9,6 +9,7 @@ load(
 )
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [":friends"],
     licenses = ["notice"],
 )
@@ -38,7 +39,7 @@ cc_library(
         "//tensorflow/core/common_runtime:function",
         "//tensorflow/core/common_runtime:function_body",
         "//tensorflow/core/common_runtime:function_optimization_registry",
-        "//tensorflow/core/common_runtime:lower_functional_ops",
+        "//tensorflow/core/common_runtime:optimization_registry",
         "//tensorflow/core/common_runtime:placer",
         "//tensorflow/core/common_runtime/eager:context",
         "//tensorflow/core/grappler:grappler_item",
@@ -46,14 +47,6 @@ cc_library(
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
     ],
-)
-
-cc_library(
-    name = "c_api_tfrt_distributed_interface",
-    hdrs = [
-        "c_api_tfrt_distributed_interface.h",
-    ],
-    deps = ["//tensorflow/c/eager:immediate_execution_distributed_manager"],
 )
 
 cc_library(
@@ -69,7 +62,6 @@ cc_library(
         "op_cache.h",
     ],
     deps = [
-        ":c_api_tfrt_distributed_interface",
         ":core_runtime",
         ":tfrt_context",
         ":transform_graph_function",
@@ -101,10 +93,10 @@ cc_library(
         "//tensorflow/core/common_runtime/eager:attr_builder",
         "//tensorflow/core/common_runtime/eager:context",
         "//tensorflow/core/runtime_fallback/kernel:kernel_fallback_execute_compat",
-        "//tensorflow/core/runtime_fallback/kernel:op_kernel_runner",
         "//tensorflow/core/runtime_fallback/runtime:op_logger",
         "//tensorflow/core/runtime_fallback/runtime:runtime_fallback_alwayslink",
         "//tensorflow/core/runtime_fallback/conversion:conversion_alwayslink",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
         "//tensorflow/core/tfrt/utils",
         "@tf_runtime//:basic_kernels_alwayslink",
         "@tf_runtime//:bef",
@@ -118,7 +110,6 @@ cc_library(
         "@tf_runtime//:tensor_alwayslink",
         "@tf_runtime//backends/cpu:core_runtime_alwayslink",
         "@tf_runtime//backends/common:eigentype",
-        "@tf_runtime//:distributed_kernels_alwayslink",
         "//tensorflow/compiler/jit:common",
         "//tensorflow/core/tfrt/eager/backends/cpu:cpu_registration_alwayslink",
     ] + if_cuda([
@@ -137,8 +128,10 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":core_runtime",
-        "//tensorflow/core/tfrt/common:global_state",
+        "//tensorflow/core/common_runtime:process_util",
+        "//tensorflow/core/platform:threadpool_interface",
         "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
+        "//tensorflow/core/tfrt/common:global_state",
         "//tensorflow/core/tpu:virtual_device",
         "//tensorflow/c/eager:immediate_execution_context",
         "//tensorflow/core:core_cpu",
@@ -146,6 +139,7 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core/runtime_fallback/runtime:runtime_fallback_alwayslink",
         "//tensorflow/core/runtime_fallback/conversion:conversion_alwayslink",
+        "//tensorflow/core/tfrt/runtime:tf_threadpool_concurrent_work_queue",
         "@tf_runtime//:basic_kernels_alwayslink",
         "@tf_runtime//:core_runtime_alwayslink",
         "@tf_runtime//:hostcontext_alwayslink",
@@ -157,31 +151,6 @@ cc_library(
 )
 
 cc_library(
-    name = "c_api_tfrt_distributed",
-    srcs = [
-        "c_api_tfrt_distributed_impl.cc",
-    ],
-    hdrs = [
-        "c_api_tfrt_distributed_impl.h",
-    ],
-    deps = [
-        ":c_api_tfrt_distributed_interface",
-        "@com_google_absl//absl/synchronization",
-        "//tensorflow/c/eager:immediate_execution_distributed_manager",
-        "//tensorflow/core:core_cpu_base",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core/common_runtime/eager:context",
-        "//tensorflow/core/distributed_runtime:remote_device",
-        # copybara:uncomment "//third_party/tf_runtime_google:grpc_communicator_alwayslink",
-        "@tf_runtime//:cluster_config_cc_proto",
-        "@tf_runtime//:distributed_runtime",
-    ],
-)
-
-cc_library(
     name = "virtual_device",
     hdrs = ["virtual_device.h"],
     # TODO(fishx): Change the whole BUILD file to be gce compatible.
@@ -189,6 +158,24 @@ cc_library(
     deps = [
         "@tf_runtime//:hostcontext",
     ],
+)
+
+# For a more maintainable build this target should not exist and the headers
+# should  be split into the existing cc_library targets, but this change was
+# automatically  done so that we can remove long standing issues and complexity
+# in the build system. It's up to the OWNERS of this package to get rid of it or
+# not. The use of the textual_hdrs attribute is discouraged, use hdrs instead.
+# Here it is used to avoid header parsing errors in packages where the feature
+# parse_headers was enabled since loose headers were not being parsed. See
+# go/loose-lsc-one-target-approach for more details.
+cc_library(
+    name = "loose_headers",
+    compatible_with = ["//buildenv/target:gce"],
+    tags = ["avoid_dep"],
+    textual_hdrs = [
+        "c_api_tfrt.h",
+    ],
+    visibility = ["//tensorflow/c/eager:__pkg__"],
 )
 
 alias(
@@ -221,6 +208,7 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core/lib/llvm_rtti",
         "//tensorflow/core/platform:refcount",
+        "//tensorflow/core/runtime_fallback/kernel:kernel_fallback_execute_compat",
         "@com_google_absl//absl/types:span",
         "@tf_runtime//backends/cpu:tf_ops_alwayslink",
     ],

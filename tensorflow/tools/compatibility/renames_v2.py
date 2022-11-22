@@ -538,8 +538,12 @@ renames = {
         'tf.compat.v1.keras.models.LinearModel',
     'tf.keras.models.WideDeepModel':
         'tf.compat.v1.keras.models.WideDeepModel',
+    'tf.keras.utils.DeterministicRandomTestTool':
+        'tf.compat.v1.keras.utils.DeterministicRandomTestTool',
     'tf.keras.utils.track_tf1_style_variables':
         'tf.compat.v1.keras.utils.track_tf1_style_variables',
+    'tf.keras.utils.get_or_create_layer':
+        'tf.compat.v1.keras.utils.get_or_create_layer',
     'tf.layers.AveragePooling1D':
         'tf.compat.v1.layers.AveragePooling1D',
     'tf.layers.AveragePooling2D':
@@ -770,6 +774,12 @@ renames = {
         'tf.compat.v1.mixed_precision.FixedLossScale',
     'tf.mixed_precision.LossScale':
         'tf.compat.v1.mixed_precision.LossScale',
+    'tf.mixed_precision.experimental.DynamicLossScale':
+        'tf.compat.v1.mixed_precision.experimental.DynamicLossScale',
+    'tf.mixed_precision.experimental.FixedLossScale':
+        'tf.compat.v1.mixed_precision.experimental.FixedLossScale',
+    'tf.mixed_precision.experimental.LossScale':
+        'tf.compat.v1.mixed_precision.experimental.LossScale',
     'tf.metrics.accuracy':
         'tf.compat.v1.metrics.accuracy',
     'tf.metrics.auc':
@@ -1156,6 +1166,8 @@ renames = {
         'tf.math.segment_prod',
     'tf.segment_sum':
         'tf.math.segment_sum',
+    'tf.segment_sum_v2':
+        'tf.math.segment_sum_v2',
     'tf.self_adjoint_eig':
         'tf.linalg.eigh',
     'tf.self_adjoint_eigvals':
@@ -1494,6 +1506,12 @@ renames = {
         'tf.compat.v1.train.create_global_step',
     'tf.train.do_quantize_training_on_graphdef':
         'tf.compat.v1.train.do_quantize_training_on_graphdef',
+    'tf.train.experimental.DynamicLossScale':
+        'tf.compat.v1.train.experimental.DynamicLossScale',
+    'tf.train.experimental.FixedLossScale':
+        'tf.compat.v1.train.experimental.FixedLossScale',
+    'tf.train.experimental.LossScale':
+        'tf.compat.v1.train.experimental.LossScale',
     'tf.train.experimental.MixedPrecisionLossScaleOptimizer':
         'tf.compat.v1.train.experimental.MixedPrecisionLossScaleOptimizer',
     'tf.train.experimental.disable_mixed_precision_graph_rewrite':

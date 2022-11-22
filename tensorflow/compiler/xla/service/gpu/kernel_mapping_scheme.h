@@ -16,47 +16,50 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_GPU_KERNEL_MAPPING_SCHEME_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_GPU_KERNEL_MAPPING_SCHEME_H_
 
+#include <string>
+
 #include "absl/container/inlined_vector.h"
 #include "absl/types/span.h"
 #include "llvm/IR/Value.h"
-#include "tensorflow/compiler/xla/service/hlo_instruction.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/loop_emitter.h"
+#include "tensorflow/compiler/xla/util.h"
 
 namespace xla {
 namespace gpu {
-
-using Vector3 = std::array<int64_t, 3>;
 
 // Describes tiling used by the kernel.
 //
 // Used by reductions and 021 transpose algorithm. Both algorithms operate over
 // "logical" 3D views over input arrays, hence tiling and number of threads
 // information has only 3 dimensions.
+//
+// In the presence of virtual threadIdx/blockIdx scaling, all accessors are
+// "logical", unless otherwise specified.
 class TilingScheme {
  public:
   enum { DimZ = 0, DimY, DimX, DimTot };
+
   enum IndexingOrder {
     // Thread reads consecutive elements.
     LinearIndexingX,
     // Thread reads strided elements while keeping memory coalescing.
     StridedIndexingX,
-    // Thread reads a few consecutive elements then take a strided
-    // step. This can trigger vectorized reads and keep memory
-    // coalescing.
-    StridedLinearIndexingX
   };
 
-  TilingScheme(absl::Span<const int64_t> dims_in_elems,
-               absl::Span<const int64_t> tile_sizes,
-               absl::Span<const int64_t> num_threads,
-               IndexingOrder indexing_order, int vector_size)
-      : dims_in_elems_{dims_in_elems[0], dims_in_elems[1], dims_in_elems[2]},
-        tile_sizes_{tile_sizes[0], tile_sizes[1], tile_sizes[2]},
-        num_threads_{num_threads[0], num_threads[1], num_threads[2]},
+  TilingScheme(Vector3 dims_in_elems, Vector3 tile_sizes, Vector3 num_threads,
+               IndexingOrder indexing_order, int vector_size,
+               int scaling_factor)
+      : dims_in_elems_(dims_in_elems),
+        tile_sizes_(tile_sizes),
+        num_threads_(num_threads),
         indexing_order_(indexing_order),
-        vector_size_(vector_size) {
-    CHECK_EQ(tile_sizes[2] % vector_size_, 0);
+        vector_size_(vector_size),
+        thread_id_virtual_scaling_(scaling_factor) {
+    CHECK_EQ(tile_sizes[2] % vector_size_, 0)
+        << "tile sizes = " << absl::StrJoin(tile_sizes, ", ")
+        << "; vector size = " << vector_size_;
   }
 
   static std::string IndexingOrderToString(IndexingOrder order) {
@@ -65,8 +68,6 @@ class TilingScheme {
         return "linear";
       case StridedIndexingX:
         return "strided";
-      case StridedLinearIndexingX:
-        return "strided-linear";
     }
   }
 
@@ -79,16 +80,14 @@ class TilingScheme {
                          absl::StrJoin(num_threads_, ", ")),
          absl::StrFormat("indexing_order = %s",
                          IndexingOrderToString(indexing_order_)),
-         absl::StrFormat("vector_size = %d", vector_size_)},
+         absl::StrFormat("vector_size = %d", vector_size_),
+         absl::StrFormat("thread_id_virtual_scaling = %d",
+                         thread_id_virtual_scaling_)},
         ", ");
   }
 
   // Number of elements in each dimension (Z/Y/X respectively).
   absl::Span<const int64_t> GetDimsInElems() const { return dims_in_elems_; }
-
-  int64_t GetNumberOfBlocks() const {
-    return GetDimInBlock(0) * GetDimInBlock(1) * GetDimInBlock(2);
-  }
 
   Vector3 GetDimsInBlocks() const {
     return {GetDimInBlock(0), GetDimInBlock(1), GetDimInBlock(2)};
@@ -100,6 +99,8 @@ class TilingScheme {
   }
 
   // Tile size for a given dimensions per thread.
+  //
+  // Equals to the number of iterations in the loop each tile will make.
   int64_t GetTileSizeFor(int d) const { return tile_sizes_.at(d); }
 
   // Tile size for a given dimension per entire thread block.
@@ -110,12 +111,31 @@ class TilingScheme {
   // Number of threads in given dimension.
   int64_t GetNumThreadsFor(int d) const { return num_threads_.at(d); }
 
+  // Number of logical threads per block.
   int64_t GetNumThreadsPerBlock() const {
     return GetNumThreadsFor(0) * GetNumThreadsFor(1) * GetNumThreadsFor(2);
   }
 
+  // Number of logical blocks.
+  int64_t GetNumberOfBlocks() const {
+    return GetDimInBlock(0) * GetDimInBlock(1) * GetDimInBlock(2);
+  }
+
+  // Number of physical blocks launched (with scaling applied).
+  int64_t GetNumberOfBlocksPhysical() const {
+    return CeilOfRatio(GetNumberOfBlocks(), thread_id_virtual_scaling_);
+  }
+
+  // Number of physical threads per block launched (with scaling applied).
+  int64_t GetNumThreadsPerBlockPhysical() const {
+    return GetNumThreadsPerBlock() * thread_id_virtual_scaling_;
+  }
+
   IndexingOrder GetIndexingOrder() const { return indexing_order_; }
   int GetVectorSize() const { return vector_size_; }
+
+  // Scaling factor for transforming physical threadId to logical.
+  int GetThreadIdScalingFactor() const { return thread_id_virtual_scaling_; }
 
  private:
   // The number of elements in each dimension.
@@ -131,6 +151,9 @@ class TilingScheme {
 
   // Vector size for dimension X.
   const int vector_size_;
+
+  // Scaling apply to transform physical threadIdx into logical.
+  const int64_t thread_id_virtual_scaling_ = 1;
 };
 
 class ReductionCodegenInfo {
@@ -150,6 +173,7 @@ class ReductionCodegenInfo {
 
   const TilingScheme& GetTilingScheme() const { return tiling_scheme_; }
 
+  int GetNumPartialResults() const { return num_partial_results_; }
   bool IsRaceFree() const { return is_race_free_; }
 
  private:
@@ -190,16 +214,16 @@ class ReductionCodegenState {
   bool IsRaceFree() const { return reduction_codegen_info_.IsRaceFree(); }
 
   const ReductionCalculationState& GetCalculationStateFor(
-      int output_idx, int operand_idx) const {
-    const ReductionOpState& op_state = state_.at(output_idx);
+      const HloInstruction* instruction, int operand_idx) const {
+    const ReductionOpState& op_state = state_.at(instruction);
     CHECK_LT(operand_idx, op_state.size());
     return op_state[operand_idx];
   }
 
   void SetCalculationStateFor(
-      const ReductionCalculationState& calculation_state, int output_idx,
-      int operand_idx) {
-    ReductionOpState& op_state = state_[output_idx];
+      const ReductionCalculationState& calculation_state,
+      const HloInstruction* instruction, int operand_idx) {
+    ReductionOpState& op_state = state_[instruction];
     CHECK_EQ(operand_idx, op_state.size());
     op_state.push_back(calculation_state);
   }
@@ -210,8 +234,8 @@ class ReductionCodegenState {
   // One state per reduction operand.
   using ReductionOpState = absl::InlinedVector<ReductionCalculationState, 2>;
 
-  // output_index -> operand_idx -> cache
-  absl::flat_hash_map<int, ReductionOpState> state_;
+  // HloInstruction -> operand_idx -> cache
+  absl::flat_hash_map<const HloInstruction*, ReductionOpState> state_;
 };
 
 }  // end namespace gpu

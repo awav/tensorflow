@@ -20,6 +20,7 @@ limitations under the License.
 #include <tuple>
 
 #include "absl/strings/str_join.h"
+#include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {
 namespace tensorrt {
@@ -40,34 +41,43 @@ std::tuple<int, int, int> GetLoadedTensorRTVersion();
 #include "tensorflow/core/platform/status.h"
 #include "third_party/tensorrt/NvInfer.h"
 
+#define ERROR_LOC __FILE__, ":", __LINE__
+
+#define TFTRT_INTERNAL_ERROR_AT_NODE(node)                          \
+  return errors::Internal("TFTRT::", __FUNCTION__, "\n", ERROR_LOC, \
+                          " failed to add TRT layer, at: ", node);
+
+#define TFTRT_RETURN_ERROR_IF_NULLPTR(ptr, node) \
+  if (ptr == nullptr) {                          \
+    TFTRT_INTERNAL_ERROR_AT_NODE(node);          \
+  }
+
 // Use this macro within functions that return a Status or StatusOR<T> to check
 // boolean conditions. If the condition fails, it returns an
 // errors::Internal message with the file and line number.
-#define TRT_ENSURE(x)                                                        \
-  if (!(x)) {                                                                \
-    return errors::Internal(__FILE__, ":", __LINE__, " TRT_ENSURE failure"); \
+#define TRT_ENSURE(x)                                          \
+  if (!(x)) {                                                  \
+    return errors::Internal(ERROR_LOC, " TRT_ENSURE failure"); \
   }
 
 // Checks that a Status or StatusOr<T> object does not carry an error message.
 // If it does have an error, returns an errors::Internal instance
 // containing the error message, along with the file and line number. For
 // pointer-containing StatusOr<T*>, use the below TRT_ENSURE_PTR_OK macro.
-#define TRT_ENSURE_OK(x)                                   \
-  if (!x.ok()) {                                           \
-    return errors::Internal(__FILE__, ":", __LINE__,       \
-                            " TRT_ENSURE_OK failure:\n  ", \
-                            x.status().ToString());        \
+#define TRT_ENSURE_OK(x)                                              \
+  if (!x.ok()) {                                                      \
+    return errors::Internal(ERROR_LOC, " TRT_ENSURE_OK failure:\n  ", \
+                            x.status().ToString());                   \
   }
 
 // Checks that a StatusOr<T* >object does not carry an error, and that the
 // contained T* is non-null. If it does have an error status, returns an
 // errors::Internal instance containing the error message, along with the file
 // and line number.
-#define TRT_ENSURE_PTR_OK(x)                            \
-  TRT_ENSURE_OK(x);                                     \
-  if (*x == nullptr) {                                  \
-    return errors::Internal(__FILE__, ":", __LINE__,    \
-                            " pointer had null value"); \
+#define TRT_ENSURE_PTR_OK(x)                                       \
+  TRT_ENSURE_OK(x);                                                \
+  if (*x == nullptr) {                                             \
+    return errors::Internal(ERROR_LOC, " pointer had null value"); \
   }
 
 namespace tensorflow {
@@ -86,6 +96,26 @@ namespace tensorrt {
 // Initializes the TensorRT plugin registry if this hasn't been done yet.
 void MaybeInitializeTrtPlugins(nvinfer1::ILogger* trt_logger);
 
+class IONamePrefixes {
+ public:
+  static constexpr const char* const kInputPHName = "TensorRTInputPH_";
+  static constexpr const char* const kOutputPHName = "TensorRTOutputPH_";
+};
+
+// Gets the binding index of a tensor in an engine.
+//
+// The binding index is looked up using the tensor's name and the profile index.
+// Profile index should be set to zero, if we do not have optimization profiles.
+Status GetTrtBindingIndex(const char* tensor_name, int profile_index,
+                          const nvinfer1::ICudaEngine* cuda_engine,
+                          int* binding_index);
+
+// Gets the binding index of a tensor in an engine.
+//
+// Same as above, but uses the network input index to identify the tensor.
+Status GetTrtBindingIndex(int network_input_idx, int profile_index,
+                          const nvinfer1::ICudaEngine* cuda_engine,
+                          int* binding_index);
 }  // namespace tensorrt
 }  // namespace tensorflow
 
@@ -97,7 +127,7 @@ inline std::ostream& operator<<(std::ostream& os, const nvinfer1::Dims& v) {
   os << absl::StrJoin(std::vector<int>(v.d, v.d + v.nbDims), ",");
   os << "]";
   return os;
-}  // namespace nvinfer1
+}
 
 // Returns true if any two derived nvinfer1::Dims type structs are equivalent.
 inline bool operator==(const nvinfer1::Dims& lhs, const nvinfer1::Dims& rhs) {
@@ -130,6 +160,13 @@ inline std::ostream& operator<<(std::ostream& os,
   os << "}";
   return os;
 }
+
+// Prints the TensorFormat enum name to the stream.
+std::ostream& operator<<(std::ostream& os,
+                         const nvinfer1::TensorFormat& format);
+
+// Prints the DataType enum name to the stream.
+std::ostream& operator<<(std::ostream& os, const nvinfer1::DataType& data_type);
 
 }  // namespace nvinfer1
 

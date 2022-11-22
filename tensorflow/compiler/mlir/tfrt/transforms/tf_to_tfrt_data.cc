@@ -16,7 +16,7 @@ limitations under the License.
 // This file implements lowering of TF dialect to TFRT data kernels.
 #include "tensorflow/compiler/mlir/tfrt/transforms/tf_to_tfrt_data.h"
 
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/OperationSupport.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
@@ -56,7 +56,7 @@ T ConstAttrToTypeAttr(ElementsAttr value_attr) {
   if (T type_attr = value_attr.dyn_cast<T>()) {
     return type_attr;
   } else if (auto v = value_attr.dyn_cast<SplatElementsAttr>()) {
-    return v.getSplatValue().dyn_cast<T>();
+    return v.getSplatValue<Attribute>().dyn_cast<T>();
   }
   return T(nullptr);
 }
@@ -64,7 +64,7 @@ T ConstAttrToTypeAttr(ElementsAttr value_attr) {
 template <typename T>
 LogicalResult ReplaceConst(TF::ConstOp &op, ConversionPatternRewriter &rewriter,
                            Type type) {
-  IntegerAttr newAttr = ConstAttrToTypeAttr<IntegerAttr>(op.value());
+  IntegerAttr newAttr = ConstAttrToTypeAttr<IntegerAttr>(op.getValue());
 
   if (!newAttr) {
     return failure();
@@ -101,7 +101,7 @@ struct ConstOpConversion : public mlir::OpConversionPattern<TF::ConstOp> {
       : OpConversionPattern<TF::ConstOp>(context) {}
 
   LogicalResult matchAndRewrite(
-      TF::ConstOp op, ArrayRef<Value> operands,
+      TF::ConstOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
     if (isIntScalar(op.getType(), 64)) {
       return ReplaceConst<tfrt::compiler::ConstantI64Op>(op, rewriter,
@@ -116,14 +116,16 @@ struct ConstOpConversion : public mlir::OpConversionPattern<TF::ConstOp> {
   }
 };
 
-struct ReturnOpConversion : public mlir::OpConversionPattern<mlir::ReturnOp> {
+struct ReturnOpConversion
+    : public mlir::OpConversionPattern<mlir::func::ReturnOp> {
   explicit ReturnOpConversion(MLIRContext *context)
-      : OpConversionPattern<mlir::ReturnOp>(context) {}
+      : OpConversionPattern<mlir::func::ReturnOp>(context) {}
 
   LogicalResult matchAndRewrite(
-      mlir::ReturnOp op, ArrayRef<Value> operands,
+      mlir::func::ReturnOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<tfrt::compiler::ReturnOp>(op, operands);
+    rewriter.replaceOpWithNewOp<tfrt::compiler::ReturnOp>(
+        op, adaptor.getOperands());
     return success();
   }
 };
@@ -137,15 +139,16 @@ class RangeDatasetOpConversion
         dataset_type_(CreateDatasetType(&builder_)) {}
 
   LogicalResult matchAndRewrite(
-      TF::RangeDatasetOp op, ArrayRef<Value> operands,
+      TF::RangeDatasetOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
-    if (op.output_types().size() != 1) {
+    if (op.getOutputTypes().size() != 1) {
       // Range dataset should only have one output type.
       return failure();
     }
-    if (auto output_type = op.output_types().begin()->cast<TypeAttr>()) {
+    if (auto output_type = op.getOutputTypes().begin()->cast<TypeAttr>()) {
       rewriter.replaceOpWithNewOp<tfrt::data::RangeDatasetOp>(
-          op, dataset_type_, op.start(), op.stop(), op.step(), output_type);
+          op, dataset_type_, adaptor.getStart(), adaptor.getStop(),
+          adaptor.getStep(), output_type);
       return success();
     }
     return failure();
@@ -165,46 +168,46 @@ class BatchDatasetV2OpConversion
         dataset_type_(CreateDatasetType(&builder_)) {}
 
   LogicalResult matchAndRewrite(
-      TF::BatchDatasetV2Op op, ArrayRef<Value> operands,
+      TF::BatchDatasetV2Op op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
     // Since TFRT's BatchDataset doesn't have a drop_remainder=True option,
     // we only convert this op if its drop_remainder input is statically known
     // to be false.
-    auto drop_remainder_op = op.drop_remainder().getDefiningOp<TF::ConstOp>();
+    auto drop_remainder_op = op.getDropRemainder().getDefiningOp<TF::ConstOp>();
     if (!drop_remainder_op) return failure();
     BoolAttr drop_remainder_val =
-        ConstAttrToTypeAttr<BoolAttr>(drop_remainder_op.value());
+        ConstAttrToTypeAttr<BoolAttr>(drop_remainder_op.getValue());
     if (!drop_remainder_val || drop_remainder_val.getValue()) {
       return failure();
     }
 
     // TODO(b/155892156): Support converting non-unary BatchDataset
-    if (op.output_types().size() != 1) return failure();
+    if (op.getOutputTypes().size() != 1) return failure();
 
     // TODO(b/155892156): Support converting BatchDataset with unknown rank
-    auto output_shape = op.output_shapes()[0].cast<TF::ShapeAttr>();
+    auto output_shape = op.getOutputShapes()[0].cast<TF::ShapeAttr>();
     if (!output_shape.hasRank()) {
       return failure();
     }
 
     if (output_shape.getRank() >= 2) {  // Input is a tensor
       rewriter.replaceOpWithNewOp<tfrt::data::BatchDatasetTensorOp>(
-          op, dataset_type_, op.input_dataset(), op.batch_size(),
+          op, dataset_type_, adaptor.getInputDataset(), adaptor.getBatchSize(),
           /*same_input_metadata=*/rewriter.getBoolAttr(false));
       return success();
     }
 
-    auto output_type = op.output_types()[0].cast<TypeAttr>().getValue();
+    auto output_type = op.getOutputTypes()[0].cast<TypeAttr>().getValue();
 
     if (output_type.isInteger(32)) {
       rewriter.replaceOpWithNewOp<tfrt::data::BatchDatasetI32Op>(
-          op, dataset_type_, op.input_dataset(), op.batch_size(),
+          op, dataset_type_, adaptor.getInputDataset(), adaptor.getBatchSize(),
           /*same_input_metadata=*/rewriter.getBoolAttr(false));
       return success();
     }
     if (output_type.isInteger(64)) {
       rewriter.replaceOpWithNewOp<tfrt::data::BatchDatasetI64Op>(
-          op, dataset_type_, op.input_dataset(), op.batch_size(),
+          op, dataset_type_, adaptor.getInputDataset(), adaptor.getBatchSize(),
           /*same_input_metadata=*/rewriter.getBoolAttr(false));
       return success();
     }
@@ -225,6 +228,10 @@ class BatchDatasetV2OpConversion
 class TFToTFRTDataRewritePass
     : public mlir::PassWrapper<TFToTFRTDataRewritePass,
                                mlir::OperationPass<mlir::ModuleOp>> {
+ public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TFToTFRTDataRewritePass)
+
+ private:
   llvm::StringRef getArgument() const final { return "tf-to-tfrt-data"; }
   llvm::StringRef getDescription() const final {
     return "Convert Tensorflow dialect to TFRT's data dialect.";
@@ -242,13 +249,15 @@ class TFToTFRTDataRewritePass
     target.addIllegalDialect<TF::TensorFlowDialect>();
     target.addLegalDialect<tfrt::data::DataDialect>();
     target.addLegalDialect<tfrt::compiler::TFRTDialect>();
-    target.addDynamicallyLegalOp<mlir::FuncOp>([&data_converter](FuncOp op) {
-      return data_converter.isSignatureLegal(op.getType());
-    });
-    mlir::OwningRewritePatternList patterns(&getContext());
-    patterns.insert<RangeDatasetOpConversion, BatchDatasetV2OpConversion,
-                    ConstOpConversion, ReturnOpConversion>(context);
-    mlir::populateFuncOpTypeConversionPattern(patterns, data_converter);
+    target.addDynamicallyLegalOp<mlir::func::FuncOp>(
+        [&data_converter](func::FuncOp op) {
+          return data_converter.isSignatureLegal(op.getFunctionType());
+        });
+    mlir::RewritePatternSet patterns(&getContext());
+    patterns.add<RangeDatasetOpConversion, BatchDatasetV2OpConversion,
+                 ConstOpConversion, ReturnOpConversion>(context);
+    mlir::populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+        patterns, data_converter);
 
     auto result =
         mlir::applyPartialConversion(module, target, std::move(patterns));
@@ -273,9 +282,9 @@ void CreateTFExecutorToTFRTDataPipeline(mlir::OpPassManager &pm) {
   pm.addPass(CreateTFToTFRTDataConversionPass());
 }
 
-Status TFDataGraphDefToTFDataMLIR(const GraphDef &graph_def,
-                                  mlir::MLIRContext *mlir_ctx,
-                                  mlir::OwningModuleRef *module_ref) {
+Status TFDataGraphDefToTFDataMLIR(
+    const GraphDef &graph_def, mlir::MLIRContext *mlir_ctx,
+    mlir::OwningOpRef<mlir::ModuleOp> *module_ref) {
   // Import to TF dialect
   string output_node;
   for (const auto &node : graph_def.node()) {
@@ -292,7 +301,7 @@ Status TFDataGraphDefToTFDataMLIR(const GraphDef &graph_def,
                                        graph_def, tensorflow::GraphDebugInfo(),
                                        std::move(import_config), mlir_ctx));
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status CompileTFDataMLIRToBEF(mlir::ModuleOp module,
@@ -315,7 +324,7 @@ Status CompileTFDataMLIRToBEF(mlir::ModuleOp module,
     return diag_handler.Combine(
         errors::Internal("failed to convert MLIR to BEF."));
 
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -327,12 +336,12 @@ std::unique_ptr<mlir::Pass> CreateTFToTFRTDataConversionPass() {
 Status TFDataGraphDefToHostBEF(const GraphDef &graph_def,
                                tfrt::BefBuffer *bef) {
   mlir::MLIRContext mlir_ctx;
-  mlir::OwningModuleRef module_ref;
+  mlir::OwningOpRef<mlir::ModuleOp> module_ref;
   TF_RETURN_IF_ERROR(
       TFDataGraphDefToTFDataMLIR(graph_def, &mlir_ctx, &module_ref));
   TF_RETURN_IF_ERROR(CompileTFDataMLIRToBEF(module_ref.get(), bef));
 
-  return Status::OK();
+  return OkStatus();
 }
 
 static mlir::PassRegistration<TFToTFRTDataRewritePass> pass;

@@ -16,13 +16,18 @@
 
 import numpy as np
 
+from tensorflow.python import tf2
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gradient_checker_v2
+from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
 
 
@@ -68,6 +73,19 @@ class StackOpTest(test.TestCase):
             xs = list(map(constant_op.constant, data))
             c = array_ops.parallel_stack(xs)
             self.assertAllEqual(c, data)
+
+  def testParallelConcatShapeZero(self):
+    if not tf2.enabled():
+      self.skipTest("only fails in TF2")
+
+    @def_function.function
+    def f():
+      y = gen_array_ops.parallel_concat(values=[["tf"]], shape=0)
+      return y
+
+    with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                r"0th dimension of value .* is less than"):
+      f()
 
   def testSimpleParallelGPU(self):
     # tf.parallel_stack is only supported in graph mode.
@@ -270,6 +288,30 @@ class StackOpTest(test.TestCase):
             xs = list(map(constant_op.constant, data))
             c = array_ops.stack(xs)
             self.assertAllEqual(self.evaluate(c), data)
+
+  def testZeroDimUnmatch(self):
+    # Test case for GitHub issue 53300.
+    # Error message is `Shapes of all inputs must match` in eager mode,
+    # and `Shapes ...` in graph mode. Below is to capture both:
+    with self.assertRaisesRegex((errors.InvalidArgumentError, ValueError),
+                                r"Shapes"):
+      with self.session():
+        t = [array_ops.zeros([0, 3]), array_ops.zeros([1, 3])]
+        self.evaluate(array_ops.stack(t))
+
+  def testQTypes(self):
+    np.random.seed(7)
+    with self.session(use_gpu=True):
+      shape = [2]
+      for dtype in [
+          dtypes.quint8, dtypes.quint16, dtypes.qint8, dtypes.qint16,
+          dtypes.qint32
+      ]:
+        with self.subTest(shape=shape, dtype=dtype):
+          data = self.randn(shape, dtype.as_numpy_dtype)
+          xs = list(map(constant_op.constant, data))
+          c = math_ops.equal(array_ops.stack(xs), data)
+          self.assertAllEqual(self.evaluate(c), [True, True])
 
 
 class AutomaticStackingTest(test.TestCase):

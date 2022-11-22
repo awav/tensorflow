@@ -21,26 +21,22 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/lib/broadcast.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/hlo/ir/dfs_hlo_visitor_with_default.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_casting_utils.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instructions.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_opcode.h"
 #include "tensorflow/compiler/xla/literal_util.h"
-#include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
-#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
-#include "tensorflow/compiler/xla/service/hlo_computation.h"
-#include "tensorflow/compiler/xla/service/hlo_instruction.h"
-#include "tensorflow/compiler/xla/service/hlo_instructions.h"
-#include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/tsl/platform/logging.h"
 
 namespace xla {
 
-namespace {
-
-using ComputationCache = absl::flat_hash_map<string, HloComputation*>;
-
-StatusOr<HloInstruction*> ExpandBitcastConvert(
-    HloInstruction* instruction, ComputationCache& computation_cache) {
+StatusOr<HloInstruction*> BitcastDtypesExpander::ExpandInstruction(
+    HloInstruction* instruction) {
   HloInstruction* input = instruction->mutable_operand(0);
   const Shape& from_shape = input->shape();
   const Shape& to_shape = instruction->shape();
@@ -63,9 +59,9 @@ StatusOr<HloInstruction*> ExpandBitcastConvert(
 
   // Note: we are duplicating a hack from `cholesky_expander` to build a
   // computation using XlaBuilder.
-  HloModule* module = instruction->parent()->parent();
+  HloModule* module = instruction->GetModule();
   HloComputation*& computation =
-      computation_cache.emplace(name, nullptr).first->second;
+      computation_cache_.emplace(name, nullptr).first->second;
   if (!computation) {
     XlaBuilder b(name);
     XlaOp input = Parameter(&b, 0, instruction->operand(0)->shape(), "a");
@@ -108,7 +104,6 @@ StatusOr<HloInstruction*> ExpandBitcastConvert(
     BitcastConvertType(input, to_shape.element_type());
 
     TF_ASSIGN_OR_RETURN(XlaComputation xla_computation, b.Build());
-
     TF_ASSIGN_OR_RETURN(ProgramShape program_shape,
                         xla_computation.GetProgramShape());
     HloModuleConfig config(program_shape);
@@ -123,28 +118,12 @@ StatusOr<HloInstruction*> ExpandBitcastConvert(
       instruction->shape(), instruction->operands(), computation));
 }
 
-class BitcastDtypesExpanderVisitor : public DfsHloRewriteVisitor {
-  Status HandleBitcastConvert(HloInstruction* bitcast_convert) override {
-    TF_ASSIGN_OR_RETURN(HloInstruction * replacement,
-                        ExpandBitcastConvert(bitcast_convert, cache_));
-    if (replacement == bitcast_convert) {
-      return Status::OK();
-    }
-    changed_ = true;
-    TF_RETURN_IF_ERROR(bitcast_convert->parent()->ReplaceInstruction(
-        bitcast_convert, replacement));
-    return Status::OK();
-  }
-
-  ComputationCache cache_;
-};
-
-}  // end namespace
-
-StatusOr<bool> BitcastDtypesExpander::Run(HloModule* module) {
-  TF_ASSIGN_OR_RETURN(bool changed,
-                      BitcastDtypesExpanderVisitor().RunOnModule(module));
-  return changed;
+bool BitcastDtypesExpander::InstructionMatchesPattern(
+    HloInstruction* instruction) {
+  return instruction->opcode() == HloOpcode::kBitcastConvert &&
+         primitive_util::BitWidth(instruction->shape().element_type()) !=
+             primitive_util::BitWidth(
+                 instruction->operand(0)->shape().element_type());
 }
 
 }  // namespace xla

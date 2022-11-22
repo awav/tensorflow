@@ -22,10 +22,11 @@ import numpy as np
 from tensorflow.python.client import session
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
-from tensorflow.python.eager import function
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import function as framework_function
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_ops
@@ -57,6 +58,8 @@ from tensorflow.python.ops import unconnected_gradients
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
 from tensorflow.python.ops.nn_ops import bias_add
+from tensorflow.python.ops.ragged import ragged_factory_ops
+from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.platform import googletest
 from tensorflow.python.util import nest
 
@@ -255,7 +258,7 @@ class GradientsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     with ops.Graph().as_default():
       x = array_ops.placeholder(dtypes.float32)
       y = array_ops.identity(x)
-      dy = ops.IndexedSlices(
+      dy = indexed_slices.IndexedSlices(
           array_ops.placeholder(dtypes.float32),
           array_ops.placeholder(dtypes.int32))
       dx, = gradients.gradients(y, x, grad_ys=dy)
@@ -580,7 +583,7 @@ class FunctionGradientsTest(test_util.TensorFlowTestCase):
     with ops.Graph().as_default():
       x = constant_op.constant(1.0, name="x")
 
-      @function.defun()
+      @def_function.function
       def Foo():
         y = math_ops.multiply(x, 2.0, name="y")
         g = gradients_impl.gradients(y, x)
@@ -608,7 +611,7 @@ class FunctionGradientsTest(test_util.TensorFlowTestCase):
     with ops.Graph().as_default():
       var = resource_variable_ops.ResourceVariable(1.0, name="var")
 
-      @function.defun()
+      @def_function.function
       def Foo():
         y = math_ops.multiply(var, 2.0, name="y")
         g = gradients_impl.gradients(y, var)
@@ -625,11 +628,11 @@ class FunctionGradientsTest(test_util.TensorFlowTestCase):
       x2 = constant_op.constant(2.0, name="x2")
       x3 = math_ops.multiply(x1, x2, name="x3")
 
-      @function.defun()
+      @def_function.function
       def Outer():
         outer1 = array_ops.identity(x1, name="outer1")
 
-        @function.defun()
+        @def_function.function
         def Inner():
           inner1 = array_ops.identity(outer1, name="inner1")
           inner2 = array_ops.identity(x2, name="inner2")
@@ -650,11 +653,11 @@ class FunctionGradientsTest(test_util.TensorFlowTestCase):
     with ops.Graph().as_default():
       x = constant_op.constant(1.0, name="x")
 
-      @function.defun()
+      @def_function.function
       def Outer():
         y = math_ops.multiply(x, 2.0, name="y")
 
-        @function.defun()
+        @def_function.function
         def Inner():
           z = math_ops.multiply(y, 3.0, name="z")
           g = gradients_impl.gradients(z, y)
@@ -674,7 +677,7 @@ class FunctionGradientsTest(test_util.TensorFlowTestCase):
     with context.eager_mode():
       c = constant_op.constant(2.0, name="c")
 
-      @function.defun
+      @def_function.function
       def Foo():
         x = constant_op.constant(10.0, name="x")
         y = math_ops.multiply(x, c, name="y")
@@ -863,7 +866,7 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
       np_val = np.random.rand(4, 4, 4, 4).astype(np.float32)
       c = constant_op.constant(np_val)
       c_sparse = math_ops._as_indexed_slices(c)
-      c_sparse = ops.IndexedSlices(
+      c_sparse = indexed_slices.IndexedSlices(
           c_sparse.values,
           math_ops.cast(c_sparse.indices, dtypes.int64), c_sparse.dense_shape)
       self.assertAllEqual(np_val.shape, c_sparse.dense_shape)
@@ -878,7 +881,7 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
       self.skipTest("Skipped test for Python 3.5+")
 
     # Smaller than the threshold: no warning.
-    c_sparse = ops.IndexedSlices(
+    c_sparse = indexed_slices.IndexedSlices(
         array_ops.placeholder(dtypes.float32),
         array_ops.placeholder(dtypes.int32), constant([4, 4, 4, 4]))
     with warnings.catch_warnings(record=True) as w:
@@ -886,7 +889,7 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
     self.assertEqual(0, len(w))
 
     # Greater than or equal to the threshold: warning.
-    c_sparse = ops.IndexedSlices(
+    c_sparse = indexed_slices.IndexedSlices(
         array_ops.placeholder(dtypes.float32),
         array_ops.placeholder(dtypes.int32), constant([100, 100, 100, 100]))
     # "always" filter prevents the warning from being suppressed if it was
@@ -900,7 +903,7 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
         str(w[0].message))
 
     # Unknown dense shape: warning.
-    c_sparse = ops.IndexedSlices(
+    c_sparse = indexed_slices.IndexedSlices(
         array_ops.placeholder(dtypes.float32),
         array_ops.placeholder(dtypes.int32),
         array_ops.placeholder(dtypes.int32))
@@ -1122,7 +1125,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
   def testCustomGradientClass(self):
 
-    class Model(object):
+    class Model:
 
       @custom_gradient.custom_gradient
       def Multiply(self, x1, x2):
@@ -1180,6 +1183,93 @@ class CustomGradientTest(test_util.TensorFlowTestCase, parameterized.TestCase):
       self.evaluate(variables.global_variables_initializer())
       dw = self.evaluate(math_ops.reduce_sum(grads[1]))
       self.assertEqual(12., dw)
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name="Eager",
+          decorator=lambda f: f),
+      dict(
+          testcase_name="Function",
+          decorator=def_function.function),
+  ])
+  def testCustomGradientRaggedTensor(self, decorator):
+    with context.eager_mode():
+      @custom_gradient.custom_gradient
+      def F(x):
+        out = x * x
+
+        def Grad(*grad):
+          return 3 * grad[0]
+
+        return out, Grad
+
+      rt = ragged_factory_ops.constant([[1., 2.], [3.]])
+      with backprop.GradientTape() as tape:
+        tape.watch(rt.values)
+        out = decorator(F)(rt)
+        result = tape.gradient(out, rt)
+
+      self.assertIsInstance(out, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(out, [[1., 4.], [9.]])
+      self.assertIsInstance(result, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(result, [[3., 3.], [3.]])
+
+  @parameterized.named_parameters([
+      dict(
+          testcase_name="Eager",
+          decorator=lambda f: f),
+      dict(
+          testcase_name="Function",
+          decorator=def_function.function),
+  ])
+  def testCustomGradientMultipleRaggedTensors(self, decorator):
+    with context.eager_mode():
+      @custom_gradient.custom_gradient
+      def F(x, y):
+        out = (x * x, 2 * y)
+
+        def Grad(*grad):
+          return (3 * grad[0], 4 * grad[1])
+
+        return out, Grad
+
+      rt1 = ragged_factory_ops.constant([[1., 2.], [3.]])
+      rt2 = ragged_factory_ops.constant([[4.], [5., 6.]])
+      with backprop.GradientTape() as tape:
+        tape.watch((rt1, rt2))
+        out1, out2 = decorator(F)(rt1, rt2)
+        grad1, grad2 = tape.gradient((out1, out2), (rt1, rt2))
+
+      self.assertIsInstance(out1, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(out1, [[1., 4.], [9.]])
+      self.assertIsInstance(out2, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(out2, [[8.], [10., 12.]])
+      self.assertIsInstance(grad1, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(grad1, [[3., 3.], [3.]])
+      self.assertIsInstance(grad2, ragged_tensor.RaggedTensor)
+      self.assertAllEqual(grad2, [[4.], [4., 4.]])
+
+  @test_util.enable_quantized_dtypes_training
+  def testCustomGradientQuantizedDtypeTraining(self):
+    with context.eager_mode():
+      @custom_gradient.custom_gradient
+      def F(x):
+        out = x
+
+        def Grad(*grad):
+          return grad
+
+        return out, Grad
+
+      x = constant_op.constant([[1, 2], [3, 4]], dtype=dtypes.qint8)
+      with backprop.GradientTape() as tape:
+        tape.watch(x)
+        out = F(x)
+        result = tape.gradient(out, x)
+
+      self.assertAllEqual(out, [[1, 2], [3, 4]])
+      self.assertAllEqual(result, [[1, 1], [1, 1]])
+      self.assertEqual(result.dtype, dtypes.qint8)
 
   def testCustomGradientWithCapture(self):
     with ops.Graph().as_default():
@@ -1502,6 +1592,14 @@ class VariablesGradientTest(test_util.TensorFlowTestCase,
         f, inputs, delta=delta)
     self.assertAllClose(num_jac, sym_jac_back, rtol=rtol, atol=atol)
 
+  def testRecomputeGradWrapped(self):
+
+    def f(x):  # pylint: disable=invalid-name
+      return 2 * x
+
+    g = custom_gradient.recompute_grad(f)
+    self.assertIs(g.__wrapped__, f)
+
   def testRecomputeGradZeroSizeInput(self):
 
     def F(x):
@@ -1512,7 +1610,8 @@ class VariablesGradientTest(test_util.TensorFlowTestCase,
     grads = self._grad(F)(x)
     self.assertAllClose(grads_re, grads)
 
-    f_graph = function.defun(F, input_signature=[tensor_spec.TensorSpec(None)])
+    f_graph = def_function.function(
+        F, input_signature=[tensor_spec.TensorSpec(None)])
     grads_re = self._grad(custom_gradient.recompute_grad(f_graph))(x)
     grads = self._grad(f_graph)(x)
     self.assertAllClose(grads_re, grads)
@@ -1528,7 +1627,7 @@ class VariablesGradientTest(test_util.TensorFlowTestCase,
     grads = self._grad(F)(x1, x2)
     self.assertAllClose(grads_re, grads)
 
-    f_graph = function.defun(
+    f_graph = def_function.function(
         F,
         input_signature=[
             tensor_spec.TensorSpec(None, dtype=dtypes.int32),

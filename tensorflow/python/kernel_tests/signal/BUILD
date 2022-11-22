@@ -1,7 +1,8 @@
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_test")
 load("//tensorflow:tensorflow.bzl", "py_test")  # @unused
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -26,8 +27,12 @@ cuda_py_test(
     shard_count = 16,
     deps = [
         "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework",
         "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python/eager:def_function",
         "//tensorflow/python/ops/signal",
+        "//tensorflow/python/platform",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
     ],
@@ -43,8 +48,6 @@ cuda_py_test(
         "no_cuda11",  # TODO(b/197522782): reenable test after fixing.
         "optonly",
     ],
-    # TODO(timshen): re-enable after resolving flakiness (b/149426657).
-    xla_enable_strict_auto_jit = False,
     deps = [
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_for_generated_wrappers",
@@ -149,6 +152,7 @@ cuda_py_test(
     python_version = "PY3",
     shard_count = 4,
     tags = [
+        "no_rocm",
         "no_windows_gpu",
     ],
     deps = [

@@ -104,21 +104,21 @@ public interface Tensor {
   int[] shapeSignature();
 
   /**
-   * Returns the (global) index of the tensor within the subgraph of the owning {@link Interpreter}.
+   * Returns the (global) index of the tensor within the subgraph of the owning interpreter.
    *
    * @hide
    */
   int index();
 
   /**
-   * Returns the name of the tensor within the owning {@link Interpreter}.
+   * Returns the name of the tensor within the owning interpreter.
    *
    * @hide
    */
   String name();
 
   /**
-   * Returns the quantization parameters of the tensor within the owning {@link Interpreter}.
+   * Returns the quantization parameters of the tensor within the owning interpreter.
    *
    * <p>Only quantized tensors have valid {@code QuantizationParameters}. For tensor that are not
    * quantized, the values of scale and zero_point are both 0.
@@ -129,15 +129,14 @@ public interface Tensor {
    * Returns a read-only {@code ByteBuffer} view of the tensor data.
    *
    * <p>In general, this method is most useful for obtaining a read-only view of output tensor data,
-   * *after* inference has been executed (e.g., via {@link Interpreter#run(Object,Object)}). In
+   * *after* inference has been executed (e.g., via {@link InterpreterApi#run(Object,Object)}). In
    * particular, some graphs have dynamically shaped outputs, which can make feeding a predefined
-   * output buffer to the {@link Interpreter} awkward. Example usage:
+   * output buffer to the interpreter awkward. Example usage:
    *
-   * <pre>{@code
+   * <pre> {@code
    * interpreter.run(input, null);
    * ByteBuffer outputBuffer = interpreter.getOutputTensor(0).asReadOnlyBuffer();
-   * // Copy or read from outputBuffer.
-   * }</pre>
+   * // Copy or read from outputBuffer.}</pre>
    *
    * <p>WARNING: If the tensor has not yet been allocated, e.g., before inference has been executed,
    * the result is undefined. Note that the underlying tensor pointer may also change when the
@@ -145,11 +144,10 @@ public interface Tensor {
    * it is *not* safe to hold a reference to the returned buffer beyond immediate use directly
    * following inference. Example *bad* usage:
    *
-   * <pre>{@code
+   * <pre> {@code
    * ByteBuffer outputBuffer = interpreter.getOutputTensor(0).asReadOnlyBuffer();
    * interpreter.run(input, null);
-   * // Copy or read from outputBuffer (which may now be invalid).
-   * }</pre>
+   * // Copy or read from outputBuffer (which may now be invalid).}</pre>
    *
    * @throws IllegalArgumentException if the tensor data has not been allocated.
    */

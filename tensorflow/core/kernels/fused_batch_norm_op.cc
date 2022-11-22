@@ -33,11 +33,12 @@ limitations under the License.
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/kernels/cast_op.h"
 #include "tensorflow/core/kernels/fill_functor.h"
 #include "tensorflow/core/kernels/fused_batch_norm_op.h"
 #include "tensorflow/core/kernels/redux_functor.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/util/tensor_format.h"
 
@@ -70,11 +71,11 @@ Status ParseActivationMode(OpKernelConstruction* context,
 
   if (activation_mode_str == "Identity") {
     *activation_mode = FusedBatchNormActivationMode::kIdentity;
-    return Status::OK();
+    return OkStatus();
   }
   if (activation_mode_str == "Relu") {
     *activation_mode = FusedBatchNormActivationMode::kRelu;
-    return Status::OK();
+    return OkStatus();
   }
   return errors::InvalidArgument("Unsupported activation mode: ",
                                  activation_mode_str);
@@ -169,17 +170,11 @@ struct FusedBatchNorm<CPUDevice, T, U, /* is_training= */ true> {
     const int rest_size = size / depth;
     Eigen::DSizes<Eigen::Index, 2> rest_by_depth(rest_size, depth);
 
-#if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::DSizes<Eigen::Index, 2> one_by_depth(1, depth);
-    Eigen::array<int, 1> reduce_dims({0});
-    Eigen::array<int, 2> bcast_spec({rest_size, 1});
-#else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::Index> one_by_depth;
     one_by_depth.set(1, depth);
     Eigen::IndexList<Eigen::type2index<0>> reduce_dims;
     Eigen::IndexList<Eigen::Index, Eigen::type2index<1>> bcast_spec;
     bcast_spec.set(0, rest_size);
-#endif
 
     auto x_rest_by_depth = x.reshape(rest_by_depth).template cast<U>();
     const int rest_size_minus_one = (rest_size > 1) ? (rest_size - 1) : 1;
@@ -317,17 +312,10 @@ struct FusedBatchNorm<CPUDevice, T, U, /* is_training= */ false> {
     const int size = x.size();
     const int rest_size = size / depth;
     Eigen::DSizes<Eigen::Index, 2> rest_by_depth(rest_size, depth);
-
-#if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::DSizes<Eigen::Index, 2> one_by_depth(1, depth);
-    Eigen::array<int, 1> reduce_dims({0});
-    Eigen::array<int, 2> bcast_spec({rest_size, 1});
-#else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::Index> one_by_depth;
     one_by_depth.set(1, depth);
     Eigen::IndexList<Eigen::Index, Eigen::type2index<1>> bcast_spec;
     bcast_spec.set(0, rest_size);
-#endif
 
     auto x_rest_by_depth = x.reshape(rest_by_depth).template cast<U>();
     auto x_centered =
@@ -440,16 +428,10 @@ struct FusedBatchNormGrad<CPUDevice, T, U> {
     const int size = x.size();
     const int rest_size = size / depth;
     Eigen::DSizes<Eigen::Index, 2> rest_by_depth(rest_size, depth);
-
-#if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::DSizes<Eigen::Index, 2> one_by_depth(1, depth);
-    Eigen::array<int, 2> bcast_spec({rest_size, 1});
-#else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::Index> one_by_depth;
     one_by_depth.set(1, depth);
     Eigen::IndexList<Eigen::Index, Eigen::type2index<1>> bcast_spec;
     bcast_spec.set(0, rest_size);
-#endif
 
     auto x_rest_by_depth = x.reshape(rest_by_depth).template cast<U>();
     U rest_size_inv = static_cast<U>(1.0f / static_cast<U>(rest_size));
@@ -593,15 +575,10 @@ struct FusedBatchNormFreezeGrad<CPUDevice, T, U> {
     typename TTypes<U, 2>::Tensor scratch3(scratch3_tensor.tensor<U, 2>());
 
     Eigen::DSizes<Eigen::Index, 2> rest_by_depth(rest_size, depth);
-#if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::DSizes<Eigen::Index, 2> one_by_depth(1, depth);
-    Eigen::array<int, 2> rest_by_one({rest_size, 1});
-#else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::Index> one_by_depth;
     one_by_depth.set(1, depth);
     Eigen::IndexList<Eigen::Index, Eigen::type2index<1>> rest_by_one;
     rest_by_one.set(0, rest_size);
-#endif
 
     // Sum reduction along the 0th dimension using custom CPU functor.
     using ScalarSum = Eigen::internal::scalar_sum_op<U>;
@@ -789,7 +766,7 @@ class CudnnBatchNormAllocatorInOutput : public ScratchAllocator {
 };
 
 template <typename T, typename U, bool is_training>
-struct FusedBatchNorm<GPUDevice, T, U, is_training> {
+struct FusedBatchNormImplGPU {
   void operator()(OpKernelContext* context, const Tensor& x,
                   const Tensor& scale, const Tensor& offset,
                   const Tensor& estimated_mean,
@@ -817,9 +794,10 @@ struct FusedBatchNorm<GPUDevice, T, U, is_training> {
     //   from
     //       FusedBatchNormV3, i.e. use_reserved_space is true.
     const bool fast_nhwc_batch_norm =
-        !is_training ||
-        (BatchnormSpatialPersistentEnabled() &&
-         DataTypeToEnum<T>::value == DT_HALF && use_reserved_space);
+        !is_training || (BatchnormSpatialPersistentEnabled() &&
+                         (DataTypeToEnum<T>::value == DT_HALF ||
+                          DataTypeToEnum<T>::value == DT_BFLOAT16) &&
+                         use_reserved_space);
 #else
     // fast NHWC implementation is a CUDA only feature
     const bool fast_nhwc_batch_norm = false;
@@ -846,7 +824,7 @@ struct FusedBatchNorm<GPUDevice, T, U, is_training> {
         Tensor* dummy_reserve_space = nullptr;
         return context->allocate_output(5, {}, &dummy_reserve_space);
       }
-      return Status::OK();
+      return OkStatus();
     };
 
     // If input is empty, return NaN mean/variance
@@ -1014,8 +992,85 @@ struct FusedBatchNorm<GPUDevice, T, U, is_training> {
   }
 };
 
+template <typename T, typename U, bool is_training>
+struct FusedBatchNorm<GPUDevice, T, U, is_training> {
+  void operator()(OpKernelContext* context, const Tensor& x,
+                  const Tensor& scale, const Tensor& offset,
+                  const Tensor& estimated_mean,
+                  const Tensor& estimated_variance, const Tensor* side_input,
+                  U epsilon, U exponential_avg_factor,
+                  FusedBatchNormActivationMode activation_mode, Tensor* y,
+                  Tensor* batch_mean, Tensor* batch_var, Tensor* saved_mean,
+                  Tensor* saved_inv_var, TensorFormat tensor_format,
+                  bool use_reserved_space) {
+    FusedBatchNormImplGPU<T, U, is_training>()(
+        context, x, scale, offset, estimated_mean, estimated_variance,
+        side_input, epsilon, exponential_avg_factor, activation_mode, y,
+        batch_mean, batch_var, saved_mean, saved_inv_var, tensor_format,
+        use_reserved_space);
+  }
+};
+
+template <bool is_training>
+struct FusedBatchNorm<GPUDevice, Eigen::bfloat16, float, is_training> {
+  void operator()(OpKernelContext* context, const Tensor& x,
+                  const Tensor& scale, const Tensor& offset,
+                  const Tensor& estimated_mean,
+                  const Tensor& estimated_variance, const Tensor* side_input,
+                  float epsilon, float exponential_avg_factor,
+                  FusedBatchNormActivationMode activation_mode, Tensor* y,
+                  Tensor* batch_mean, Tensor* batch_var, Tensor* saved_mean,
+                  Tensor* saved_inv_var, TensorFormat tensor_format,
+                  bool use_reserved_space) {
+    // Performant bfloat16 operations are supported for Ampere+ GPUs. For
+    // pre-Ampere GPUs, we cast inputs to float and outputs back to bfloat16.
+    auto* stream = context->op_device_context()->stream();
+    const bool cast_to_float = !stream->GetCudaComputeCapability().IsAtLeast(
+        se::CudaComputeCapability::AMPERE);
+    if (cast_to_float) {
+      Tensor casted_x = x;
+      Tensor casted_side_input;
+      Tensor casted_y = *y;
+
+      const GPUDevice& device = context->eigen_device<GPUDevice>();
+      functor::CastFunctor<GPUDevice, float, Eigen::bfloat16> cast;
+      OP_REQUIRES_OK(context,
+                     context->allocate_temp(DT_FLOAT, x.shape(), &casted_x));
+      cast(device, casted_x.template flat<float>(),
+           x.template flat<Eigen::bfloat16>());
+      if (side_input != nullptr) {
+        OP_REQUIRES_OK(context,
+                       context->allocate_temp(DT_FLOAT, side_input->shape(),
+                                              &casted_side_input));
+        cast(device, casted_side_input.template flat<float>(),
+             side_input->template flat<Eigen::bfloat16>());
+      }
+      OP_REQUIRES_OK(context,
+                     context->allocate_temp(DT_FLOAT, y->shape(), &casted_y));
+
+      FusedBatchNormImplGPU<float, float, is_training>()(
+          context, casted_x, scale, offset, estimated_mean, estimated_variance,
+          (side_input != nullptr) ? &casted_side_input : nullptr, epsilon,
+          exponential_avg_factor, activation_mode, &casted_y, batch_mean,
+          batch_var, saved_mean, saved_inv_var, tensor_format,
+          use_reserved_space);
+      functor::CastFunctor<GPUDevice, Eigen::bfloat16, float> cast_back;
+      const Tensor& casted_y_const = casted_y;
+      cast_back(device, y->template flat<Eigen::bfloat16>(),
+                casted_y_const.template flat<float>());
+      return;
+    }
+
+    FusedBatchNormImplGPU<Eigen::bfloat16, float, is_training>()(
+        context, x, scale, offset, estimated_mean, estimated_variance,
+        side_input, epsilon, exponential_avg_factor, activation_mode, y,
+        batch_mean, batch_var, saved_mean, saved_inv_var, tensor_format,
+        use_reserved_space);
+  }
+};
+
 template <typename T, typename U>
-struct FusedBatchNormGrad<GPUDevice, T, U> {
+struct FusedBatchNormGradImplGPU {
   void operator()(OpKernelContext* context, const Tensor& y_backprop,
                   const Tensor& x, const Tensor& scale, const Tensor* offset,
                   const Tensor& mean, const Tensor& inv_variance,
@@ -1036,9 +1091,11 @@ struct FusedBatchNormGrad<GPUDevice, T, U> {
     // Check if cuDNN batch normalization has a fast NHWC implementation:
     //   (1) Tensorflow enabled batchnorm spatial persistence, and
     //       FusedBatchNormGradV3 passed non-null reserve space and allocator.
-    const bool fast_nhwc_batch_norm = BatchnormSpatialPersistentEnabled() &&
-                                      DataTypeToEnum<T>::value == DT_HALF &&
-                                      use_reserved_space;
+    const bool fast_nhwc_batch_norm =
+        BatchnormSpatialPersistentEnabled() &&
+        (DataTypeToEnum<T>::value == DT_HALF ||
+         DataTypeToEnum<T>::value == DT_BFLOAT16) &&
+        use_reserved_space;
 #else
     // fast NHWC implementation is a CUDA only feature
     const bool fast_nhwc_batch_norm = false;
@@ -1196,6 +1253,100 @@ struct FusedBatchNormGrad<GPUDevice, T, U> {
   }
 };
 
+template <typename T, typename U>
+struct FusedBatchNormGrad<GPUDevice, T, U> {
+  void operator()(OpKernelContext* context, const Tensor& y_backprop,
+                  const Tensor& x, const Tensor& scale, const Tensor* offset,
+                  const Tensor& mean, const Tensor& inv_variance,
+                  const Tensor* y, U epsilon,
+                  FusedBatchNormActivationMode activation_mode,
+                  Tensor* x_backprop, Tensor* scale_backprop,
+                  Tensor* offset_backprop, Tensor* side_input_backprop,
+                  bool use_reserved_space, TensorFormat tensor_format) {
+    FusedBatchNormGradImplGPU<T, U>()(
+        context, y_backprop, x, scale, offset, mean, inv_variance, y, epsilon,
+        activation_mode, x_backprop, scale_backprop, offset_backprop,
+        side_input_backprop, use_reserved_space, tensor_format);
+  }
+};
+
+template <>
+struct FusedBatchNormGrad<GPUDevice, Eigen::bfloat16, float> {
+  void operator()(OpKernelContext* context, const Tensor& y_backprop,
+                  const Tensor& x, const Tensor& scale, const Tensor* offset,
+                  const Tensor& mean, const Tensor& inv_variance,
+                  const Tensor* y, float epsilon,
+                  FusedBatchNormActivationMode activation_mode,
+                  Tensor* x_backprop, Tensor* scale_backprop,
+                  Tensor* offset_backprop, Tensor* side_input_backprop,
+                  bool use_reserved_space, TensorFormat tensor_format) {
+    // Performant bfloat16 operations are supported for Ampere+ GPUs. For
+    // pre-Ampere GPUs, we cast inputs to float and outputs back to bfloat16.
+    auto* stream = context->op_device_context()->stream();
+    const bool cast_to_float = !stream->GetCudaComputeCapability().IsAtLeast(
+        se::CudaComputeCapability::AMPERE);
+    if (cast_to_float) {
+      Tensor casted_y_backprop = y_backprop;
+      Tensor casted_x = x;
+      Tensor casted_y;
+      Tensor casted_x_backprop = *x_backprop;
+      Tensor casted_side_input_backprop;
+
+      const GPUDevice& device = context->eigen_device<GPUDevice>();
+      functor::CastFunctor<GPUDevice, float, Eigen::bfloat16> cast;
+      OP_REQUIRES_OK(context,
+                     context->allocate_temp(DT_FLOAT, y_backprop.shape(),
+                                            &casted_y_backprop));
+      cast(device, casted_y_backprop.template flat<float>(),
+           y_backprop.template flat<Eigen::bfloat16>());
+      OP_REQUIRES_OK(context,
+                     context->allocate_temp(DT_FLOAT, x.shape(), &casted_x));
+      cast(device, casted_x.template flat<float>(),
+           x.template flat<Eigen::bfloat16>());
+      if (y != nullptr) {
+        OP_REQUIRES_OK(context,
+                       context->allocate_temp(DT_FLOAT, y->shape(), &casted_y));
+        cast(device, casted_y.template flat<float>(),
+             y->template flat<Eigen::bfloat16>());
+      }
+
+      OP_REQUIRES_OK(context,
+                     context->allocate_temp(DT_FLOAT, x_backprop->shape(),
+                                            &casted_x_backprop));
+      if (side_input_backprop != nullptr) {
+        OP_REQUIRES_OK(context, context->allocate_temp(
+                                    DT_FLOAT, side_input_backprop->shape(),
+                                    &casted_side_input_backprop));
+      }
+
+      FusedBatchNormGradImplGPU<float, float>()(
+          context, casted_y_backprop, casted_x, scale, offset, mean,
+          inv_variance, (y != nullptr) ? &casted_y : nullptr, epsilon,
+          activation_mode, &casted_x_backprop, scale_backprop, offset_backprop,
+          (side_input_backprop != nullptr) ? &casted_side_input_backprop
+                                           : nullptr,
+          use_reserved_space, tensor_format);
+
+      functor::CastFunctor<GPUDevice, Eigen::bfloat16, float> cast_back;
+      const Tensor& casted_x_backprop_const = casted_x_backprop;
+      cast_back(device, x_backprop->template flat<Eigen::bfloat16>(),
+                casted_x_backprop_const.template flat<float>());
+      if (side_input_backprop != nullptr) {
+        const Tensor& casted_side_input_backprop_const =
+            casted_side_input_backprop;
+        cast_back(device, side_input_backprop->template flat<Eigen::bfloat16>(),
+                  casted_side_input_backprop_const.template flat<float>());
+      }
+      return;
+    }
+
+    FusedBatchNormGradImplGPU<Eigen::bfloat16, float>()(
+        context, y_backprop, x, scale, offset, mean, inv_variance, y, epsilon,
+        activation_mode, x_backprop, scale_backprop, offset_backprop,
+        side_input_backprop, use_reserved_space, tensor_format);
+  }
+};
+
 // Forward declarations of the functor specializations for GPU.
 #define DECLARE_GPU_SPEC(T, U)                                                 \
   template <>                                                                  \
@@ -1220,6 +1371,7 @@ struct FusedBatchNormGrad<GPUDevice, T, U> {
 
 DECLARE_GPU_SPEC(float, float);
 DECLARE_GPU_SPEC(Eigen::half, float);
+DECLARE_GPU_SPEC(Eigen::bfloat16, float);
 
 #undef DECLARE_GPU_SPEC
 
@@ -1586,12 +1738,14 @@ class FusedBatchNormGradOpBase : public OpKernel {
         context, saved_mean_or_pop_mean.NumElements() == num_channels,
         errors::InvalidArgument("reserve_space_1 must have the same number of "
                                 "elements as the channels of x, got ",
-                                scale.NumElements(), " and ", num_channels));
+                                saved_mean_or_pop_mean.NumElements(), " and ",
+                                num_channels));
     OP_REQUIRES(
         context, saved_maybe_inv_var_or_pop_var.NumElements() == num_channels,
         errors::InvalidArgument("reserve_space_2 must have the same number of "
                                 "elements as the channels of x, got ",
-                                scale.NumElements(), " and ", num_channels));
+                                saved_maybe_inv_var_or_pop_var.NumElements(),
+                                " and ", num_channels));
 
     Tensor* x_backprop = nullptr;
     auto alloc_shape = use_reshape ? dest_shape : x_shape;
@@ -1790,11 +1944,24 @@ REGISTER_KERNEL_BUILDER(Name("FusedBatchNormV2")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormOp<GPUDevice, Eigen::half, float>);
 
+REGISTER_KERNEL_BUILDER(Name("FusedBatchNormV2")
+                            .Device(DEVICE_GPU)
+                            .TypeConstraint<Eigen::bfloat16>("T")
+                            .TypeConstraint<float>("U"),
+                        FusedBatchNormOp<GPUDevice, Eigen::bfloat16, float>);
+
 REGISTER_KERNEL_BUILDER(Name("FusedBatchNormGradV2")
                             .Device(DEVICE_GPU)
                             .TypeConstraint<Eigen::half>("T")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormGradOp<GPUDevice, Eigen::half, float>);
+
+REGISTER_KERNEL_BUILDER(
+    Name("FusedBatchNormGradV2")
+        .Device(DEVICE_GPU)
+        .TypeConstraint<Eigen::bfloat16>("T")
+        .TypeConstraint<float>("U"),
+    FusedBatchNormGradOp<GPUDevice, Eigen::bfloat16, float>);
 
 REGISTER_KERNEL_BUILDER(Name("FusedBatchNormV3")
                             .Device(DEVICE_GPU)
@@ -1826,11 +1993,23 @@ REGISTER_KERNEL_BUILDER(Name("FusedBatchNormV3")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormOpV3<GPUDevice, Eigen::half, float>);
 
+REGISTER_KERNEL_BUILDER(Name("FusedBatchNormV3")
+                            .Device(DEVICE_GPU)
+                            .TypeConstraint<Eigen::bfloat16>("T")
+                            .TypeConstraint<float>("U"),
+                        FusedBatchNormOpV3<GPUDevice, Eigen::bfloat16, float>);
+
 REGISTER_KERNEL_BUILDER(Name("_FusedBatchNormEx")
                             .Device(DEVICE_GPU)
                             .TypeConstraint<Eigen::half>("T")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormOpEx<GPUDevice, Eigen::half, float>);
+
+REGISTER_KERNEL_BUILDER(Name("_FusedBatchNormEx")
+                            .Device(DEVICE_GPU)
+                            .TypeConstraint<Eigen::bfloat16>("T")
+                            .TypeConstraint<float>("U"),
+                        FusedBatchNormOpEx<GPUDevice, Eigen::bfloat16, float>);
 
 REGISTER_KERNEL_BUILDER(Name("FusedBatchNormGradV3")
                             .Device(DEVICE_GPU)
@@ -1838,11 +2017,25 @@ REGISTER_KERNEL_BUILDER(Name("FusedBatchNormGradV3")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormGradOpV3<GPUDevice, Eigen::half, float>);
 
+REGISTER_KERNEL_BUILDER(
+    Name("FusedBatchNormGradV3")
+        .Device(DEVICE_GPU)
+        .TypeConstraint<Eigen::bfloat16>("T")
+        .TypeConstraint<float>("U"),
+    FusedBatchNormGradOpV3<GPUDevice, Eigen::bfloat16, float>);
+
 REGISTER_KERNEL_BUILDER(Name("_FusedBatchNormGradEx")
                             .Device(DEVICE_GPU)
                             .TypeConstraint<Eigen::half>("T")
                             .TypeConstraint<float>("U"),
                         FusedBatchNormGradOpEx<GPUDevice, Eigen::half, float>);
+
+REGISTER_KERNEL_BUILDER(
+    Name("_FusedBatchNormGradEx")
+        .Device(DEVICE_GPU)
+        .TypeConstraint<Eigen::bfloat16>("T")
+        .TypeConstraint<float>("U"),
+    FusedBatchNormGradOpEx<GPUDevice, Eigen::bfloat16, float>);
 
 #endif
 
